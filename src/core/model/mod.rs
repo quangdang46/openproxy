@@ -234,6 +234,22 @@ pub fn parse_model(model_str: &str) -> ParsedModel {
     }
 }
 
+/// 9router's `BUILTIN_MODEL_ALIASES` (open-sse/services/model.js:20-22), applied
+/// after the config-driven map exactly as 9router does.
+///
+/// Without it `grok-build` fell through to prefix inference, which OpenProxy
+/// routes to `xai` — a different provider than the one the alias names.
+fn builtin_model_alias(model: &str) -> Option<ProviderModelRef> {
+    match model {
+        "grok-build" => Some(ProviderModelRef {
+            provider: "gcli".to_string(),
+            model: "grok-build".to_string(),
+            extra: BTreeMap::new(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn resolve_model_alias_from_map(
     alias: &str,
     aliases: &BTreeMap<String, ModelAliasTarget>,
@@ -317,7 +333,9 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
         };
     }
 
-    if let Some(resolved) = resolve_model_alias_from_map(&alias_name, &db.model_aliases) {
+    if let Some(resolved) = resolve_model_alias_from_map(&alias_name, &db.model_aliases)
+        .or_else(|| builtin_model_alias(&alias_name))
+    {
         return ResolvedModel {
             provider: Some(resolved.provider),
             model: resolved.model,
@@ -340,19 +358,35 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
 ///
 /// Known model-family prefix → provider mappings:
 ///
-/// | Prefix(es)                        | Provider      |
-/// |-----------------------------------|---------------|
-/// | `claude-`                         | `anthropic`   |
-/// | `gemini-`                         | `gemini`      |
-/// | `gpt-`, `o1`, `o3`, `o4`         | `openai`      |
-/// | `deepseek-`                       | `openrouter`  |
-/// | `mistral-`, `open-mistral-`, …   | `mistral`     |
-/// | `command-`, `command-r`           | `cohere`      |
-/// | `grok-`                           | `xai`         |
-/// | `jamba-`                          | `ai21`        |
-/// | Everything else (llama, phi, …)   | `openai`      |
+/// | Prefix(es)                        | Provider      | In 9router? |
+/// |-----------------------------------|---------------|-------------|
+/// | `codex-auto-review` (exact)       | `codex`       | yes         |
+/// | `claude-`                         | `anthropic`   | yes         |
+/// | `gemini-`                         | `gemini`      | yes         |
+/// | `gpt-`, `o1`, `o3`, `o4`         | `openai`      | yes         |
+/// | `deepseek-`                       | `openrouter`  | yes         |
+/// | `mistral-`, `open-mistral-`, …   | `mistral`     | no          |
+/// | `command-`, `command-r`           | `cohere`      | no          |
+/// | `grok-`                           | `xai`         | no          |
+/// | `jamba-`                          | `ai21`        | no          |
+/// | Everything else (llama, phi, …)   | `openai`      | yes         |
+///
+/// The four marked "no" are OpenProxy's own: 9router has no rule for those
+/// families, so an unqualified `mistral-large` or `grok-4` would fall to its
+/// `openai` default. Sending them to a provider that actually serves them is
+/// the better behaviour and the divergence is deliberate — removing the rules
+/// would break real routing to fix a difference that only shows up for names no
+/// user sends bare. Product decision, not an oversight; flagged, not settled.
 fn infer_provider_from_model_name(model_name: &str) -> &'static str {
     let model_name = model_name.to_lowercase();
+
+    // Checked before the family prefixes, as in 9router's MODEL_PREFIX_PROVIDERS
+    // (model.js:126-133): the Codex CLI sends this bare virtual model for
+    // auto-review, and it must stay on OAuth Codex rather than falling through
+    // to the openai fallback.
+    if model_name == "codex-auto-review" {
+        return "codex";
+    }
 
     if model_name.starts_with("claude-") {
         "anthropic"
@@ -451,5 +485,51 @@ mod alias_parity_tests {
         let kgw = super::parse_model("kgw/some-model");
         assert_eq!(kgw.provider.as_deref(), Some("kilo-gateway"));
         assert_eq!(kgw.model.as_deref(), Some("some-model"));
+    }
+}
+
+#[cfg(test)]
+mod builtin_alias_parity {
+    use super::*;
+
+    /// openproxy-e43o: 9router declares a built-in alias applied after the
+    /// config map (model.js:20-22, 111-113). Without it `grok-build` fell to
+    /// prefix inference, which OpenProxy routes to xai — a different provider
+    /// from the one the alias names.
+    #[test]
+    fn built_in_grok_build_alias_resolves_to_gcli() {
+        let db = AppDb::default();
+        let resolved = get_model_info("grok-build", &db);
+        assert_eq!(resolved.provider.as_deref(), Some("gcli"));
+        assert_eq!(resolved.model, "grok-build");
+        assert_eq!(resolved.route_kind, ModelRouteKind::Direct);
+    }
+
+    /// The config-driven map still wins over the built-in, as in 9router where
+    /// the user map is tried first.
+    #[test]
+    fn config_alias_still_overrides_the_built_in() {
+        let mut db = AppDb::default();
+        db.model_aliases.insert(
+            "grok-build".to_string(),
+            ModelAliasTarget::Mapping(ProviderModelRef {
+                provider: "my-gw".to_string(),
+                model: "grok-4".to_string(),
+                extra: BTreeMap::new(),
+            }),
+        );
+        let resolved = get_model_info("grok-build", &db);
+        assert_eq!(resolved.provider.as_deref(), Some("my-gw"));
+        assert_eq!(resolved.model, "grok-4");
+    }
+
+    /// 9router checks the Codex auto-review virtual model before the family
+    /// prefixes, specifically so it stays on OAuth Codex instead of falling
+    /// through to the openai default.
+    #[test]
+    fn codex_auto_review_routes_to_codex_not_the_openai_fallback() {
+        let db = AppDb::default();
+        let resolved = get_model_info("codex-auto-review", &db);
+        assert_eq!(resolved.provider.as_deref(), Some("codex"));
     }
 }
