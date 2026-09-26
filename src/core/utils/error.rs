@@ -57,11 +57,17 @@ pub struct UpstreamError {
 
 /// Sanitize a raw upstream/provider error string for client display.
 ///
-/// Goals (9router parity + UX):
-/// - Drop internal prefixes like `Error from provider (Console):`
-/// - Map known upstream phrases to short, actionable English
-/// - Prefer status-based defaults when the body is empty/opaque
-/// - Never return multi-kilobyte HTML/stack dumps to clients
+/// This is hygiene only — 9router has no equivalent, and `buildErrorBody`
+/// (open-sse/utils/error.js:9-22) hands the provider's own text to the client
+/// untouched. Substituting canned prose for a phrase the upstream chose is what
+/// made a 429's organization id, the model that tripped the limit and the
+/// provider's own reset hint disappear, and it broke clients that match on the
+/// upstream string. So the message is cleaned, never rewritten:
+/// - HTML error pages collapse to their `<title>`
+/// - whitespace runs collapse
+/// - internal prefixes like `Error from provider (Console):` are dropped
+/// - status defaults fill in only a genuinely empty/opaque body
+/// - the result is clamped so no multi-KB stack dump reaches a client
 pub fn friendly_error_message(status: u16, raw: &str) -> String {
     let mut msg = raw.trim().to_string();
 
@@ -103,94 +109,18 @@ pub fn friendly_error_message(status: u16, raw: &str) -> String {
         }
     }
 
-    // Strip leading "[code]: " wrappers we or upstream may add.
-    if msg.starts_with('[') {
-        if let Some(end) = msg.find(']') {
-            let after = msg[end + 1..].trim().trim_start_matches(':').trim();
-            if !after.is_empty() {
-                msg = after.to_string();
-            }
-        }
-    }
+    // A leading "[…]" is left alone. 9router composes two bracketed shapes and
+    // passes both through verbatim: `formatProviderError`'s `[<code>]: <msg>`
+    // (error.js:139-147) and the all-accounts-cooling-down body
+    // `[<provider>/<model>] <lastError> (reset after 4m 12s)`
+    // (handlers/chat.js:239-242). Stripping either one deletes the detail the
+    // client needs to act on it.
 
     let lower = msg.to_ascii_lowercase();
 
-    // Known phrase → friendly copy (order matters: more specific first).
-    // Order matters: model/quota phrases before auth catch-alls (free proxies
-    // often return 401 for "model not supported").
-    let mapped = if lower.contains("account balance is insufficient")
-        || lower.contains("insufficient balance")
-        || lower.contains("insufficient credits")
-        || lower.contains("insufficient_quota")
-        || lower.contains("you exceeded your current quota")
-        || lower.contains("quota exceeded")
-    {
-        Some("You exceeded your current quota or balance on this provider. Check billing or switch accounts.".to_string())
-    } else if lower.contains("rate limit")
-        || lower.contains("too many requests")
-        || lower.contains("rate_limit")
-    {
-        Some(
-            "Rate limit exceeded. Wait a moment and try again, or use another account.".to_string(),
-        )
-    } else if lower.contains("not supported")
-        || lower.contains("model_not_supported")
-        || lower.contains("does not support")
-    {
-        // Preserve "Model <id> is not supported" when present.
-        if lower.starts_with("model ") {
-            Some(msg.clone())
-        } else {
-            Some("This model is not supported by the provider.".to_string())
-        }
-    } else if lower.contains("model not found")
-        || lower.contains("does not exist")
-        || lower.contains("model_not_found")
-    {
-        Some("Model not found. Check the model id or enable it on the provider.".to_string())
-    } else if lower.contains("upstream request failed")
-        || lower == "bad gateway"
-        || lower.contains("bad gateway")
-        || lower.contains("connection reset")
-        || lower.contains("connection refused")
-        || lower.contains("error connecting")
-    {
-        Some(
-            "Upstream provider request failed. The free-tier endpoint may be down or temporarily unavailable — retry or switch models."
-                .to_string(),
-        )
-    } else if lower.contains("invalid api key")
-        || lower.contains("invalid_api_key")
-        || lower.contains("incorrect api key")
-        || lower.contains("unauthorized")
-    {
-        Some("Invalid API key or credentials. Reconnect the provider with a valid key.".to_string())
-    } else if lower.contains("payment required") || lower.contains("billing") {
-        Some(
-            "Payment required on this provider. Top up the account or use another provider."
-                .to_string(),
-        )
-    } else if lower.contains("overloaded") || lower.contains("capacity") {
-        Some("Provider is overloaded. Retry shortly or fall back to another model.".to_string())
-    } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline")
-    {
-        Some("Provider timed out. Retry with a shorter prompt or another model.".to_string())
-    } else {
-        None
-    };
-
-    if let Some(m) = mapped {
-        return m;
-    }
-
-    // Empty / opaque → status default.
-    if msg.is_empty()
-        || msg == "{}"
-        || msg == "null"
-        || lower == "error"
-        || lower == "failed"
-        || lower == "upstream request failed"
-    {
+    // Empty / opaque → status default. Only a body that says nothing at all
+    // falls back; a body that says "Upstream request failed" has said enough.
+    if msg.is_empty() || msg == "{}" || msg == "null" || lower == "error" || lower == "failed" {
         return default_error_message(status)
             .map(str::to_string)
             .unwrap_or_else(|| format!("Provider error ({status})"));
@@ -419,15 +349,49 @@ mod tests {
         );
     }
 
+    /// 9router hands the provider's own text to the client
+    /// (open-sse/utils/error.js:9-22). The org id and the limit that tripped
+    /// are the only thing that tells an operator which account is throttled.
     #[test]
-    fn friendly_maps_insufficient_balance() {
-        let msg = friendly_error_message(403, "Sorry, your account balance is insufficient");
-        assert!(
-            msg.to_ascii_lowercase().contains("quota")
-                || msg.to_ascii_lowercase().contains("balance"),
-            "got: {msg}"
+    fn upstream_rate_limit_text_survives_verbatim() {
+        let raw = "Rate limit reached for gpt-4 in organization org-abc on tokens per min";
+        assert_eq!(friendly_error_message(429, raw), raw);
+    }
+
+    #[test]
+    fn upstream_quota_text_survives_verbatim() {
+        let raw = "You exceeded your current quota, please check your plan and billing details";
+        assert_eq!(friendly_error_message(403, raw), raw);
+    }
+
+    #[test]
+    fn upstream_invalid_key_text_survives_verbatim() {
+        let raw = "Invalid API key provided: sk-live-****. You can find your API key at …";
+        assert_eq!(friendly_error_message(401, raw), raw);
+    }
+
+    /// Both bracketed shapes 9router composes are part of the message the
+    /// client is meant to read: `formatProviderError`'s status tag
+    /// (error.js:139-147) and the cooling-down body (chat.js:239-242).
+    #[test]
+    fn bracketed_shapes_survive_the_sanitizer() {
+        let cooling = "[kilocode/kimi-k2] Rate limit reached for gpt-4 (reset after 4m 12s)";
+        assert_eq!(friendly_error_message(503, cooling), cooling);
+        let tagged = "[502]: no upstream configured for provider xai";
+        assert_eq!(friendly_error_message(502, tagged), tagged);
+    }
+
+    /// A body that says nothing gets the status default; one that says
+    /// "Upstream request failed" has said enough and must not be flattened
+    /// into a bare "Bad request".
+    #[test]
+    fn only_a_silent_body_falls_back_to_the_status_default() {
+        assert_eq!(friendly_error_message(400, "{}"), "Bad request");
+        assert_eq!(friendly_error_message(429, "error"), "Rate limit exceeded");
+        assert_eq!(
+            friendly_error_message(400, "Upstream request failed"),
+            "Upstream request failed"
         );
-        assert!(!msg.starts_with("Sorry"), "got: {msg}");
     }
 
     #[test]
@@ -441,21 +405,6 @@ mod tests {
             infer_status_from_message(401, &msg),
             406,
             "model-not-supported should map to 406, got status inference for: {msg}"
-        );
-    }
-
-    #[test]
-    fn friendly_maps_rate_limit() {
-        let msg = friendly_error_message(429, "Rate limit exceeded for model");
-        assert!(msg.to_ascii_lowercase().contains("rate limit"));
-    }
-
-    #[test]
-    fn friendly_maps_invalid_key() {
-        let msg = friendly_error_message(401, "Invalid API key provided by client");
-        assert!(
-            msg.to_ascii_lowercase().contains("api key")
-                || msg.to_ascii_lowercase().contains("credentials")
         );
     }
 
