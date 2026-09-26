@@ -1774,6 +1774,10 @@ async fn forward_with_provider_fallback(
             //   * nothing excluded → no account was ever attempted, so the
             //     provider has no usable credential at all → 404
             //   * otherwise the accounts were tried and ran out → 503
+            // The 503 body is deliberately not 9router's `[provider/model]
+            // <lastError> (reset after 4m 12s)` (chat.js:238-242):
+            // friendly_error_message replaces that whole message with canned
+            // English and strips the `[…]` prefix before the client sees it.
             if retry_after.is_some() {
                 return Err(ComboAttemptError {
                     status: 503,
@@ -1858,15 +1862,16 @@ async fn forward_with_provider_fallback(
             AntigravityExecutionRequest, AntigravityExecutor, AzureExecutionRequest, AzureExecutor,
             CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest, CommandCodeExecutor,
             CursorExecutionRequest, CursorExecutor, DefaultExecutor, DevinCliExecutor,
-            DevinExecutionRequest, ExecutionRequest, GeminiCliExecutionRequest, GeminiCliExecutor,
-            GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest, GrokWebExecutor,
-            IFlowExecutionRequest, IFlowExecutor, KimchiExecutor, KiroExecutionRequest,
-            KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest, OpenCodeExecutor,
-            OpenCodeGoExecutionRequest, OpenCodeGoExecutor, PerplexityWebExecutionRequest,
-            PerplexityWebExecutor, ProviderExecutionRequest, ProviderExecutor,
-            QoderExecutionRequest, QoderExecutor, QwenExecutionRequest, QwenExecutor,
-            TraeExecutionRequest, TraeExecutor, VertexExecutionRequest, VertexExecutor,
-            WindsurfExecutionRequest, WindsurfExecutor, XaiExecutionRequest, XaiExecutor,
+            DevinExecutionRequest, ExecutionRequest, ExecutorError, GeminiCliExecutionRequest,
+            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest,
+            GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor, KimchiExecutor,
+            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
+            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
+            PerplexityWebExecutionRequest, PerplexityWebExecutor, ProviderExecutionRequest,
+            ProviderExecutor, QoderExecutionRequest, QoderExecutor, QwenExecutionRequest,
+            QwenExecutor, TraeExecutionRequest, TraeExecutor, VertexExecutionRequest,
+            VertexExecutor, WindsurfExecutionRequest, WindsurfExecutor, XaiExecutionRequest,
+            XaiExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -2711,11 +2716,26 @@ async fn forward_with_provider_fallback(
                     state.client_pool.clone(),
                     provider_node,
                 )
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Default executor creation failed: {:?}", e),
-                    retry_after: None,
-                    upstream_body: None,
+                .map_err(|error| match error {
+                    // 9router executors/index.js:67-71 never fails to hand back
+                    // an executor: a provider it has no config for still builds
+                    // a DefaultExecutor and fails later at the fetch, which is
+                    // the 502 path (chatCore.js:398-402).
+                    ExecutorError::UnsupportedProvider(name) => ComboAttemptError {
+                        status: 502,
+                        message: format!("[502]: no upstream configured for provider {name}"),
+                        retry_after: None,
+                        upstream_body: None,
+                    },
+                    // Unreachable today — `DefaultExecutor::new` returns nothing
+                    // but the variant above. A 500 still reads as a server
+                    // fault, so it keeps that status.
+                    other => ComboAttemptError {
+                        status: 500,
+                        message: format!("Default executor creation failed: {other:?}"),
+                        retry_after: None,
+                        upstream_body: None,
+                    },
                 })?;
                 let result = executor
                     .execute(ExecutionRequest {
@@ -5671,11 +5691,11 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
         return response;
     }
 
-    // Prefer a status that matches the error text when upstream lied about the code
-    // (e.g. free-console proxies returning 401 for "model not supported").
-    let status_code =
-        crate::core::utils::error::infer_status_from_message(error.status, &error.message);
-    let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY);
+    // 9router hands the status it was given straight to errorResponse
+    // (open-sse/utils/error.js:27-35) — it never re-derives one from the
+    // message text, and neither do we. Re-deriving is what turned a
+    // handler-written 400 into 406/403 over its own prose.
+    let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let friendly =
         crate::core::utils::error::friendly_error_message(status.as_u16(), &error.message);
     let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
@@ -5692,9 +5712,6 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    let status_code =
-        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
-    let status = StatusCode::from_u16(status_code).unwrap_or(status);
     let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
     let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
     with_cors_response((status, Json(body)).into_response())
@@ -6545,6 +6562,46 @@ mod tests {
         };
         let resp2 = attempt_error_response(err2);
         assert_eq!(resp2.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    // 9router error.js:27-35 hands the status it was given to the response
+    // untouched. Re-deriving one from the message text turned a handler's own
+    // 400 into a 406 because the prose mentioned an unsupported model.
+    #[test]
+    fn attempt_error_response_does_not_reinfer_the_status_from_the_message() {
+        use super::attempt_error_response;
+        use crate::core::combo::ComboAttemptError;
+
+        let resp = attempt_error_response(ComboAttemptError {
+            status: 400,
+            message: "That adapter is not supported by this endpoint".to_string(),
+            retry_after: None,
+            upstream_body: None,
+        });
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn json_error_response_does_not_reinfer_the_status_from_the_message() {
+        use super::json_error_response;
+
+        assert_eq!(
+            json_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                "Request body failed validation"
+            )
+            .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            json_error_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Every account is rate limited right now"
+            )
+            .status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "a 503 must not be demoted to a 429 by its own prose"
+        );
     }
 
     #[tokio::test]

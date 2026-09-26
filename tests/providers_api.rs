@@ -785,9 +785,13 @@ async fn provider_test_models_route_fetches_live_compatible_models_and_warms_fir
     // per-model instead of failing the whole probe.
     assert_eq!(json["results"][1]["ok"], false);
     let err = json["results"][1]["error"].as_str().unwrap_or_default();
+    // ping.js:131-133 builds `HTTP <status>: <error.message>`. The status is
+    // the one the probe got — this mock says 400 and the wording is not
+    // allowed to promote it (the old "502" alternative covered exactly that
+    // re-derivation, which openproxy-mv0w.3 finding 6 removed).
     assert!(
-        err.contains("502") || err.contains("unsupported for chat"),
-        "error should surface: {json}"
+        err.starts_with("HTTP 400: ") && err.contains("unsupported for chat"),
+        "error should surface the upstream status and the provider's message: {json}"
     );
     assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
     assert!(json["results"][1]["latencyMs"].as_u64().unwrap_or_default() >= 150);
