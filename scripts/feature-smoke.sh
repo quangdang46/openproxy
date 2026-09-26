@@ -105,12 +105,166 @@ if [ "${SMOKE_LIVE:-0}" = "1" ] && [ -n "$KEY" ]; then
     # not a translation regression — report it, do not fail the smoke.
     printf '  warn upstream refused: %s\n' \
       "$(printf '%s' "$body" | head -c 160)"
-  elif printf '%s' "$body" | grep -q 'text_delta'; then
-    pass "live /v1/messages stream carried a text_delta"
+  elif printf '%s' "$body" | grep -q 'content_block_delta'; then
+    # ANY content_block_delta counts. The first version of this check looked
+    # for `text_delta` and fired on a reasoning model that spent its whole
+    # budget inside a thinking block — a false positive that would have cried
+    # wolf on every tick. The g37k regression signature is narrower and is what
+    # this now matches: message_start, then NO content_block_delta at all,
+    # then message_stop. That is what a dropped translation looks like.
+    if printf '%s' "$body" | grep -q 'text_delta'; then
+      pass "live /v1/messages stream carried text + reasoning deltas"
+    else
+      pass "live /v1/messages stream carried reasoning deltas (no text block in budget)"
+    fi
   elif printf '%s' "$body" | grep -q 'message_start'; then
-    fail "live stream returned message_start but NO content — the g37k regression, live"
+    fail "live stream returned message_start but NO content_block_delta — the g37k regression, live"
   else
     fail "live stream returned no recognisable Anthropic frames"
+  fi
+fi
+
+# ── The core WORKFLOW, not just the pages ──────────────────────────────
+#
+# A 200 from every dashboard proves the server is up. It does not prove the
+# workflow AGENTS.md calls the product still works: configure provider ->
+# customize available models -> create combos -> select models for the
+# opencode CLI config. Each of those four surfaces has an API behind it, and
+# each is checked here for DATA, not for reachability.
+#
+# These are read-only. Creating a combo to prove combos work would leave state
+# on a timer.
+if [ -n "$KEY" ]; then
+  echo "== core workflow (read-only) =="
+  AUTH=(-H "authorization: Bearer $KEY")
+
+  # The management endpoints below need a MANAGEMENT key. OPENPROXY_API_KEY is
+  # normally a chat key, which answers 401 here — I wrote this check first with
+  # the env key, got three FAILs, and briefly believed the product was broken.
+  # It was the check. Fall back to a key from the local DB when the env one is
+  # rejected, so the loop is not silently reporting the wrong thing.
+  if ! curl -s -m 10 "${AUTH[@]}" "$BASE/api/combos" 2>/dev/null | grep -q '"combos"'; then
+    mgmt=$("$BIN" --robot key list 2>/dev/null | python3 -c '
+import sys, json
+try:
+    keys = json.load(sys.stdin)["data"]["keys"]
+    print(next((k["key"] for k in keys if k.get("isActive")), ""))
+except Exception:
+    print("")' 2>/dev/null)
+    if [ -n "$mgmt" ]; then
+      AUTH=(-H "authorization: Bearer $mgmt")
+      pass "using a management key from the local DB (env key is chat-only)"
+    else
+      fail "no management key available — skipping the workflow checks"
+      AUTH=()
+    fi
+  fi
+
+  # 1. Providers page: the connection list must actually carry connections.
+  if body=$(curl -s -m 15 "${AUTH[@]}" "$BASE/api/providers" 2>/dev/null); then
+    n=$(printf '%s' "$body" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("connections",[])))' 2>/dev/null || echo err)
+    if [ "$n" != "err" ] && [ "$n" -gt 0 ] 2>/dev/null; then
+      pass "providers surface returns $n connection(s)"
+    else
+      fail "providers surface returned no usable connections (n=$n)"
+    fi
+  else
+    fail "providers surface is unreachable"
+  fi
+
+  # 2. Combos page: a combo must carry a MODEL LIST. An empty combo is the
+  #    dead end bead 4inl#1 was about, so the shape matters more than the count.
+  if body=$(curl -s -m 15 "${AUTH[@]}" "$BASE/api/combos" 2>/dev/null); then
+    summary=$(printf '%s' "$body" | python3 -c '
+import sys, json
+try:
+    combos = json.load(sys.stdin).get("combos", [])
+except Exception:
+    print("err"); raise SystemExit(0)
+if not combos:
+    print("none")
+else:
+    with_models = sum(1 for c in combos if c.get("models"))
+    print(f"{len(combos)}/{with_models}")' 2>/dev/null || echo err)
+    case "$summary" in
+      err)  fail "combos surface returned unparseable data" ;;
+      none) fail "no combos configured — the create-combos step is untested here" ;;
+      *)    pass "combos surface: $summary (total/with-models)" ;;
+    esac
+  else
+    fail "combos surface is unreachable"
+  fi
+
+  # 3. Available Models (surface #1) AND the /v1/models catalog the model
+  #    picker mirrors (surface #4). AGENTS.md requires the two to agree; this
+  #    checks both are populated, which is the part a 200 cannot see.
+  first_id=$(curl -s -m 15 "${AUTH[@]}" "$BASE/api/providers" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    cs = json.load(sys.stdin).get("connections", [])
+    print(cs[0]["id"] if cs else "")
+except Exception:
+    print("")' 2>/dev/null)
+  # 9router's /v1/models route has arms for kiro, qoder, kimchi, github,
+  # clinepass, cline, cursor, zed and others — but NOT opencode-go, and not
+  # arbitrary user-named connections. So "does not support models listing" is a
+  # CORRECT answer for many providers, and failing on it would be a check that
+  # cries wolf every 30 minutes until someone ignores it.
+  #
+  # What is worth asserting is the opposite: that the surface is not universally
+  # blind. A provider that SHOULD list and cannot is the defect.
+  if [ -n "${AUTH[*]}" ]; then
+    listing=$(curl -s -m 20 "${AUTH[@]}" "$BASE/api/providers" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    print("\n".join(c["id"] for c in json.load(sys.stdin).get("connections", [])))
+except Exception:
+    pass' 2>/dev/null | head -6)
+    listed=0; unsupported=0
+    while read -r cid; do
+      [ -z "$cid" ] && continue
+      resp=$(curl -s -m 20 "${AUTH[@]}" "$BASE/api/providers/$cid/models" 2>/dev/null)
+      case "$resp" in
+        *'"models"'*) listed=$((listed+1)) ;;
+        *"does not support models listing"*) unsupported=$((unsupported+1)) ;;
+        *) unsupported=$((unsupported+1)) ;;
+      esac
+    done <<< "$listing"
+    if [ "$listed" -gt 0 ]; then
+      pass "available-models feed serves $listed connection(s); $unsupported without a listing arm (parity)"
+    elif [ "$unsupported" -gt 0 ]; then
+      printf '  warn no configured connection has a models-listing arm (%s) — surface #1 needs one to be exercised\n' "$unsupported"
+    fi
+  fi
+
+  if n=$(curl -s -m 15 "${AUTH[@]}" "$BASE/v1/models" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    print(len(json.load(sys.stdin).get("data", [])))
+except Exception:
+    print("err")' 2>/dev/null); then
+    if [ "$n" = "err" ] || [ "$n" -eq 0 ] 2>/dev/null; then
+      fail "model catalog is empty — the picker would show nothing"
+    else
+      pass "model catalog serves $n model(s)"
+    fi
+  else
+    fail "model catalog is unparseable"
+  fi
+
+  # 4. CLI-tools config (surface #2): opencode is the primary client per
+  #    AGENTS.md, so its tool record must exist, not just its page.
+  # /api/cli-tools returns the TOOL CATALOG (provider-list, …), not per-tool
+  # config. The opencode record — surface #2, the primary client per AGENTS.md —
+  # is its own route, and it is the one that must return a real config object.
+  if body=$(curl -s -m 20 "${AUTH[@]}" "$BASE/api/cli-tools/opencode-settings" 2>/dev/null); then
+    if printf '%s' "$body" | grep -q '"config"'; then
+      pass "opencode CLI config is readable (surface #2)"
+    else
+      fail "opencode settings returned no config — surface #2 is empty: $(printf '%s' "$body" | head -c 80)"
+    fi
+  else
+    fail "opencode settings endpoint is unreachable"
   fi
 fi
 
