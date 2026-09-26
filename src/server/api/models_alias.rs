@@ -121,6 +121,24 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 }
                 serde_json::json!({ "vision": vision, "reasoning": reasoning })
             };
+            // 9router api/models/route.js:30-36 feeds the dashboard a
+            // FIVE-key caps object from the capability table
+            // (getCapabilitiesForModel), not the name heuristic. The heuristic
+            // was the only source here, so the feed could never carry `search`,
+            // `contextWindow` or `maxOutput` — every capability badge downstream
+            // of this endpoint was starved of three of its five inputs.
+            //
+            // The table lives in core::combo::capabilities and was already
+            // ported; this simply stopped using it.
+            let c = crate::core::combo::capabilities::get_capabilities_for_model(
+                &provider_alias,
+                &model.id,
+            );
+            let caps = caps_json(&c);
+            // The provider-prefixed id the router actually dispatches on.
+            // 9router emits it (route.js:32) and openproxy did not, so a client
+            // could not tell which id to send back.
+            let routed_model = format!("{provider_alias}/{}", model.id);
 
             models.push(serde_json::json!({
                 "provider": provider_alias,
@@ -128,6 +146,7 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 "name": model.name,
                 "kind": model.kind,
                 "fullModel": full_model,
+                "routedModel": routed_model,
                 "alias": alias,
                 "caps": caps,
             }));
@@ -159,17 +178,21 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
             .get(&full_model)
             .map(model_alias_path)
             .unwrap_or_else(|| model_id.to_string());
-        let (vision, reasoning) = heuristic_caps(model_id, "");
-        let stored_caps = custom
+        let c =
+            crate::core::combo::capabilities::get_capabilities_for_model(&provider_alias, model_id);
+        let mut caps_map = caps_json(&c);
+        // 9router route.js:56-62: the stored caps override the derived ones,
+        // so an operator can correct a table entry without a code change.
+        if let Some(stored) = custom
             .extra
             .get("caps")
             .and_then(serde_json::Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let mut caps = serde_json::Map::new();
-        caps.insert("vision".to_string(), json!(vision));
-        caps.insert("reasoning".to_string(), json!(reasoning));
-        caps.extend(stored_caps);
+        {
+            if let Some(map) = caps_map.as_object_mut() {
+                map.extend(stored.clone());
+            }
+        }
+        let caps = caps_map;
 
         models.push(serde_json::json!({
             "provider": provider_alias,
@@ -189,6 +212,20 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
 /// `getCapabilitiesForModel` floor, minus the catalog lookups a custom model
 /// cannot satisfy. Catalog rows also feed this from their display name; a
 /// custom row is derived from its id alone, as upstream does.
+/// The five-key caps object the dashboard consumes (9router
+/// api/models/route.js:32-36). Deliberately NOT the full ModelCapabilities:
+/// the wire shape is frozen by the reference, so the three extra fields
+/// (pdf, tools, audio/video) stay internal.
+fn caps_json(c: &crate::core::combo::capabilities::ModelCapabilities) -> serde_json::Value {
+    json!({
+        "vision": c.vision,
+        "search": c.search,
+        "reasoning": c.reasoning,
+        "contextWindow": c.context_window,
+        "maxOutput": c.max_output,
+    })
+}
+
 fn heuristic_caps(id: &str, name: &str) -> (bool, bool) {
     let id = id.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
@@ -427,5 +464,62 @@ fn model_alias_path(target: &ModelAliasTarget) -> String {
         ModelAliasTarget::Mapping(ProviderModelRef {
             provider, model, ..
         }) => format!("{provider}/{model}"),
+    }
+}
+
+#[cfg(test)]
+mod caps_feed_tests {
+    use super::caps_json;
+    use serde_json::json;
+
+    /// THE GAP. This feed could only ever carry `vision` and `reasoning`, from
+    /// a substring heuristic on the model name, so every capability badge
+    /// downstream was starved of `search`, `contextWindow` and `maxOutput` —
+    /// three of the five keys 9router's api/models/route.js:32-36 emits.
+    ///
+    /// The capability table was already ported in core::combo::capabilities;
+    /// this endpoint simply was not reading it.
+    #[test]
+    fn the_caps_feed_carries_all_five_keys() {
+        let c =
+            crate::core::combo::capabilities::get_capabilities_for_model("cc", "claude-opus-4-7");
+        let caps = caps_json(&c);
+        let obj = caps.as_object().expect("object");
+        for key in [
+            "vision",
+            "search",
+            "reasoning",
+            "contextWindow",
+            "maxOutput",
+        ] {
+            assert!(obj.contains_key(key), "caps missing {key}: {caps}");
+        }
+    }
+
+    /// The wire shape is frozen by the reference, so the three extra fields the
+    /// internal struct carries (pdf, tools, audio/video) must NOT leak out.
+    /// Emitting more than 9router does is a divergence of its own.
+    #[test]
+    fn the_wire_shape_carries_no_fields_beyond_the_reference() {
+        let c =
+            crate::core::combo::capabilities::get_capabilities_for_model("cc", "claude-opus-4-7");
+        let caps = caps_json(&c);
+        assert_eq!(
+            caps.as_object().expect("object").len(),
+            5,
+            "9router emits exactly five; extras are a divergence: {caps}"
+        );
+    }
+
+    /// The values must come from the TABLE, not from name matching: a table
+    /// entry with a numeric ceiling is only reachable through the table.
+    #[test]
+    fn the_values_come_from_the_capability_table() {
+        let c =
+            crate::core::combo::capabilities::get_capabilities_for_model("cc", "claude-opus-4-7");
+        assert!(c.context_window > 0, "table must supply a context window");
+        assert!(c.max_output > 0, "table must supply a max output");
+        let caps = caps_json(&c);
+        assert_eq!(caps["contextWindow"], json!(c.context_window));
     }
 }
