@@ -754,15 +754,6 @@ export default function ModelSelectModal({
                         </span>
                       </button>
                     )}
-                    {isMulti && (
-                      <input
-                        type="checkbox"
-                        checked={isMultiSelected}
-                        onChange={() => toggleSelect(model.value)}
-                        className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary shrink-0"
-                        aria-label={`Select ${model.name}`}
-                      />
-                    )}
                     <button
                       type="button"
                       onClick={rowClick}
@@ -780,11 +771,15 @@ export default function ModelSelectModal({
                         }
                       `}
                     >
+                    <span className="flex items-center gap-1">
+                      {isMultiSelected && !isPlaceholder && (
+                        <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
+                      )}
                     {isPlaceholder ? (
-                      <span className="flex items-center gap-1">
+                      <>
                         <span className="material-symbols-outlined text-[11px]">edit</span>
                         {model.name}
-                      </span>
+                      </>
                     ) : model.isCustom ? (
                       <span className="flex items-center gap-1">
                         {model.name}
@@ -797,6 +792,7 @@ export default function ModelSelectModal({
                         <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isMultiSelected || isSingleSelected ? "text-white/80" : undefined} />
                       </span>
                     )}
+                    </span>
                     </button>
                   </div>
                 );
