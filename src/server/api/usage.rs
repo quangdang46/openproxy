@@ -1256,7 +1256,7 @@ struct ChartQuery {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageChartBucket {
-    date: String,
+    label: String,
     tokens: u64,
     cost: f64,
 }
@@ -1270,7 +1270,9 @@ async fn get_usage_chart(
         return response;
     }
 
-    let period = params.period.as_deref().unwrap_or("today");
+    // 9router chart/route.js:9 — an omitted period is a week of daily buckets,
+    // not today's hourly ones.
+    let period = params.period.as_deref().unwrap_or("7d");
     if !matches!(period, "today" | "24h" | "7d" | "30d" | "60d") {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -1281,7 +1283,9 @@ async fn get_usage_chart(
 
     let tracker = UsageTracker::new(state.db.clone());
     let usage_db = tracker.get_usage_db();
-    Json(json!({ "data": build_usage_chart(&usage_db, period) })).into_response()
+    // 9router returns the bucket array itself, not an envelope; the dashboard and
+    // the CLI both read a bare array.
+    Json(build_usage_chart(&usage_db, period)).into_response()
 }
 
 fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> {
@@ -1299,7 +1303,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             .map(|index| {
                 let ts = start + ChronoDuration::hours(index as i64);
                 UsageChartBucket {
-                    date: ts.format("%H:%M").to_string(),
+                    label: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
                 }
@@ -1333,7 +1337,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             .map(|index| {
                 let ts = start + ChronoDuration::hours(index as i64);
                 UsageChartBucket {
-                    date: ts.format("%H:%M").to_string(),
+                    label: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
                 }
@@ -1372,7 +1376,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             let summary = usage_db.daily_summary.get(&date_key);
 
             UsageChartBucket {
-                date: format_daily_chart_label(date),
+                label: format_daily_chart_label(date),
                 tokens: summary
                     .map(|day| day.prompt_tokens + day.completion_tokens)
                     .unwrap_or(0),
@@ -1818,13 +1822,15 @@ mod tests {
     #[test]
     fn test_chart_bucket_serialization() {
         let point = UsageChartBucket {
-            date: "Jan 15".to_string(),
+            label: "Jan 15".to_string(),
             tokens: 7500,
             cost: 1.50,
         };
         let json = serde_json::to_string(&point).unwrap();
-        assert!(json.contains("Jan 15"));
-        assert!(json.contains("7500"));
+        assert_eq!(
+            json, r#"{"label":"Jan 15","tokens":7500,"cost":1.5}"#,
+            "9router's bucket key is `label`; the dashboard's dataKey depends on it"
+        );
     }
 
     #[test]
