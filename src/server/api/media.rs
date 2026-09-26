@@ -429,9 +429,16 @@ pub async fn search(
 pub async fn video_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
+    request: axum::extract::Request,
 ) -> Response {
-    with_cors_response(video_create_handler(state, headers, body, "generations").await)
+    // Shares the raw arm with edits/extensions. This route used to take
+    // `Json<Value>`, so an image-to-video client sending multipart/form-data
+    // was rejected with "Invalid JSON body" before it could reach the provider
+    // — the feature was unreachable, not merely degraded. 9router's
+    // `readForwardableBody` (videoGeneration.js:60-76) branches on CONTENT TYPE
+    // only and never on the action, so all three create routes belong on one
+    // handler; the previous split was the divergence.
+    with_cors_response(video_create_proxy(state, headers, request, "generations").await)
 }
 
 /// POST /v1/videos/edits — async video edit job create (xAI Grok Imagine).
@@ -440,7 +447,7 @@ pub async fn video_edits(
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    with_cors_response(video_edits_extensions_proxy(state, headers, request, "edits").await)
+    with_cors_response(video_create_proxy(state, headers, request, "edits").await)
 }
 
 /// POST /v1/videos/extensions — async video extension job create (xAI Grok Imagine).
@@ -449,14 +456,14 @@ pub async fn video_extensions(
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    with_cors_response(video_edits_extensions_proxy(state, headers, request, "extensions").await)
+    with_cors_response(video_create_proxy(state, headers, request, "extensions").await)
 }
 
 /// Raw-byte passthrough for video edits/extensions (9router
 /// videoGeneration.js:45-61 readForwardableBody): multipart/other content
 /// types are forwarded byte-for-byte (re-encoding FormData would change the
 /// multipart boundary); JSON keeps the model-prefix-strip + rotation path.
-async fn video_edits_extensions_proxy(
+async fn video_create_proxy(
     state: AppState,
     headers: HeaderMap,
     request: axum::extract::Request,

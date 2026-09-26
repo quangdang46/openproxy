@@ -574,3 +574,93 @@ async fn the_unavailable_message_carries_the_recorded_error() {
         "the message must name the provider and route, got: {body}"
     );
 }
+
+/// A multipart body on /v1/videos/generations must not be rejected as invalid
+/// JSON — that is an image-to-video client, and 9router forwards those exact
+/// bytes because re-encoding FormData would change the multipart boundary
+/// (`readForwardableBody`, videoGeneration.js:60-76).
+///
+/// The old route took `Json<Value>`, so axum rejected the body during
+/// extraction and the client got "Invalid JSON body" — the feature was
+/// unreachable rather than degraded. The assertion is therefore about NOT being
+/// rejected: the request gets past the body layer and fails on account
+/// selection instead, which is the next stage down.
+#[tokio::test]
+async fn a_multipart_video_generation_body_is_not_rejected_as_invalid_json() {
+    let state = app_state_with(vec![]).await;
+    let boundary = "----openproxyTestBoundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nxai/grok-imagine-video\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.png\"\r\n\
+         Content-Type: image/png\r\n\r\n\r\n--{boundary}--\r\n"
+    );
+
+    let response = openproxy::build_app(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/videos/generations")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let payload = String::from_utf8_lossy(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+
+    assert!(
+        !payload.contains("Invalid JSON body"),
+        "multipart was rejected by the JSON extractor; the raw arm is not reached: {payload}"
+    );
+    // The body must have reached ACCOUNT SELECTION, not the JSON extractor.
+    // With no connections configured that is a 400 no-credentials, which is
+    // what proves the request got past body handling.
+    assert!(
+        payload.contains("No credentials for provider"),
+        "multipart never reached account selection: {payload}"
+    );
+}
+
+/// The JSON arm of the same route must still work — sharing the handler with
+/// edits/extensions must not have cost the JSON path its body handling.
+///
+/// With no accounts configured this correctly answers 400 "No credentials"
+/// (see `a_video_provider_with_no_account_is_a_plain_400`), so the status is
+/// NOT the assertion. What matters is that the body was parsed and the request
+/// reached account selection, rather than dying in the JSON extractor — which
+/// is the same "Invalid JSON body" string the multipart test forbids.
+#[tokio::test]
+async fn a_json_video_generation_body_still_reaches_account_selection() {
+    let state = app_state_with(vec![]).await;
+    let response = openproxy::build_app(state)
+        .oneshot(video_request("/v1/videos/generations"))
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let payload = String::from_utf8_lossy(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+
+    assert!(
+        !payload.contains("Invalid JSON body"),
+        "valid JSON must parse and reach account selection: {payload}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no accounts configured, so account selection is where it stops: {payload}"
+    );
+}
