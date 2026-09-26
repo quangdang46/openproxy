@@ -22,6 +22,22 @@ use super::provider_models::INTERNAL_MODELS_FETCH_HEADER;
 
 const LLM_KIND: &str = "llm";
 
+/// Router path a model of this kind is served on
+/// (9router `KIND_ENDPOINT`, models/info/route.js:5-14). Unknown kinds report
+/// `null`, which is what `KIND_ENDPOINT[kind] || null` yields in JS.
+fn kind_endpoint(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "llm" | "imageToText" => "/v1/chat/completions",
+        "image" => "/v1/images/generations",
+        "tts" => "/v1/audio/speech",
+        "stt" => "/v1/audio/transcriptions",
+        "embedding" => "/v1/embeddings",
+        "webSearch" => "/v1/search",
+        "webFetch" => "/v1/fetch",
+        _ => return None,
+    })
+}
+
 static UPSTREAM_CONNECTION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[-_][0-9a-f]{8,}$").expect("valid upstream connection regex"));
 
@@ -833,6 +849,14 @@ pub async fn models_info(
         "provider": resolved.provider,
         "model": resolved.model,
         "routeKind": format!("{:?}", resolved.route_kind),
+        // 9router `buildInfo` (models/info/route.js:18-36) always emits
+        // `owned_by` (the catalog alias) and `endpoint` (the per-kind path),
+        // so a client can route and size a request from this response alone.
+        "owned_by": resolved
+            .provider
+            .clone()
+            .and_then(|provider| catalog.static_alias_for_provider(&provider).map(str::to_string))
+            .unwrap_or_default(),
     });
 
     // Merge catalog model fields
@@ -855,10 +879,14 @@ pub async fn models_info(
         if let Some(v) = cm.context_window {
             info["contextWindow"] = json!(v);
         }
+        if let Some(v) = cm.dimensions {
+            info["dimensions"] = json!(v);
+        }
         if let Some(v) = &cm.capabilities {
             info["capabilities"] = json!(v);
         }
         info["kind"] = json!(cm.kind);
+        info["endpoint"] = json!(kind_endpoint(&cm.kind));
     }
 
     // Merge provider-level fields
@@ -1220,6 +1248,25 @@ mod tests {
         AppState::new(db)
     }
 
+    /// A gemini connection, so the embedding branch of `models_info` has a
+    /// catalog entry to read `dimensions` from.
+    async fn gemini_info_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let db = Arc::new(db);
+        db.update(|state| {
+            state.provider_connections = vec![ProviderConnection {
+                id: "conn-gemini".into(),
+                provider: "gemini".into(),
+                auth_type: "apikey".into(),
+                ..Default::default()
+            }];
+        })
+        .await
+        .unwrap();
+        AppState::new(db)
+    }
+
     #[tokio::test]
     async fn models_info_accepts_the_9router_id_param_and_returns_a_bare_object() {
         let state = openai_info_state().await;
@@ -1267,5 +1314,49 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["id"], json!("openai/gpt-4.1"));
+    }
+
+    /// The kind→endpoint table 9router's `KIND_ENDPOINT` carries
+    /// (models/info/route.js:5-14).
+    #[test]
+    fn kind_endpoint_matches_9router() {
+        assert_eq!(kind_endpoint("embedding"), Some("/v1/embeddings"));
+        assert_eq!(kind_endpoint("llm"), Some("/v1/chat/completions"));
+        assert_eq!(kind_endpoint("tts"), Some("/v1/audio/speech"));
+        assert_eq!(kind_endpoint("stt"), Some("/v1/audio/transcriptions"));
+        assert_eq!(kind_endpoint("image"), Some("/v1/images/generations"));
+        assert_eq!(kind_endpoint("imageToText"), Some("/v1/chat/completions"));
+        assert_eq!(kind_endpoint("webSearch"), Some("/v1/search"));
+        assert_eq!(kind_endpoint("webFetch"), Some("/v1/fetch"));
+        assert_eq!(kind_endpoint("something-else"), None);
+    }
+
+    /// 9router's `buildInfo` always emits `owned_by` and `endpoint`; without
+    /// them a client cannot size a vector index or route a call from this
+    /// response alone.
+    #[tokio::test]
+    async fn models_info_publishes_owned_by_and_endpoint() {
+        let state = openai_info_state().await;
+        let (status, body) = models_info_request(&state, "/v1/models/info?id=openai/gpt-4.1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["owned_by"], json!("openai"));
+        assert_eq!(body["endpoint"], json!("/v1/chat/completions"));
+    }
+
+    #[tokio::test]
+    async fn models_info_publishes_embedding_dimensions() {
+        let state = gemini_info_state().await;
+        let (status, body) =
+            models_info_request(&state, "/v1/models/info?id=gemini/gemini-embedding-001").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], json!("embedding"));
+        assert_eq!(body["endpoint"], json!("/v1/embeddings"));
+        assert_eq!(body["owned_by"], json!("gemini"));
+        assert_eq!(
+            body["dimensions"], 768,
+            "9router declares dimensions: 768 on gemini embedding-001"
+        );
     }
 }

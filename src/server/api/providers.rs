@@ -231,19 +231,16 @@ async fn validate_provider_node(
         }
 
         let embed_url = format!("{}/embeddings", base_url);
+        let model_id = model_id.unwrap_or_default();
 
-        match test_url(&embed_url, api_key, Some("embedding"), model_id).await {
-            Ok(_) => {
-                // Try to get dimensions
-                let dims = None; // Would need to parse response body
-                Json(ValidateNodeResponse {
-                    valid: true,
-                    error: None,
-                    method: Some("embeddings".to_string()),
-                    dimensions: dims,
-                })
-                .into_response()
-            }
+        match test_embedding_url(&embed_url, api_key, model_id).await {
+            Ok(dims) => Json(ValidateNodeResponse {
+                valid: true,
+                error: None,
+                method: Some("embeddings".to_string()),
+                dimensions: dims,
+            })
+            .into_response(),
             Err(e) => Json(ValidateNodeResponse {
                 valid: false,
                 error: Some(e),
@@ -827,6 +824,60 @@ async fn describe_http_failure(provider: &str, resp: reqwest::Response) -> Strin
     format!("HTTP {} {canonical}: {snippet}", status.as_u16())
 }
 
+/// Probe a custom-embedding node the way the model would actually be used.
+///
+/// 9router POSTs `{ model, input: "ping" }` to `{base}/embeddings`
+/// (`validate-node` route, "Custom Embedding Validation"). A GET probe never
+/// reaches an embeddings endpoint, so it answered "invalid" for a working node
+/// — and the dimension count the dashboard shows came back as `null` because the
+/// response body was discarded.
+async fn test_embedding_url(
+    url: &str,
+    api_key: &str,
+    model_id: &str,
+) -> Result<Option<u32>, String> {
+    if url::Url::parse(url).is_err() {
+        return Err("Invalid test URL".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Failed to create HTTP client".to_string())?;
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "model": model_id.trim(),
+            "input": "ping",
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err("API key unauthorized".to_string());
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(200).collect();
+        return Err(if snippet.is_empty() {
+            format!("Embeddings request failed ({})", status.as_u16())
+        } else {
+            format!("Embeddings request failed ({}): {snippet}", status.as_u16())
+        });
+    }
+
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let dimensions = body
+        .pointer("/data/0/embedding")
+        .and_then(|v| v.as_array())
+        .map(|embedding| embedding.len() as u32);
+    Ok(dimensions)
+}
+
 async fn test_url(
     url: &str,
     api_key: &str,
@@ -1242,5 +1293,92 @@ async fn get_mock_status(State(state): State<AppState>, headers: HeaderMap) -> R
             Json(json!({"error": error.to_string()})),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_embedding_url;
+
+    /// One canned HTTP response from a throwaway listener, plus the request
+    /// text the server actually read.
+    async fn upstream_reply(
+        status: &'static str,
+        body: String,
+    ) -> (Result<Option<u32>, String>, String) {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let recorded = seen.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            *recorded.lock().await = String::from_utf8_lossy(&buf[..read]).to_string();
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        let url = format!("http://{addr}/v1/embeddings");
+        let result = test_embedding_url(&url, "sk-test", "text-embedding-3-small").await;
+        let request = seen.lock().await.clone();
+        (result, request)
+    }
+
+    /// 9router POSTs `{model, input: "ping"}` to `{base}/embeddings`. A GET
+    /// probe never reaches an embeddings endpoint, so it reported "invalid"
+    /// for a working node — and the dimension count the dashboard shows came
+    /// back as `null` because the response body was discarded.
+    #[tokio::test]
+    async fn embedding_probe_posts_and_reports_the_dimension_count() {
+        let embedding: Vec<f64> = (0..1536).map(|i| i as f64).collect();
+        let (result, request) = upstream_reply(
+            "200 OK",
+            serde_json::json!({"data": [{"embedding": embedding}]}).to_string(),
+        )
+        .await;
+
+        assert_eq!(result.as_ref().unwrap(), &Some(1536), "{result:?}");
+        assert!(
+            request.starts_with("POST /v1/embeddings"),
+            "the probe must be a POST, got: {request}"
+        );
+        assert!(
+            request.contains("\"input\":\"ping\"") && request.contains("text-embedding-3-small"),
+            "the probe body must match what the model would send, got: {request}"
+        );
+        assert!(request.contains("Bearer sk-test"), "got: {request}");
+    }
+
+    #[tokio::test]
+    async fn embedding_probe_reports_an_unauthorized_key() {
+        let (result, _) = upstream_reply("401 Unauthorized", String::new()).await;
+        assert_eq!(result.unwrap_err(), "API key unauthorized");
+    }
+
+    #[tokio::test]
+    async fn embedding_probe_surfaces_a_failed_status_with_its_body() {
+        let (result, _) = upstream_reply(
+            "405 Method Not Allowed",
+            r#"{"error":"use POST"}"#.to_string(),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            r#"Embeddings request failed (405): {"error":"use POST"}"#
+        );
+    }
+
+    /// A 2xx body with no embedding array reports "valid" with no dimension
+    /// count rather than inventing one (9router: `data?.data?.[0]?.embedding`
+    /// is not an array → `null`).
+    #[tokio::test]
+    async fn embedding_probe_tolerates_a_body_without_an_embedding() {
+        let (result, _) = upstream_reply("200 OK", r#"{"object":"list"}"#.to_string()).await;
+        assert_eq!(result.unwrap(), None);
     }
 }

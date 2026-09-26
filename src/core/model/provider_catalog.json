@@ -1842,7 +1842,8 @@
         {
           "id": "gemini-embedding-001",
           "name": "Gemini Embedding 001",
-          "kind": "embedding"
+          "kind": "embedding",
+          "dimensions": 768
         },
         {
           "id": "text-embedding-005",

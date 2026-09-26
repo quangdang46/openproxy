@@ -28,6 +28,10 @@ pub struct ProviderCatalogModel {
     pub upstream_model_id: Option<String>,
     #[serde(default, alias = "contextLength")]
     pub context_window: Option<u32>,
+    /// Vector width for embedding models. 9router declares it on the catalog
+    /// entries too (`buildInfo` copies it straight to `/v1/models/info`).
+    #[serde(default)]
+    pub dimensions: Option<u32>,
     #[serde(default)]
     pub capabilities: Option<Vec<String>>,
 }

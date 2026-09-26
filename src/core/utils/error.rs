@@ -206,6 +206,35 @@ pub fn friendly_error_message(status: u16, raw: &str) -> String {
     msg
 }
 
+/// Extract the client-facing message from an upstream error body.
+///
+/// Port of `open-sse/utils/error.js parseUpstreamError`'s message half
+/// (error.js:139-160): `error.message` when `error` is an object, else
+/// `message`, else `error` stringified, else the raw body. The status half
+/// lives in [`parse_upstream_error`]; this is the un-sanitised text a handler
+/// prefixes with its own `[n]: ` marker.
+pub fn parse_upstream_message(body: &str) -> String {
+    let Ok(json) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    let candidate = json
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            json.get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            json.get("error").map(|v| match v.as_str() {
+                Some(s) => s.to_string(),
+                None => v.to_string(),
+            })
+        });
+    candidate.unwrap_or_else(|| body.to_string())
+}
+
 /// Convenience: sanitize + build OpenAI-shaped error body.
 pub fn build_friendly_error_body(status: u16, raw_message: Option<&str>) -> Value {
     let friendly = match raw_message {
@@ -459,5 +488,37 @@ mod tests {
         // Misleading 400 from free proxies should upgrade toward gateway failure.
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "bad_gateway");
+    }
+
+    /// 9router `parseUpstreamError` (error.js:139-160) walks
+    /// `error.message` → `message` → `error` → raw body. The extracted text is
+    /// what a handler prefixes with `[n]: ` — never the raw JSON dump.
+    #[test]
+    fn parse_upstream_message_extracts_the_message() {
+        assert_eq!(
+            parse_upstream_message(
+                r#"{"error":{"message":"Incorrect API key provided","type":"x"}}"#
+            ),
+            "Incorrect API key provided"
+        );
+        assert_eq!(parse_upstream_message(r#"{"message":"nope"}"#), "nope");
+        assert_eq!(
+            parse_upstream_message(r#"{"error":"rate limit"}"#),
+            "rate limit"
+        );
+        assert_eq!(
+            parse_upstream_message("upstream exploded"),
+            "upstream exploded"
+        );
+        assert_eq!(parse_upstream_message(""), "");
+    }
+
+    /// `error` as a non-string (Gemini returns `{"error":{"code":…}}`) is
+    /// stringified rather than dropped.
+    #[test]
+    fn parse_upstream_message_stringifies_non_string_error() {
+        let message =
+            parse_upstream_message(r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#);
+        assert!(message.contains("RESOURCE_EXHAUSTED"), "got: {message}");
     }
 }
