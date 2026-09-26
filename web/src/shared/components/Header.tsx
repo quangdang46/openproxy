@@ -3,6 +3,7 @@
 import { useMemo, useState, useEffect } from "react";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import HeaderMenu from "@/shared/components/HeaderMenu";
+import HeaderLanguage from "@/shared/components/HeaderLanguage";
 import ThemeToggle from "@/shared/components/ThemeToggle";
 import DonateModal from "@/shared/components/DonateModal";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
@@ -183,7 +184,7 @@ const getPageInfo = (pathname: string): PageInfo => {
       icon: "monitor",
       breadcrumbs: [],
     };
-  if (pathname === "/dashboard")
+  if (pathname === "/dashboard" || pathname === "/")
     return {
       title: "Endpoint",
       description: "API endpoint configuration",
@@ -194,7 +195,9 @@ const getPageInfo = (pathname: string): PageInfo => {
 };
 
 export default function Header({ onMenuClick, showMenuButton = true }: HeaderProps) {
-  const [pathname, setPathname] = useState("");
+  const [pathname, setPathname] = useState(() =>
+    typeof window !== "undefined" ? window.location.pathname : ""
+  );
   const [mounted, setMounted] = useState(false);
   const [donateOpen, setDonateOpen] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -245,7 +248,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
   };
 
   return (
-    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-4 pb-4 border-b border-hairline-soft bg-canvas/95 backdrop-blur-xl lg:bg-canvas lg:backdrop-blur-none z-20">
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-3 pb-2 border-b border-border-subtle bg-surface/60 backdrop-blur-xl lg:bg-transparent lg:backdrop-blur-none z-20">
       {/* Mobile menu button */}
       <div className="flex items-center gap-3 lg:hidden shrink-0">
         {showMenuButton && (
@@ -275,7 +278,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                 {crumb.href ? (
                   <a
                     href={crumb.href}
-                    className="text-muted hover:text-ink transition-colors text-[13px] font-medium"
+                    className="text-text-muted hover:text-primary transition-colors"
                   >
                     {crumb.label}
                   </a>
@@ -290,7 +293,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                         fallbackText={crumb.label.slice(0, 2).toUpperCase()}
                       />
                     )}
-                    <h1 className="font-serif font-normal text-[20px] lg:text-[30px] tracking-[-0.02em] text-ink truncate leading-tight">
+                    <h1 className="text-base lg:text-2xl font-semibold text-ink tracking-tight truncate">
                       {translate(crumb.label)}
                     </h1>
                   </div>
@@ -300,18 +303,18 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
           </div>
         ) : title ? (
           <div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               {icon && (
                 <span className="material-symbols-outlined text-brand-coral text-xl lg:text-2xl">
                   {icon}
                 </span>
               )}
-              <h1 className="font-serif font-normal text-[20px] lg:text-[30px] tracking-[-0.02em] text-ink truncate leading-tight">
+              <h1 className="text-base lg:text-2xl font-semibold text-ink tracking-tight truncate">
                 {translate(title)}
               </h1>
             </div>
             {description && (
-              <p className="hidden lg:block text-[13px] text-muted truncate mt-1">
+              <p className="hidden lg:block text-sm text-text-muted truncate">
                 {translate(description)}
               </p>
             )}
@@ -321,7 +324,6 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
 
       {/* Right actions */}
       <div className="flex items-center gap-1 shrink-0">
-        <HeaderSearchInput />
         {(displayName && (loginMethod === "OIDC" || loginMethod === "SAML")) && (
           <div
             className="hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate"
@@ -336,16 +338,18 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
             </span>
           </div>
         )}
+        <HeaderSearchInput />
         <button
           type="button"
           onClick={() => setDonateOpen(true)}
           className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-sm font-medium"
           aria-label="Donate"
         >
-          <span className="material-symbols-outlined text-[20px]">volunteer_activism</span>
+          <span className="material-symbols-outlined text-[18px]">volunteer_activism</span>
           <span className="hidden sm:inline">Donate</span>
         </button>
         <ThemeToggle />
+        <HeaderLanguage />
         <HeaderMenu onLogout={handleLogout} />
       </div>
       <DonateModal isOpen={donateOpen} onClose={() => setDonateOpen(false)} />

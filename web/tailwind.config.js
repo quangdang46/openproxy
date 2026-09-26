@@ -3,6 +3,10 @@ export default {
   content: [
     "./src/**/*.{astro,html,js,jsx,md,mdx,svelte,ts,tsx,vue}",
   ],
+  // `dark:` variants must follow the in-app toggle (themeStore flips `.dark` on
+  // <html>), not the OS preference — otherwise a light-OS user who picks dark
+  // gets dark surfaces with 450-odd light-mode utilities left behind.
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
