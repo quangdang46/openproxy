@@ -15,9 +15,10 @@ use serde_json::{json, Value};
 
 use crate::core::model::catalog::provider_catalog;
 use crate::core::model::resolve_provider_alias;
-use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::{AppDb, ModelAliasTarget, ProviderConnection};
+
+use super::provider_models::INTERNAL_MODELS_FETCH_HEADER;
 
 const LLM_KIND: &str = "llm";
 
@@ -31,6 +32,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/models/{kind}",
             get(list_models_by_kind).options(cors_options),
         )
+        .route(
+            "/v1/models/{provider}/{model}",
+            get(get_model_by_id).options(cors_options),
+        )
         .route("/v1/models/info", get(models_info).options(cors_options))
 }
 
@@ -38,13 +43,23 @@ pub async fn cors_options() -> Response {
     cors_preflight_response("GET, OPTIONS")
 }
 
+/// True when the caller is a sibling proxy pulling our catalog through its own
+/// `fetch_compatible_model_ids`. Fanning out to our compatible providers from
+/// there would bounce the request between the two instances until one times
+/// out. 9router `skipDynamicFetch` (route.js:388, :574).
+fn skip_dynamic_fetch(headers: &HeaderMap) -> bool {
+    headers
+        .get(INTERNAL_MODELS_FETCH_HEADER)
+        .is_some_and(|value| value == "1")
+}
+
 pub async fn list_default_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    list_models_for_kinds(state, headers, &[LLM_KIND]).await
+    let skip = skip_dynamic_fetch(&headers);
+    list_models_for_kinds(state, &[LLM_KIND], skip).await
 }
 
 pub async fn list_models_by_kind(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(kind): Path<String>,
 ) -> Response {
     let kind_filter = match kind.as_str() {
@@ -54,37 +69,55 @@ pub async fn list_models_by_kind(
         "embedding" => vec!["embedding"],
         "image-to-text" => vec!["imageToText"],
         "web" => vec!["webSearch", "webFetch"],
-        _ => {
-            return with_cors_json(
-                StatusCode::NOT_FOUND,
-                json!({
-                    "error": {
-                        "message": format!(
-                            "Unknown model kind: {kind}. Supported: image, tts, stt, embedding, image-to-text, web"
-                        ),
-                        "type": "invalid_request_error"
-                    }
-                }),
-            );
-        }
+        // 9router's `KIND_SLUG_MAP[identifier]` is simply undefined for a
+        // single segment that is not a kind slug, so the request falls through
+        // to the id lookup — `GET /v1/models/gpt-4o` is a model, not a typo.
+        _ => return model_lookup_response(&state, &kind).await,
     };
 
-    list_models_for_kinds(state, headers, &kind_filter).await
+    list_models_for_kinds(state, &kind_filter, false).await
+}
+
+/// GET /v1/models/{provider}/{model} — single-model lookup.
+///
+/// Answers from the same LLM catalog `/v1/models` exposes and returns the card
+/// bare rather than in a `{object,data}` envelope, so OpenAI clients read
+/// `id`/`owned_by` off the top level (9router `[...model]/route.js:52-77`).
+pub async fn get_model_by_id(
+    State(state): State<AppState>,
+    Path((provider, model)): Path<(String, String)>,
+) -> Response {
+    model_lookup_response(&state, &format!("{provider}/{model}")).await
+}
+
+async fn model_lookup_response(state: &AppState, identifier: &str) -> Response {
+    let snapshot = state.db.snapshot();
+    let models = build_models_list(state, &snapshot, &[LLM_KIND], false).await;
+
+    match models.into_iter().find(|card| card.id == identifier) {
+        Some(card) => with_cors_response(Json(card).into_response()),
+        None => with_cors_json(
+            StatusCode::NOT_FOUND,
+            json!({
+                "error": {
+                    "message": format!(
+                        "The model '{identifier}' does not exist or you do not have access to it."
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "model_not_found"
+                }
+            }),
+        ),
+    }
 }
 
 async fn list_models_for_kinds(
     state: AppState,
-    headers: HeaderMap,
     kind_filter: &[&str],
+    skip_dynamic_fetch: bool,
 ) -> Response {
     let snapshot = state.db.snapshot();
-    if snapshot.settings.require_login {
-        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
-            return with_cors_response(super::auth_error_response(error));
-        }
-    }
-
-    let data = build_models_list(&state, &snapshot, kind_filter).await;
+    let data = build_models_list(&state, &snapshot, kind_filter, skip_dynamic_fetch).await;
 
     with_cors_response(
         Json(ModelListResponse {
@@ -99,6 +132,7 @@ async fn build_models_list(
     state: &AppState,
     snapshot: &AppDb,
     kind_filter: &[&str],
+    skip_dynamic_fetch: bool,
 ) -> Vec<ModelCard> {
     let catalog = provider_catalog();
     let alias_to_provider_id = catalog.alias_to_provider_id();
@@ -236,6 +270,7 @@ async fn build_models_list(
             }
 
             if raw_model_ids.is_empty()
+                && !skip_dynamic_fetch
                 && !UPSTREAM_CONNECTION_RE.is_match(provider_id)
                 && super::provider_models::supports_models_discovery(provider_id)
             {
@@ -880,7 +915,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "custom model with provider_alias 'tr' should appear in /v1/models even without connections");
     }
@@ -910,7 +945,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "custom model 'tr/MiniMax-M3' should appear even when it doesn't match any connection's prefix");
     }
@@ -940,7 +975,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         let count = models.iter().filter(|m| m.id == "ocg/gpt-4o").count();
         assert_eq!(count, 1,
             "custom model 'ocg/gpt-4o' should appear exactly once even if matched by connection AND fallback");
@@ -969,7 +1004,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(
             models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "llm-type custom model should appear in LLM list"
@@ -995,7 +1030,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(
             models.iter().any(|m| m.id == "opencode-zen/gpt-5.4"),
             "catalog-registered opencode-zen model should appear in /v1/models"
@@ -1034,7 +1069,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(
             models.iter().any(|m| m.id == "ollama-local/local-llama-3.1"),
             "dynamically discovered models of a catalog-less built-in provider should appear in /v1/models"
@@ -1058,7 +1093,7 @@ mod tests {
         // /v1/models must not keep advertising it to client model pickers.
         let snapshot = disabled_snapshot("openai", &["gpt-4o-mini"]);
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(
             !models.iter().any(|m| m.id == "openai/gpt-4o-mini"),
             "a model disabled on the Providers page must not appear in /v1/models"
@@ -1091,7 +1126,8 @@ mod tests {
                 ..disabled_snapshot(alias, &["gpt-4o-mini"])
             };
 
-            let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+            let models =
+                build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
             assert!(
                 !models.iter().any(|m| m.id == "oa/gpt-4o-mini"),
                 "model disabled under the {label} must not appear in /v1/models"
@@ -1119,7 +1155,7 @@ mod tests {
             (vec!["image"], "openai/dall-e-3"),
             (vec!["stt"], "openai/whisper-1"),
         ] {
-            let models = build_models_list(&state, &snapshot, &kind_filter).await;
+            let models = build_models_list(&state, &snapshot, &kind_filter, false).await;
             assert!(
                 !models.iter().any(|m| m.id == disabled_id),
                 "{disabled_id} disabled on the Providers page must not appear in /v1/models/{kind_filter:?}"
@@ -1142,7 +1178,7 @@ mod tests {
             ..disabled_snapshot("tr", &["MiniMax-M3"])
         };
 
-        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
         assert!(
             models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "9router does not filter custom models; matching that quirk"
