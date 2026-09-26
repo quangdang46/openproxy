@@ -134,6 +134,17 @@ pub fn inject_ponytail_prompt(body: &mut Value, level: PonytailLevel) -> bool {
         return false;
     };
 
+    // Kiro first, and first for a reason: its wire shape has no `system` key
+    // and is not Gemini-shaped, so it used to fall through to
+    // inject_openai_shape — which found neither `instructions` nor a messages
+    // array and returned false, making ponytail a silent NO-OP on every `kr/`
+    // model. 9router reaches the same kiro branch because its ponytail
+    // delegates to injectSystemPrompt (rtk/systemInject.js:16,64-70), which has
+    // it. Order matches inject_caveman_prompt in core/rtk/mod.rs.
+    if crate::core::rtk::is_kiro_body(fields) {
+        return crate::core::rtk::inject_kiro_system(fields, prompt);
+    }
+
     if fields.contains_key("system") {
         return inject_claude_system(fields, prompt);
     }
@@ -799,5 +810,101 @@ mod tests {
         assert!(inject_ponytail_prompt(&mut body, PonytailLevel::Full));
         let sys = body["system"].as_str().expect("system string");
         assert_eq!(sys, PonytailLevel::Full.prompt());
+    }
+}
+
+#[cfg(test)]
+mod kiro_ponytail_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A Kiro turn, shaped the way `is_kiro_body` recognises: a
+    /// `conversationState` with a currentMessage carrying a userInputMessage.
+    fn kiro_body() -> Value {
+        json!({
+            "model": "kiro-default",
+            "conversationState": {
+                "chatTriggerType": "MANUAL",
+                "conversationId": "conv-1",
+                "currentMessage": {
+                    "userInputMessage": {
+                        "content": "make it lazy",
+                        "modelId": "kiro-default",
+                        "userInputMessageContext": {
+                            "toolResults": [],
+                            "client": "",
+                        }
+                    }
+                },
+                "history": []
+            }
+        })
+    }
+
+    /// THE GAP. The Kiro wire shape has no `system` key and is not
+    /// Gemini-shaped, so ponytail fell through to `inject_openai_shape`, which
+    /// found neither `instructions` nor `messages` and returned false — making
+    /// the feature a silent no-op on every `kr/` model. A user enabling
+    /// "lazy senior dev" for Kiro got nothing and no error.
+    #[test]
+    fn ponytail_reaches_a_kiro_body() {
+        let mut body = kiro_body();
+        assert!(
+            inject_ponytail_prompt(&mut body, PonytailLevel::Full),
+            "ponytail must not be a no-op on kiro"
+        );
+    }
+
+    /// It must write into the Kiro prompt slot, not merely report true — a
+    /// `true` from a branch that changed nothing would be the same bug wearing
+    /// a disguise.
+    #[test]
+    fn the_kiro_prompt_actually_carries_the_injection() {
+        let mut body = kiro_body();
+        inject_ponytail_prompt(&mut body, PonytailLevel::Full);
+        let state = body
+            .pointer("/conversationState/currentMessage/userInputMessage/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let needle = PonytailLevel::Full.prompt();
+        assert!(
+            state.contains(needle),
+            "the ponytail prompt must land in the kiro content field, got: {state}"
+        );
+    }
+
+    /// Idempotence: a second injection must not stack. The OpenAI path already
+    /// guarantees this, and the Kiro branch must not be the one that breaks it.
+    #[test]
+    fn a_second_injection_is_idempotent_on_kiro() {
+        let level = PonytailLevel::Full;
+        let mut body = kiro_body();
+        assert!(inject_ponytail_prompt(&mut body, level));
+        let once = body
+            .pointer("/conversationState/currentMessage/userInputMessage/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !inject_ponytail_prompt(&mut body, level),
+            "a second injection must report 'already present'"
+        );
+        let twice = body
+            .pointer("/conversationState/currentMessage/userInputMessage/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert_eq!(once, twice, "the prompt must not be duplicated");
+    }
+
+    /// A non-Kiro body must still take the path it took before, so the new
+    /// branch cannot steal OpenAI or Claude requests.
+    #[test]
+    fn non_kiro_bodies_are_unaffected() {
+        let mut claude = json!({"model": "claude-sonnet-4-5", "system": "be brief"});
+        assert!(inject_ponytail_prompt(&mut claude, PonytailLevel::Full));
+        assert!(claude["system"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(PonytailLevel::Full.prompt()));
     }
 }

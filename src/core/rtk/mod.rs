@@ -227,7 +227,7 @@ pub fn inject_caveman_prompt(body: &mut Value, level: CompressionLevel) -> bool 
 /// `instructions` / `messages` / `input` keys the OpenAI dispatch looks for, so
 /// it has to be sniffed ahead of the Claude/Gemini shape dispatch.
 /// 9router systemInject.js:62-71.
-fn is_kiro_body(fields: &Map<String, Value>) -> bool {
+pub(crate) fn is_kiro_body(fields: &Map<String, Value>) -> bool {
     let Some(state) = fields.get("conversationState").and_then(Value::as_object) else {
         return false;
     };
@@ -252,7 +252,7 @@ fn is_kiro_body(fields: &Map<String, Value>) -> bool {
 /// `currentMessage.userInputMessage` — the same place the Kiro translator
 /// already mirrors system text via its `contentPrefix`.
 /// 9router systemInject.js:273-292.
-fn inject_kiro_system(fields: &mut Map<String, Value>, prompt: &str) -> bool {
+pub(crate) fn inject_kiro_system(fields: &mut Map<String, Value>, prompt: &str) -> bool {
     let Some(state) = fields
         .get_mut("conversationState")
         .and_then(Value::as_object_mut)
