@@ -46,7 +46,18 @@ async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return resp;
     }
     let settings = state.db.snapshot().settings.clone();
+    // `code: "NOT_INSTALLED"` matches how every other not-managed tool already
+    // answers (see headroom.rs:462). Without it a client can only infer
+    // "unavailable" from `installed: false`, which is indistinguishable from
+    // "installed but not running" — so a UI cannot tell the user to install
+    // anything, and the correct next step is invisible.
+    //
+    // The message names the supported alternative, which is what the operator
+    // actually needs: PXPIPE is an external proxy openproxy does not manage,
+    // and RTK + Headroom + Caveman/Ponytail are the in-tree equivalents.
     Json(json!({
+        "code": "NOT_INSTALLED",
+        "error": "PXPIPE is not managed by OpenProxy. Use RTK + Headroom + Caveman/Ponytail instead.",
         "installed": false,
         "installing": false,
         "version": Value::Null,
