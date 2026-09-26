@@ -38,11 +38,16 @@ function getToastStyle(type: string) {
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [pathname, setPathname] = useState("");
-  const [mounted, setMounted] = useState(false);
+  // `pathname` is the Header's React `key`, so a `useState("")` seed changes it
+  // one frame after mount and React throws away the Header island it just built
+  // (re-fetching /api/auth/status, repainting the bar) — the same "menu jump"
+  // #dashboard-skeleton exists to hide. 9router reads `usePathname()`, which is
+  // resolved before the first client render.
+  const [pathname, setPathname] = useState(() =>
+    typeof window !== "undefined" ? window.location.pathname : ""
+  );
 
   useEffect(() => {
-    setMounted(true);
     setPathname(window.location.pathname);
     document.body.classList.add("dashboard-ready");
     // Resume tunnel/tailscale/MITM + client auto-ping tick (once per tab).
