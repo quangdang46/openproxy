@@ -25,6 +25,9 @@ const MAX_SESSIONS: usize = 1000;
 const MAX_CONTINUATION_SESSIONS: usize = 5000;
 
 /// Client headers that may carry an upstream session id (priority order).
+/// 9router `CLAUDE_CODE_SESSION_HEADER` (sessionManager.js:97).
+const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
 const SESSION_HEADER_KEYS: &[&str] = &[
     "x-session-id",
     "session-id",
@@ -179,6 +182,23 @@ fn extract_client_session_id(
                 return Some(format!("claude:{claude}"));
             }
         }
+    }
+
+    // 9router sessionManager.js:141-143 checks the Claude Code session header
+    // NEXT, at the same priority as the body field, and prefixes it:
+    //   const claude = extractClaudeCodeSession(body?.metadata?.user_id)
+    //       || headerValue(headers, CLAUDE_CODE_SESSION_HEADER);
+    //   if (claude) return `claude:${claude}`;
+    //
+    // openproxy had only the body half. That is not a cosmetic omission: the
+    // header "survives translation to formats that drop metadata" (9router's
+    // own comment), so on a Responses-API round trip the body field is gone
+    // and the header was the only remaining source. A request whose
+    // x-claude-code-session-id was being ignored fell through to
+    // derive_session_id(connection_id) — one id per CONNECTION rather than per
+    // conversation.
+    if let Some(v) = header_value(headers, CLAUDE_CODE_SESSION_HEADER) {
+        return Some(format!("claude:{v}"));
     }
 
     for key in SESSION_HEADER_KEYS {

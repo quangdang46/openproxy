@@ -1396,6 +1396,14 @@ async fn execute_single_model(
             } else {
                 Some(&strip_refs)
             },
+            // Real downstream identity, so Claude cloaking derives a
+            // per-request session id instead of a body hash (9router
+            // claude.js:614 — `sessionId || resolveSessionId({headers, body,
+            // connectionId, scope})`). Previously this was a global cache read,
+            // which leaked one client's session onto every other client's
+            // cloaked user_id.
+            client_headers,
+            creds.get("id").and_then(|v| v.as_str()),
         );
         // Thread custom-tool names through to the response path (9router
         // chatCore.js:198 + streamingHandler customToolNames).

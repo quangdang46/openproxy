@@ -122,6 +122,9 @@ fn step_to_openai(body: &Value, state: &AppState) -> Response {
             &mut translated,
             stream,
             None,
+            // Same as below: a CLI translation surface has no downstream client.
+            None,
+            None,
         )
     };
 
@@ -187,6 +190,10 @@ async fn step_to_target(body: &Value, state: &AppState) -> Response {
         model,
         &mut translated,
         stream,
+        None,
+        // This is the `openproxy translator` CLI surface: it has no downstream
+        // request, so there is no client identity to cloak from.
+        None,
         None,
     );
 

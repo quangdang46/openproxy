@@ -658,7 +658,13 @@ pub fn anchor_claude_cache(body: &mut Value) {
 /// - Handle thinking blocks (signature validation for native Claude,
 ///   default-signature injection for `anthropic-compatible`).
 /// - Apply cloaking for OAuth tokens.
-pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<&str>) {
+pub fn prepare_claude_request(
+    body: &mut Value,
+    provider: &str,
+    api_key: Option<&str>,
+    client_headers: Option<&std::collections::HashMap<String, String>>,
+    connection_id: Option<&str>,
+) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
@@ -971,20 +977,10 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
             // same property whenever it cannot find a session id upstream of
             // this call — generateFakeUserID falls back to a fresh random uuid.
             // Threading rawHeaders in is the real fix and is filed separately.
-            let seed = {
-                use sha2::{Digest, Sha256};
-                let mut h = Sha256::new();
-                h.update(serde_json::to_string(body).unwrap_or_default().as_bytes());
-                h.finalize()
-                    .iter()
-                    .take(8)
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            };
             let session_id = crate::core::utils::session_manager::resolve_session_identity(
-                None,
+                client_headers,
                 Some(body),
-                Some(&seed),
+                connection_id,
                 "claude",
             )
             .session_id;
@@ -1293,7 +1289,7 @@ mod tests {
             "output_config": {"effort": "high"},
             "messages": []
         });
-        prepare_claude_request(&mut body, "minimax", None);
+        prepare_claude_request(&mut body, "minimax", None, None, None);
         assert!(body.get("output_config").is_none(), "output_config dropped");
     }
 
@@ -1303,7 +1299,7 @@ mod tests {
             "max_tokens": 999999,
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
     }
 
@@ -1315,7 +1311,7 @@ mod tests {
             "thinking": {"type": "enabled", "budget_tokens": 128000},
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         // budget + 1024 capped at the sonnet ceiling (128000)
         assert_eq!(body["max_tokens"], 128000);
         // budget shrunk to max_tokens - 1024
@@ -1328,7 +1324,7 @@ mod tests {
             "max_tokens": 32000,
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         assert_eq!(body["max_tokens"], 32000);
     }
 
@@ -1341,7 +1337,7 @@ mod tests {
             ],
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         let sys = body["system"].as_array().unwrap();
         assert!(
             sys[0].get("cache_control").is_none(),
@@ -1363,7 +1359,7 @@ mod tests {
                 {"role": "assistant", "content": []}
             ]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2, "empty user removed, final assistant kept");
         assert_eq!(msgs[0]["role"], "user");
@@ -1380,7 +1376,7 @@ mod tests {
                 ]
             }]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         assert!(body["messages"][0]["content"][0]
             .get("cache_control")
             .is_none());
@@ -1398,7 +1394,7 @@ mod tests {
                 ]}
             ]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         let content = body["messages"][1]["content"].as_array().unwrap();
         // The non-thinking (text) block should have cache_control
         let text_block = content.iter().find(|b| b["type"] == "text").unwrap();
@@ -1417,7 +1413,7 @@ mod tests {
             ],
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "minimax", None);
+        prepare_claude_request(&mut body, "minimax", None, None, None);
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1, "built-in tool should be filtered");
         assert_eq!(tools[0]["name"], "my_custom_tool");
@@ -1432,7 +1428,7 @@ mod tests {
             ],
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         let tools = body["tools"].as_array().unwrap();
         assert!(tools[0].get("cache_control").is_none());
         assert!(tools[1].get("cache_control").is_some());
@@ -1445,7 +1441,7 @@ mod tests {
             "tool_choice": {"type": "auto"},
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "minimax", None);
+        prepare_claude_request(&mut body, "minimax", None, None, None);
         assert!(body.get("tools").is_none(), "empty tools removed");
         assert!(body.get("tool_choice").is_none(), "tool_choice removed");
     }
@@ -1537,7 +1533,7 @@ mod tests {
             ],
             "messages": [{"role": "user", "content": "hi"}]
         });
-        prepare_claude_request(&mut body, "claude", None);
+        prepare_claude_request(&mut body, "claude", None, None, None);
         let tools = body["tools"].as_array().unwrap();
         // tool "a" (index 0) is last cacheable → gets cache_control
         assert!(
@@ -1693,8 +1689,24 @@ mod no_global_identity_tests {
         let mut alice = claude_body("alice is asking about billing");
         let mut bob = claude_body("bob is asking about something else entirely");
 
-        prepare_claude_request(&mut alice, "claude", Some(key));
-        prepare_claude_request(&mut bob, "claude", Some(key));
+        let mut a_hdrs = std::collections::HashMap::new();
+        a_hdrs.insert(
+            "x-claude-code-session-id".to_string(),
+            "session-alice".to_string(),
+        );
+        let mut b_hdrs = std::collections::HashMap::new();
+        b_hdrs.insert(
+            "x-claude-code-session-id".to_string(),
+            "session-bob".to_string(),
+        );
+        prepare_claude_request(
+            &mut alice,
+            "claude",
+            Some(key),
+            Some(&a_hdrs),
+            Some("conn-a"),
+        );
+        prepare_claude_request(&mut bob, "claude", Some(key), Some(&b_hdrs), Some("conn-b"));
 
         let a = session_id_of(&alice);
         let b = session_id_of(&bob);
@@ -1716,8 +1728,8 @@ mod no_global_identity_tests {
         let key = "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut first = claude_body("same question");
         let mut second = claude_body("same question");
-        prepare_claude_request(&mut first, "claude", Some(key));
-        prepare_claude_request(&mut second, "claude", Some(key));
+        prepare_claude_request(&mut first, "claude", Some(key), None, Some("conn-1"));
+        prepare_claude_request(&mut second, "claude", Some(key), None, Some("conn-1"));
         // Only the session_id is asserted stable. device_id/account_uuid are
         // generated upstream of this change and are out of scope here; pinning
         // them would be asserting behaviour this commit does not own.
@@ -1729,10 +1741,57 @@ mod no_global_identity_tests {
     #[test]
     fn a_non_oauth_key_is_not_cloaked() {
         let mut body = claude_body("plain apikey user");
-        prepare_claude_request(&mut body, "claude", Some("sk-ant-api03-plain"));
+        prepare_claude_request(&mut body, "claude", Some("sk-ant-api03-plain"), None, None);
         assert!(
             body.pointer("/metadata/user_id").is_none(),
             "a non-OAuth key must pass through untouched: {body}"
+        );
+    }
+
+    /// THE MISSING HALF, now covered. The body-hash seed was a stopgap for
+    /// exactly this: the real input is the caller's own session header, which
+    /// is what 9router reads (claude.js:614). Same body, different client
+    /// session header, different cloaked identity — the per-request property
+    /// the body hash could NOT provide, because the body was identical.
+    #[test]
+    fn the_callers_session_header_drives_the_cloaked_identity() {
+        let key = "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut a = claude_body("identical conversation body");
+        let mut b = claude_body("identical conversation body");
+        let mut ha = std::collections::HashMap::new();
+        ha.insert("x-claude-code-session-id".to_string(), "sess-A".to_string());
+        let mut hb = std::collections::HashMap::new();
+        hb.insert("x-claude-code-session-id".to_string(), "sess-B".to_string());
+
+        prepare_claude_request(&mut a, "claude", Some(key), Some(&ha), Some("conn"));
+        prepare_claude_request(&mut b, "claude", Some(key), Some(&hb), Some("conn"));
+
+        assert_ne!(
+            session_id_of(&a),
+            session_id_of(&b),
+            "identical bodies under different client sessions must not cloak identically"
+        );
+    }
+
+    /// And the same client's session is stable across turns, which is the
+    /// fingerprint-consistency property 9router's comment calls out: the
+    /// session_id inside user_id must line up with the outgoing header.
+    #[test]
+    fn one_clients_session_is_stable_across_differing_bodies() {
+        let key = "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut h = std::collections::HashMap::new();
+        h.insert(
+            "x-claude-code-session-id".to_string(),
+            "sess-stable".to_string(),
+        );
+        let mut turn1 = claude_body("turn one");
+        let mut turn2 = claude_body("turn one, and then some more");
+        prepare_claude_request(&mut turn1, "claude", Some(key), Some(&h), Some("conn"));
+        prepare_claude_request(&mut turn2, "claude", Some(key), Some(&h), Some("conn"));
+        assert_eq!(
+            session_id_of(&turn1),
+            session_id_of(&turn2),
+            "a growing conversation must keep one session id"
         );
     }
 }

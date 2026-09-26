@@ -420,6 +420,11 @@ impl TranslationRegistry {
     /// 3. Normalization + target-specific hooks (filter OpenAI / prepare Claude)
     ///
     /// `source` = client format, `target` = provider format.
+    /// `client_headers` and `connection_id` feed the per-request session
+    /// manager that Claude cloaking needs. They are optional so the many
+    /// callers that have no downstream request context (CLI translation,
+    /// tests) keep working unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn translate_request(
         &self,
         source: Format,
@@ -428,8 +433,20 @@ impl TranslationRegistry {
         body: &mut Value,
         stream: bool,
         credentials: Option<&Value>,
+        client_headers: Option<&std::collections::HashMap<String, String>>,
+        connection_id: Option<&str>,
     ) -> bool {
-        self.translate_request_with_strip(source, target, model, body, stream, credentials, None)
+        self.translate_request_with_strip(
+            source,
+            target,
+            model,
+            body,
+            stream,
+            credentials,
+            None,
+            client_headers,
+            connection_id,
+        )
     }
 
     /// Seed Responses→OpenAI streaming state from a request body that
@@ -453,6 +470,7 @@ impl TranslationRegistry {
 
     /// Like [`translate_request`] but applies optional content-type strip list
     /// (9router `stripList`) before normalization.
+    #[allow(clippy::too_many_arguments)]
     pub fn translate_request_with_strip(
         &self,
         source: Format,
@@ -462,6 +480,8 @@ impl TranslationRegistry {
         stream: bool,
         credentials: Option<&Value>,
         strip_list: Option<&[&str]>,
+        client_headers: Option<&std::collections::HashMap<String, String>>,
+        connection_id: Option<&str>,
     ) -> bool {
         if source != target {
             // Direct route: exact source→target pair (lossless for claude→kiro etc.)
@@ -537,7 +557,11 @@ impl TranslationRegistry {
                 .and_then(|c| c.get("provider").and_then(Value::as_str))
                 .unwrap_or("claude");
             crate::core::translator::request::claude_format::prepare_claude_request(
-                body, provider, api_key,
+                body,
+                provider,
+                api_key,
+                client_headers,
+                connection_id,
             );
         }
 
@@ -1395,6 +1419,8 @@ mod parity_tests {
             false,
             None,
             None,
+            None,
+            None,
         );
         assert!(
             passthrough.get("_customToolNames").is_some(),
@@ -1415,6 +1441,8 @@ mod parity_tests {
             "claude-sonnet-4-5",
             &mut translated,
             false,
+            None,
+            None,
             None,
             None,
         );
