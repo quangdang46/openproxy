@@ -1704,6 +1704,25 @@ fn sim_format_for_source(source: Format) -> crate::core::executor::ProviderForma
     }
 }
 
+/// The caller's own headers, shaped for the executors' `raw_headers` field.
+///
+/// 9router threads `rawHeaders` into the opencode and opencode-go
+/// executors; both read it to decide whether the downstream is a real
+/// OpenCode client (`is_opencode_downstream`) and to pass its session through
+/// untouched. Passing an empty map — as this used to — made every request look
+/// like a generic client, so the UA and the four `x-opencode-*` gate headers
+/// were regenerated on every turn and session continuity was lost.
+///
+/// This is the same data `attach_client_raw_headers` writes into the
+/// credentials for cursor; these two executors take it as a field instead.
+fn client_raw_header_map(
+    client_headers: Option<&std::collections::HashMap<String, String>>,
+) -> std::collections::BTreeMap<String, String> {
+    client_headers
+        .map(|h| h.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
 async fn forward_with_provider_fallback(
     state: &AppState,
     provider: &str,
@@ -2352,7 +2371,7 @@ async fn forward_with_provider_fallback(
                         stream,
                         credentials: connection.clone(),
                         proxy,
-                        raw_headers: std::collections::BTreeMap::new(),
+                        raw_headers: client_raw_header_map(client_headers),
                     })
                     .await
                     .map_err(|e| ComboAttemptError {
@@ -2383,7 +2402,7 @@ async fn forward_with_provider_fallback(
                         stream,
                         credentials: connection.clone(),
                         proxy,
-                        raw_headers: std::collections::BTreeMap::new(),
+                        raw_headers: client_raw_header_map(client_headers),
                     })
                     .await
                     .map_err(|e| ComboAttemptError {
@@ -9098,5 +9117,44 @@ mod retry_after_format_tests {
     fn already_past_formats_as_zero() {
         let until = Utc::now() - Duration::seconds(1);
         assert_eq!(format_retry_after(&until), "reset after 0s");
+    }
+}
+
+#[cfg(test)]
+mod client_raw_header_map_tests {
+    use super::client_raw_header_map;
+    use std::collections::HashMap;
+
+    /// THE REGRESSION. Both opencode executors were constructed with
+    /// `BTreeMap::new()`, so `is_opencode_downstream` was permanently false
+    /// and the four `x-opencode-*` gate headers were regenerated on every
+    /// request. A real OpenCode client's own session never reached the
+    /// gateway, so conversation continuity depended entirely on the
+    /// synthesised fallback.
+    #[test]
+    fn the_callers_headers_reach_the_executor() {
+        let mut h = HashMap::new();
+        h.insert("x-opencode-session".to_string(), "ses_abc".to_string());
+        h.insert(
+            "user-agent".to_string(),
+            "opencode/1.2.3 (darwin)".to_string(),
+        );
+        let map = client_raw_header_map(Some(&h));
+        assert_eq!(
+            map.get("x-opencode-session").map(String::as_str),
+            Some("ses_abc")
+        );
+        assert_eq!(
+            map.get("user-agent").map(String::as_str),
+            Some("opencode/1.2.3 (darwin)")
+        );
+    }
+
+    /// A request with no client headers must yield an empty map, not panic and
+    /// not a map holding a placeholder that would read as "a client sent
+    /// something".
+    #[test]
+    fn absent_headers_yield_an_empty_map() {
+        assert!(client_raw_header_map(None).is_empty());
     }
 }
