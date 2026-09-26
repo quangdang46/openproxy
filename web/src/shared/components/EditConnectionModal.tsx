@@ -1,16 +1,22 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import type { ChangeEvent } from "react";
 import Modal from "@/shared/components/Modal";
 import Input from "@/shared/components/Input";
 import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
 import Select from "@/shared/components/Select";
-import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import type { ProviderRegionConfig } from "@/shared/constants/providers";
+import type { Provider } from "@/types";
+
+type RegionOption = NonNullable<ProviderRegionConfig["regions"]>[number];
 
 const NONE_PROXY_POOL_VALUE = "__none__";
 
 interface ProviderSpecificData {
+  region?: string;
   azureEndpoint?: string;
   apiVersion?: string;
   deployment?: string;
@@ -45,6 +51,16 @@ interface EditConnectionModalProps {
   onClose: () => void;
 }
 
+// A provider that no longer lists the stored region (registry changed, or the
+// connection predates the field) falls back to the registry default.
+function regionConfig(provider: string | undefined, saved: string | undefined): { list: RegionOption[]; saved: string } {
+  const cfg = (provider ? AI_PROVIDERS[provider] : undefined) as (Provider & ProviderRegionConfig) | undefined;
+  const list = cfg?.regions ?? [];
+  if (list.length === 0) return { list: [], saved: "" };
+  const fallback = cfg?.defaultRegion || list[0].id;
+  return { list, saved: list.some((r) => r.id === saved) ? (saved as string) : fallback };
+}
+
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }: EditConnectionModalProps) {
   const [formData, setFormData] = useState({
     name: "",
@@ -61,6 +77,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"success" | "failed" | null>(null);
   const [validating, setValidating] = useState(false);
@@ -89,6 +106,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (connection.provider === "cloudflare-ai" && connection.providerSpecificData) {
         setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
       }
+      setRegion(regionConfig(connection.provider, connection.providerSpecificData?.region).saved);
       setTestResult(null);
       setValidationResult(null);
     }
@@ -100,6 +118,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
+  const providerRegions = regionConfig(connection?.provider, connection?.providerSpecificData?.region).list;
 
   const handleTest = async () => {
     if (!connection?.provider) return;
@@ -291,6 +310,15 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
               </Badge>
             )}
           </>
+        )}
+
+        {providerRegions.length > 0 && (
+          <Select
+            label="Region"
+            value={region}
+            onChange={(e: ChangeEvent<HTMLSelectElement>) => setRegion(e.target.value)}
+            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
+          />
         )}
 
         {isAzure && (

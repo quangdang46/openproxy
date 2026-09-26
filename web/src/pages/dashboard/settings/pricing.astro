@@ -2,10 +2,7 @@
 // Dedicated pricing settings page (9router parity — not a stuck-open modal).
 import Layout from '@/layouts/Layout.astro';
 import PricingPageClient from '@/components/PricingPageClient';
-import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <DashboardLayout client:only="react">
-    <PricingPageClient client:only="react" />
-  </DashboardLayout>
+  <PricingPageClient client:only="react" />
 </Layout>

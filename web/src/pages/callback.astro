@@ -6,59 +6,31 @@
 // localStorage events, and postMessage.
 // This component is rendered server-side; the interactive logic runs on the
 // client in the <script> block below.
+import Layout from '@/layouts/Layout.astro';
 ---
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenProxy — OAuth Callback</title>
-    <style is:global>
-      *,
-      *::before,
-      *::after { box-sizing: border-box; margin: 0; padding: 0; }
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-        background: #0d0d0d;
-        color: #e5e5e5;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 100vh;
-        line-height: 1.6;
-      }
-      .card {
-        background: #1a1a1a;
-        border: 1px solid #2a2a2a;
-        border-radius: 12px;
-        padding: 2rem;
-        max-width: 480px;
-        width: 90%;
-        text-align: center;
-      }
-      .spinner {
-        display: inline-block;
-        width: 24px;
-        height: 24px;
-        border: 3px solid #2a2a2a;
-        border-top-color: #6366f1;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-        margin-bottom: 1rem;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-      h1 { font-size: 1.25rem; margin-bottom: 0.75rem; }
-      p  { font-size: 0.875rem; color: #9ca3af; }
-      .error { color: #ef4444; }
-      .success { color: #22c55e; }
-    </style>
-  </head>
-  <body>
-    <div class="card" id="card">
-      <div class="spinner" id="spinner"></div>
-      <h1 id="title">Processing authentication…</h1>
-      <p id="message">Communicating with the OpenProxy dashboard.</p>
+
+<Layout title="OpenProxy — OAuth Callback">
+  <main class="flex min-h-screen items-center justify-center p-4 bg-canvas">
+    <div id="card" class="w-full max-w-[480px] rounded-xl border border-border bg-surface p-8 text-center">
+      <div id="spinner" class="spinner"></div>
+      <h1 id="title" class="mb-3 text-xl font-semibold text-text-main">Processing authentication…</h1>
+      <p id="message" class="text-sm text-text-muted">Communicating with the OpenProxy dashboard.</p>
     </div>
+  </main>
+
+  <style is:global>
+    .spinner {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--color-border, #2a2a2a);
+      border-top-color: var(--color-primary, #6366f1);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 1rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
 
     <script>
       (function () {
@@ -84,21 +56,11 @@
           timestamp: Date.now(),
         };
 
-        var sentByChannel = false;
-        var sentByStorage = false;
-        var sentByMessage = false;
-
-        function markSent() {
-          if (sentByChannel || sentByStorage || sentByMessage) return;
-          spinner.style.display = 'block';
-        }
-
         // Method 1: BroadcastChannel
         try {
           var channel = new BroadcastChannel('oauth_callback');
           channel.postMessage(data);
           channel.close();
-          sentByChannel = true;
         } catch (e) {
           // BroadcastChannel not supported — fall through
         }
@@ -106,7 +68,6 @@
         // Method 2: localStorage event (triggers 'storage' event in other tabs)
         try {
           localStorage.setItem('oauth_callback', JSON.stringify(data));
-          sentByStorage = true;
         } catch (e) {
           // localStorage unavailable — fall through
         }
@@ -130,7 +91,6 @@
                   { type: 'oauth_callback', data: data },
                   expectedOrigins[i]
                 );
-                sentByMessage = true;
               } catch (e) {
                 // This origin didn't match — try the next one
               }
@@ -144,12 +104,12 @@
         if (error) {
           spinner.style.display = 'none';
           title.textContent = 'Authentication Failed';
-          title.className = 'error';
+          title.className = 'mb-3 text-xl font-semibold text-[color:var(--color-danger)]';
           msg.textContent = errorDescription || error;
         } else if (code) {
           spinner.style.display = 'none';
           title.textContent = 'Authentication Complete';
-          title.className = 'success';
+          title.className = 'mb-3 text-xl font-semibold text-[color:var(--color-success,#22c55e)]';
           msg.textContent = 'You can close this window and return to the dashboard.';
 
           // Auto-close after 2 seconds
@@ -168,11 +128,11 @@
             'paste it into the <strong>Callback URL</strong> field in the OpenProxy dashboard.';
         }
 
-        // Fallback: if none of the communication methods worked, show copy-paste instructions
-        if (!sentByChannel && !sentByStorage && !sentByMessage) {
-          // Show the URL as a fallback for manual copy-paste
+        // No code and no error: the URL was opened by hand, so hand it back for
+        // pasting into the dashboard's Callback URL field.
+        if (!code && !error) {
           var urlMsg = document.createElement('p');
-          urlMsg.style.cssText = 'margin-top: 1rem; font-size: 0.75rem; color: #6b7280; word-break: break-all;';
+          urlMsg.style.cssText = 'margin-top: 1rem; font-size: 0.75rem; word-break: break-all;';
           urlMsg.textContent = 'Full URL: ' + window.location.href;
           card.appendChild(urlMsg);
 
@@ -200,6 +160,5 @@
           card.appendChild(copyBtn);
         }
       })();
-    </script>
-  </body>
-</html>
+  </script>
+</Layout>

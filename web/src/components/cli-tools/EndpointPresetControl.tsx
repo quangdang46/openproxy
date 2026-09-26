@@ -2,12 +2,22 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ChangeEvent } from "react";
+import type { EndpointPreset } from "./cliEndpointPresets";
+import {
+  deleteKeyPreset,
+  deletePreset,
+  readKeyPresets,
+  readPresets,
+  subscribeKeyPresets,
+  subscribePresets,
+  upsertKeyPreset,
+  upsertPreset,
+} from "./cliEndpointPresets";
 
-const STORAGE_KEY = "openproxy.cliToolEndpointPresets";
-
-interface Preset {
-  name: string;
-  baseUrl: string;
+// This control pairs an endpoint with the key that belongs to it, but the two
+// live in the two canonical browser-local stores. The pair is the shared `name`;
+// neither store is widened to hold the other's field.
+interface Preset extends EndpointPreset {
   apiKey: string;
 }
 
@@ -24,25 +34,20 @@ function maskApiKey(apiKey: string): string {
   return `${apiKey.slice(0, 8)}...${apiKey.slice(-4)}`;
 }
 
-function normalizePresets(value: unknown): Preset[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((preset): preset is Preset => 
-    preset && typeof preset === 'object' && 'name' in preset && 'baseUrl' in preset && 'apiKey' in preset
-  );
+// Join the two stores on name; an endpoint with no key preset still shows up.
+function joinPresets(): Preset[] {
+  const keys = new Map<string, string>(readKeyPresets().map((k) => [k.name, k.key]));
+  return readPresets().map((preset) => ({ ...preset, apiKey: keys.get(preset.name) || "" }));
 }
 
-function readPresets(): Preset[] {
-  if (typeof window === "undefined") return [];
-  try {
-    return normalizePresets(JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]"));
-  } catch {
-    return [];
-  }
+function writePair(name: string, baseUrl: string, apiKey: string): void {
+  upsertPreset(baseUrl, name);
+  upsertKeyPreset(apiKey, name);
 }
 
-function writePresets(presets: Preset[]): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizePresets(presets)));
+function removePair(name: string): void {
+  deletePreset(name);
+  deleteKeyPreset(name);
 }
 
 export default function EndpointPresetControl({
@@ -51,11 +56,14 @@ export default function EndpointPresetControl({
   onBaseUrlChange,
   onApiKeyChange,
 }: EndpointPresetControlProps): React.ReactNode {
-  const [presets, setPresets] = useState<Preset[]>([]);
+  const [presets, setPresets] = useState<Preset[]>(joinPresets);
   const [selectedName, setSelectedName] = useState<string>("");
 
   useEffect(() => {
-    setPresets(readPresets());
+    const sync = (): void => setPresets(joinPresets());
+    const offEndpoints = subscribePresets(sync);
+    const offKeys = subscribeKeyPresets(sync);
+    return () => { offEndpoints(); offKeys(); };
   }, []);
 
   const selectedPreset = useMemo(
@@ -85,23 +93,14 @@ export default function EndpointPresetControl({
     const name = window.prompt("Preset name", defaultName);
     if (!name?.trim()) return;
 
-    const nextPreset: Preset = { name: name.trim(), baseUrl: trimmedBaseUrl, apiKey: trimmedApiKey };
-    const nextPresets: Preset[] = [
-      ...presets.filter((preset) => preset.name !== nextPreset.name),
-      nextPreset,
-    ].sort((a, b) => a.name.localeCompare(b.name));
-
-    setPresets(nextPresets);
-    setSelectedName(nextPreset.name);
-    writePresets(nextPresets);
+    writePair(name.trim(), trimmedBaseUrl, trimmedApiKey);
+    setSelectedName(name.trim());
   };
 
   const handleDelete = (): void => {
     if (!selectedPreset) return;
-    const nextPresets = presets.filter((preset) => preset.name !== selectedPreset.name);
-    setPresets(nextPresets);
+    removePair(selectedPreset.name);
     setSelectedName("");
-    writePresets(nextPresets);
   };
 
   return (

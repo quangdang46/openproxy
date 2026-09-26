@@ -444,44 +444,6 @@ export default function ProvidersPageClient() {
 
   const handleBatchTest = async (mode, providerId = null) => {
     if (testingMode) return;
-    // Global chain: oauth → free → apikey sequentially, always spin each section.
-    if (mode === "all" || mode === "global") {
-      setTestingMode("all");
-      setTestResults(null);
-      let passed = 0;
-      let failed = 0;
-      let total = 0;
-      try {
-        for (const step of ["oauth", "free", "apikey"] as const) {
-          setTestingMode(step);
-          try {
-            const data = await runBatchTest(step);
-            if (data?.summary) {
-              passed += data.summary.passed || 0;
-              failed += data.summary.failed || 0;
-              total += data.summary.total || 0;
-            }
-          } catch {
-            // Continue remaining auth types even if one step fails.
-          }
-        }
-        setTestResults({ summary: { passed, failed, total } });
-        if (total === 0) {
-          notify.warning("No providers connected", "Nothing to test");
-        } else if (failed === 0) {
-          notify.success(`All ${total} tests passed`);
-        } else {
-          notify.warning(`${passed}/${total} passed, ${failed} failed`);
-        }
-      } catch (error) {
-        setTestResults({ error: "Test request failed" });
-        notify.error("Provider test failed");
-      } finally {
-        setTestingMode(null);
-      }
-      return;
-    }
-
     setTestingMode(mode === "provider" ? providerId : mode);
     setTestResults(null);
     try {
@@ -859,18 +821,18 @@ export default function ProvidersPageClient() {
               disabled={!!testingMode}
               title="Test all OAuth connections"
               className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-                testingMode === "oauth" || testingMode === "all"
+                testingMode === "oauth"
                   ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                   : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
               }`}
               aria-label="Test all OAuth connections"
             >
               <span
-                className={`material-symbols-outlined text-[14px]${testingMode === "oauth" || testingMode === "all" ? " animate-spin" : ""}`}
+                className={`material-symbols-outlined text-[14px]${testingMode === "oauth" ? " animate-spin" : ""}`}
               >
                 play_arrow
               </span>
-              {testingMode === "oauth" || testingMode === "all" ? "Testing..." : "Test All"}
+              {testingMode === "oauth" ? "Testing..." : "Test All"}
             </button>
           </div>
         </div>
@@ -912,18 +874,18 @@ export default function ProvidersPageClient() {
               disabled={!!testingMode}
               title="Test all Free connections"
               className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-                testingMode === "free" || testingMode === "all"
+                testingMode === "free"
                   ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                   : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
               }`}
               aria-label="Test all Free provider connections"
             >
               <span
-                className={`material-symbols-outlined text-[14px]${testingMode === "free" || testingMode === "all" ? " animate-spin" : ""}`}
+                className={`material-symbols-outlined text-[14px]${testingMode === "free" ? " animate-spin" : ""}`}
               >
                 play_arrow
               </span>
-              {testingMode === "free" || testingMode === "all" ? "Testing..." : "Test All"}
+              {testingMode === "free" ? "Testing..." : "Test All"}
             </button>
           </div>
         </div>
@@ -976,18 +938,18 @@ export default function ProvidersPageClient() {
             disabled={!!testingMode}
             title="Test all API Key connections"
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-              testingMode === "apikey" || testingMode === "all"
+              testingMode === "apikey"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                 : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
             }`}
             aria-label="Test all API Key connections"
           >
             <span
-              className={`material-symbols-outlined text-[14px]${testingMode === "apikey" || testingMode === "all" ? " animate-spin" : ""}`}
+              className={`material-symbols-outlined text-[14px]${testingMode === "apikey" ? " animate-spin" : ""}`}
             >
               play_arrow
             </span>
-            {testingMode === "apikey" || testingMode === "all" ? "Testing..." : "Test All"}
+            {testingMode === "apikey" ? "Testing..." : "Test All"}
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
@@ -1830,7 +1792,6 @@ function ProviderTestResultsView({ results }) {
       free: "Free",
       apikey: "API Key",
       provider: "Provider",
-      all: "All",
     }[mode] || mode;
 
   return (

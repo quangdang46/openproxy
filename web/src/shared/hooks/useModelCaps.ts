@@ -83,9 +83,58 @@ function inferCaps(provider: string | null, modelId: string): ModelCaps {
 
 interface ModelsApiEntry {
   fullModel?: string;
+  routedModel?: string;
   model?: string;
   provider?: string;
   caps?: ModelCaps;
+}
+
+type CapsMaps = { byFull: Record<string, ModelCaps>; byId: Record<string, ModelCaps> };
+
+// Module cache: one /api/models fetch shared by every useModelCaps instance.
+// Five components mount this hook; without it each one refetches on every mount.
+let cache: CapsMaps | null = null;
+let inflight: Promise<CapsMaps> | null = null;
+
+function buildMaps(models: ModelsApiEntry[]): CapsMaps {
+  const byFull: Record<string, ModelCaps> = {};
+  const byId: Record<string, ModelCaps> = {};
+  for (const m of models || []) {
+    let caps = m.caps;
+    if (!caps || (typeof caps === "object" && !Object.values(caps).some(Boolean))) {
+      // Backend may omit caps — infer so badges still light up.
+      caps = inferCaps(m.provider || null, m.model || "");
+    }
+    if (!caps) continue;
+    if (m.fullModel) byFull[m.fullModel] = caps;
+    // A routed model is `providerAlias/model`; clients that already resolved the
+    // provider alias look it up under that key.
+    if (m.routedModel) byFull[m.routedModel] = caps;
+    if (m.model) byId[m.model] = caps;
+  }
+  return { byFull, byId };
+}
+
+function loadModelCaps(): Promise<CapsMaps> {
+  if (cache) return Promise.resolve(cache);
+  if (inflight) return inflight;
+  inflight = fetch("/api/models", { cache: "no-store" })
+    .then((res) => {
+      if (!res.ok) throw new Error(`models ${res.status}`);
+      return res.json();
+    })
+    .then((data) => {
+      cache = buildMaps((data.models || []) as ModelsApiEntry[]);
+      return cache;
+    })
+    .catch(() => {
+      // Keep the cache null so a later mount can retry.
+      return { byFull: {}, byId: {} };
+    })
+    .finally(() => {
+      inflight = null;
+    });
+  return inflight;
 }
 
 /**
@@ -94,38 +143,30 @@ interface ModelsApiEntry {
  * heuristic when `/api/models` does not include `caps` (OpenProxy today).
  */
 export function useModelCaps() {
-  const [byFull, setByFull] = useState<Record<string, ModelCaps>>({});
-  const [byId, setById] = useState<Record<string, ModelCaps>>({});
+  const [byFull, setByFull] = useState<Record<string, ModelCaps>>(() => cache?.byFull || {});
+  const [byId, setById] = useState<Record<string, ModelCaps>>(() => cache?.byId || {});
 
   useEffect(() => {
     let alive = true;
-    (async () => {
-      try {
-        const res = await fetch("/api/models", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json();
-        const full: Record<string, ModelCaps> = {};
-        const id: Record<string, ModelCaps> = {};
-        for (const m of (data.models || []) as ModelsApiEntry[]) {
-          let caps = m.caps;
-          if (!caps || (typeof caps === "object" && !Object.values(caps).some(Boolean))) {
-            // Backend may omit caps — infer so badges still light up.
-            caps = inferCaps(m.provider || null, m.model || "");
-          }
-          if (!caps) continue;
-          if (m.fullModel) full[m.fullModel] = caps;
-          if (m.model) id[m.model] = caps;
-        }
-        if (alive) {
-          setByFull(full);
-          setById(id);
-        }
-      } catch {
-        /* ignore — getCaps still has heuristic fallback */
+    const sync = (maps: CapsMaps): void => {
+      if (alive) {
+        setByFull(maps.byFull);
+        setById(maps.byId);
       }
-    })();
+    };
+    if (cache) sync(cache);
+    else loadModelCaps().then(sync);
+
+    // Custom models are added and removed at runtime; drop the shared cache so
+    // every mounted consumer sees the new catalog.
+    const invalidate = (): void => {
+      cache = null;
+      loadModelCaps().then(sync);
+    };
+    window.addEventListener("customModelChanged", invalidate);
     return () => {
       alive = false;
+      window.removeEventListener("customModelChanged", invalidate);
     };
   }, []);
 

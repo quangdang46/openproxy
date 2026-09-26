@@ -2,15 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
+import type { EndpointPreset } from "./cliEndpointPresets";
+import { deletePreset, readPresets, subscribePresets, upsertPreset } from "./cliEndpointPresets";
 
-const STORAGE_KEY = "openproxy.cliToolEndpointPresets";
 const CUSTOM_VALUE = "__custom__";
 const SAVE_VALUE = "__save__";
 
-interface Preset {
-  name: string;
-  baseUrl: string;
-}
+type Preset = EndpointPreset;
 
 interface BaseUrlSelectProps {
   value: string;
@@ -29,24 +27,6 @@ function ensureV1(url: string): string {
   const trimmed = (url || "").replace(/\/+$/, "");
   if (!trimmed) return "";
   return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
-}
-
-function readSavedPresets(): Preset[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || "[]");
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((p: unknown): p is Preset =>
-      !!p && typeof p === "object" && "name" in (p as Record<string, unknown>) && "baseUrl" in (p as Record<string, unknown>)
-    );
-  } catch {
-    return [];
-  }
-}
-
-function writeSavedPresets(presets: Preset[]): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(presets));
 }
 
 interface BuildOptionsArgs {
@@ -116,14 +96,14 @@ export default function BaseUrlSelect({
   cloudUrl = "",
   withV1 = true,
 }: BaseUrlSelectProps): React.ReactNode {
-  const [savedPresets, setSavedPresets] = useState<Preset[]>([]);
+  const [savedPresets, setSavedPresets] = useState<Preset[]>(() => readPresets());
   const [mode, setMode] = useState<string>("");
   const [customInput, setCustomInput] = useState<string>("");
   const initializedRef = useRef<boolean>(false);
 
-  useEffect(() => {
-    setSavedPresets(readSavedPresets());
-  }, []);
+  // Two cards can be mounted at once (endpoint + preset picker); the store's
+  // change event is what keeps the second one in step with the first.
+  useEffect(() => subscribePresets(() => setSavedPresets(readPresets())), []);
 
   const options = useMemo(
     () => buildOptions({ requiresExternalUrl, tunnelEnabled, tunnelPublicUrl, tailscaleEnabled, tailscaleUrl, cloudEnabled, cloudUrl, savedPresets, withV1 }),
@@ -153,10 +133,7 @@ export default function BaseUrlSelect({
       try { defaultName = new URL(trimmed).host; } catch { /* fallback */ }
       const name = window.prompt("Save endpoint as:", defaultName);
       if (!name?.trim()) return;
-      const updated = [...savedPresets.filter((p) => p.name !== name.trim()), { name: name.trim(), baseUrl: trimmed }]
-        .sort((a, b) => a.name.localeCompare(b.name));
-      setSavedPresets(updated);
-      writeSavedPresets(updated);
+      upsertPreset(trimmed, name);
       return;
     }
     setMode(next);
@@ -178,9 +155,7 @@ export default function BaseUrlSelect({
   const handleDeleteSaved = (): void => {
     if (!mode.startsWith("saved:")) return;
     const name = mode.slice(6);
-    const updated = savedPresets.filter((p) => p.name !== name);
-    setSavedPresets(updated);
-    writeSavedPresets(updated);
+    deletePreset(name);
     setMode(CUSTOM_VALUE);
     setCustomInput("");
     onChange("");

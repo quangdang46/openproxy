@@ -167,7 +167,6 @@ export default function LoginPageClient() {
 
   const handleLogin = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (retryAfter > 0) return;
 
     setLoading(true);
     setError("");
@@ -292,7 +291,7 @@ export default function LoginPageClient() {
 
   if (statusLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-canvas px-4 py-12 relative overflow-hidden">
+      <div className="min-h-screen flex items-center justify-center bg-canvas p-4 relative overflow-hidden">
         <div className="landing-grid absolute inset-0 pointer-events-none -z-10" aria-hidden="true" />
         <div className="text-center relative z-10">
           <div className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-brand-coral border-t-transparent" />
@@ -303,7 +302,7 @@ export default function LoginPageClient() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-canvas px-4 py-12 relative overflow-hidden">
+    <div className="min-h-screen flex items-center justify-center bg-canvas p-4 relative overflow-hidden">
       <div className="landing-grid absolute inset-0 pointer-events-none -z-10" aria-hidden="true" />
 
       <div className="w-full max-w-md relative z-10">
@@ -419,7 +418,6 @@ export default function LoginPageClient() {
                     required
                     autoFocus={!oidcAvailable}
                     autoComplete="current-password"
-                    disabled={retryAfter > 0}
                   />
 
                   {error && (

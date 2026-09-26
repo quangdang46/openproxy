@@ -9,6 +9,16 @@ import type {
   AuthMethod
 } from "../../types";
 
+/**
+ * Per-region endpoints a provider offers. The registry carries these as data on
+ * the provider entry itself; this type names the shape for the two modals that
+ * read it, since `Provider` does not (yet) declare the field.
+ */
+export interface ProviderRegionConfig {
+  regions?: Array<{ id: string; label: string; baseUrl?: string }>;
+  defaultRegion?: string;
+}
+
 // Free Providers (kiro first, iflow last)
 export const FREE_PROVIDERS: Record<string, Provider> = {
   kiro: { id: "kiro", alias: "kr", name: "Kiro AI", icon: "psychology_alt", color: "#FF6B35", website: "https://kiro.dev", notice: { signupUrl: "https://kiro.dev" } },
@@ -90,7 +100,7 @@ export const THINKING_CONFIG: Record<string, ThinkingConfig> = {
 };
 
 // OAuth Providers
-export const OAUTH_PROVIDERS: Record<string, Provider> = {
+export const OAUTH_PROVIDERS: Record<string, Provider & ProviderRegionConfig> = {
   claude: { id: "claude", alias: "cc", name: "Claude Code", icon: "smart_toy", color: "#D97757", website: "https://claude.ai", notice: { signupUrl: "https://claude.ai" }, priority: 10 },
   antigravity: { id: "antigravity", alias: "ag", name: "Antigravity", icon: "rocket_launch", color: "#F59E0B", deprecated: true, deprecationNotice: "AG is designed exclusively for Antigravity IDE. Using it with other tools (OpenClaw, Claude, Codex...) may result in account restrictions or bans.", website: "https://antigravity.google", notice: { signupUrl: "https://antigravity.google" }, priority: 20 },
   codex: { id: "codex", alias: "cx", name: "OpenAI Codex", icon: "code", color: "#3B82F6", thinkingConfig: THINKING_CONFIG.effort, serviceKinds: ["llm", "image"], kindNotice: { image: "Requires a ChatGPT Plus (or higher) account. Free accounts are not supported for image generation." }, website: "https://chatgpt.com/codex", notice: { signupUrl: "https://chatgpt.com/codex" }, priority: 15 },
@@ -120,7 +130,7 @@ export const OAUTH_PROVIDERS: Record<string, Provider> = {
     authModes: ["oauth"],
     priority: 36,
   },
-  trae: { id: "trae", alias: "trae", name: "Trae", icon: "bolt", color: "#FF6A00", textIcon: "TR", website: "https://www.trae.ai", notice: { signupUrl: "https://www.trae.ai" }, authModes: ["oauth"], hasOAuth: true },
+  trae: { id: "trae", alias: "trae", name: "Trae", icon: "bolt", color: "#FF6A00", textIcon: "TR", website: "https://www.trae.ai", notice: { signupUrl: "https://www.trae.ai" }, authModes: ["oauth"], hasOAuth: true, regions: [{ id: "cn", label: "China", baseUrl: "https://api.marscode.com" }, { id: "sg", label: "Singapore", baseUrl: "https://api.trae.ai" }, { id: "us", label: "United States", baseUrl: "https://www.trae.ai" }], defaultRegion: "cn" },
   windsurf: { id: "windsurf", alias: "ws", name: "Windsurf", icon: "surfing", color: "#14B8A6", website: "https://windsurf.com", notice: { signupUrl: "https://windsurf.com" }, authModes: ["oauth", "apikey"], hasOAuth: true },
   zed: { id: "zed", alias: "zd", name: "Zed", icon: "code", color: "#A855F7", website: "https://zed.dev", notice: { signupUrl: "https://zed.dev/native_app_signin" }, hasOAuth: true, hidden: true, passthroughModels: true },
   gitlab: { id: "gitlab", alias: "gitlab", name: "GitLab Duo", icon: "code", color: "#FC6D26", textIcon: "GL", website: "https://gitlab.com", notice: { signupUrl: "https://gitlab.com" }, hasOAuth: true, hidden: true },
@@ -130,7 +140,7 @@ export const OAUTH_PROVIDERS: Record<string, Provider> = {
   "codebuddy-intl": { id: "codebuddy-intl", alias: "cbai", name: "CodeBuddy", icon: "smart_toy", color: "#006EFF", website: "https://www.codebuddy.ai", notice: { signupUrl: "https://www.codebuddy.ai" }, authModes: ["oauth", "apikey"], hasOAuth: true },
 };
 
-export const APIKEY_PROVIDERS: Record<string, Provider> = {
+export const APIKEY_PROVIDERS: Record<string, Provider & ProviderRegionConfig> = {
   glm: { id: "glm", alias: "glm", name: "GLM Coding", icon: "code", color: "#2563EB", textIcon: "GL", website: "https://open.bigmodel.cn", notice: { apiKeyUrl: "https://open.bigmodel.cn/usercenter/apikeys" }, serviceKinds: ["llm", "webSearch"], searchConfig: { baseUrl: "https://api.z.ai/api/mcp/web_search_prime/mcp", method: "POST", authType: "apikey", authHeader: "bearer", costPerQuery: 0, searchTypes: ["web"], defaultMaxResults: 5, maxMaxResults: 50, timeoutMs: 10000, cacheTTLMs: 300000 } },
   "glm-cn": { id: "glm-cn", alias: "glm-cn", name: "GLM (China)", icon: "code", color: "#DC2626", textIcon: "GC", website: "https://open.bigmodel.cn", notice: { apiKeyUrl: "https://open.bigmodel.cn/usercenter/apikeys" } },
   kimi: { id: "kimi", alias: "kimi", name: "Kimi", icon: "psychology", color: "#1E3A8A", textIcon: "KM", website: "https://kimi.moonshot.cn", notice: { apiKeyUrl: "https://platform.moonshot.ai/console/api-keys", signupUrl: "https://www.kimi.com/code" }, serviceKinds: ["llm", "webSearch"], searchViaChat: { defaultModel: "kimi-k3", pricingUrl: "https://platform.moonshot.ai/docs/pricing/chat" }, authModes: ["oauth", "apikey"], hasOAuth: true, oauth: { clientId: "17e5f671-d194-4dfb-9706-5516cb48c098", deviceCodeUrl: "https://auth.kimi.com/api/oauth/device_authorization", tokenUrl: "https://auth.kimi.com/api/oauth/token", refreshUrl: "https://auth.kimi.com/api/oauth/token" } },

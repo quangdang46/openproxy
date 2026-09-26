@@ -166,7 +166,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [tsConnecting, setTsConnecting] = useState<boolean>(false);
   // Persisted auth URL for re-opening login/connection popup (9router parity).
   const [tsAuthUrl, setTsAuthUrl] = useState<string>("");
-  const tsAuthLabelRef = useRef<string>("Login");
+  const [tsAuthLabel, setTsAuthLabel] = useState<string>("");
   const [showTsModal, setShowTsModal] = useState<boolean>(false);
   const [showDisableTsModal, setShowDisableTsModal] = useState<boolean>(false);
   const tsLogRef = useRef<HTMLDivElement>(null);
@@ -362,7 +362,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
       ]);
       if (settingsData) {
         const data = settingsData;
-        setRequireApiKey(data.requireApiKey || false);
+        setRequireApiKey(data.requireApiKey ?? true);
         setRequireLogin(data.requireLogin !== false);
         setHasPassword(data.hasPassword || false);
         setTunnelDashboardAccess(data.tunnelDashboardAccess || false);
@@ -685,6 +685,19 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     return false;
   };
 
+  // The user has to complete Tailscale's own OAuth/Funnel consent in a browser
+  // window, so the connect flow parks here until they do. Both the URL and the
+  // label travel together: the window is usually pre-opened and redirected, but
+  // the user still needs a button to re-open it if the popup was blocked.
+  const requestUserAuth = (url: string, label: string): void => {
+    setTsAuthUrl(url);
+    setTsAuthLabel(label);
+  };
+  const clearUserAuth = (): void => {
+    setTsAuthUrl("");
+    setTsAuthLabel("");
+  };
+
   const handleConnectTailscale = async (preOpenedTab: Window | null): Promise<void> => {
     const tab = preOpenedTab || null;
     setShowTsModal(false);
@@ -712,10 +725,10 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 
       // Needs login: redirect pre-opened tab or open new
       if (data.needsLogin && data.authUrl) {
-        setTsAuthUrl(data.authUrl);
+        requestUserAuth(data.authUrl, "Open Login Page");
         if (tab) tab.location.href = data.authUrl;
         else window.open(data.authUrl, "tailscale_auth", "width=600,height=700");
-        setTsProgress("Waiting for login...");
+        setTsProgress('Login required — click "Open Login Page" to continue');
         for (let i = 0; i < 40; i++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
@@ -753,7 +766,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 
       // Funnel not enabled: redirect pre-opened tab
       if (data.funnelNotEnabled && data.enableUrl) {
-        setTsAuthUrl(data.enableUrl);
+        requestUserAuth(data.enableUrl, "Open Funnel Settings");
         await pollFunnelEnable(data.enableUrl, tab);
         return;
       }
@@ -766,15 +779,16 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     } finally {
       setTsLoading(false);
       setTsConnecting(false);
-      if (!tsAuthUrl) setTsProgress("");
+      setTsProgress("");
+      clearUserAuth();
     }
   };
 
   const pollFunnelEnable = async (enableUrl: string, tab: Window | null): Promise<void> => {
-    setTsAuthUrl(enableUrl);
+    requestUserAuth(enableUrl, "Open Funnel Settings");
     if (tab) tab.location.href = enableUrl;
     else window.open(enableUrl, "tailscale_auth", "width=600,height=700");
-    setTsProgress("Enable Funnel in browser, waiting...");
+    setTsProgress('Click "Open Funnel Settings" to enable Funnel...');
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 3000));
       try {
@@ -1090,19 +1104,8 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                   <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
                   {tsEverReachable ? "Tailscale reconnecting..." : "Checking Tailscale..."}
                 </div>
-                {tsAuthUrl && (tsEverReachable || tsEnabled) && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    icon="open_in_new"
-                    onClick={() => window.open(tsAuthUrl, "tailscale_auth", "width=600,height=700")}
-                    title="Re-open auth window"
-                  >
-                    Re-auth
-                  </Button>
-                )}
                 <button
-                  onClick={() => { setShowDisableTsModal(true); setTsAuthUrl(""); }}
+                  onClick={() => { setShowDisableTsModal(true); clearUserAuth(); }}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
                   title="Disable Tailscale"
                 >
@@ -1115,8 +1118,19 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                   <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
                   {tsProgress || "Connecting..."}
                 </div>
+                {tsAuthUrl && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="open_in_new"
+                    onClick={() => window.open(tsAuthUrl, "tailscale_auth", "width=600,height=700,noopener,noreferrer")}
+                    title="Re-open auth window"
+                  >
+                    {tsAuthLabel || "Open"}
+                  </Button>
+                )}
                 <button
-                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); setTsAuthUrl(""); }}
+                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); clearUserAuth(); }}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
                   title="Stop"
                 >

@@ -157,9 +157,12 @@ export default function MediaProvidersKindPageClient() {
     const kindFromPath = pathParts[pathParts.length - 1];
     setKind(kindFromPath);
 
-    // Redirect webSearch/webFetch to /web
+    // webSearch/webFetch are not real kinds — they were folded into `web`.
+    // Replace rather than push: the back button should skip the alias, the way
+    // the Next router's `replace` does in 9router.
     if (kindFromPath === "webSearch" || kindFromPath === "webFetch") {
-      window.location.href = "/dashboard/media-providers/web";
+      window.history.replaceState(null, "", "/dashboard/media-providers/web");
+      setKind("web");
       return;
     }
   }, []);

@@ -181,6 +181,11 @@ export default function ProvidersNewPageClient() {
     }`;
   };
 
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>): void => {
+    e.preventDefault();
+    void handleConnect();
+  };
+
   const handleConnect = async () => {
     if (!selected) return;
 
@@ -278,12 +283,10 @@ export default function ProvidersNewPageClient() {
       </div>
 
       <Card padding="lg">
-        <div className="flex flex-col gap-5">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <Select
             label="Provider"
             required
-            searchable
-            searchPlaceholder="Search providers..."
             placeholder="Choose a provider..."
             options={selectOptions}
             value={selectedKey}
@@ -405,7 +408,7 @@ export default function ProvidersNewPageClient() {
               </Button>
             </a>
             <Button
-              onClick={() => void handleConnect()}
+              type="submit"
               disabled={!selected || saving}
               fullWidth
               className="flex-1"
@@ -414,7 +417,7 @@ export default function ProvidersNewPageClient() {
               {primaryLabel}
             </Button>
           </div>
-        </div>
+        </form>
       </Card>
     </div>
   );
