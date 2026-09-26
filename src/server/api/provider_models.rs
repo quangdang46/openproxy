@@ -494,6 +494,17 @@ async fn fetch_provider_models_response(
             fetch_first_party_openai_style_models(connection, "https://api.qoder.com/v1/models")
                 .await
         }
+        // Zed's catalog is account-scoped and only reachable through its own
+        // cloud API, so it needs `resolve_zed_models` rather than an
+        // OpenAI-shaped listing. Without this arm Zed fell through to the
+        // catch-all and every "fetch models" returned "Provider zed does not
+        // support models listing" — a hard failure on surface #1 (Providers
+        // page) while cursor/qoder/codex all worked.
+        //
+        // It also gives `write_zed_models_psd` its first production caller, so
+        // the offline `provider_specific_data.zed_models` fallback in the
+        // executor's `resolve_model` stops being dead code.
+        "zed" => fetch_zed_models(connection).await,
         "openai" => {
             fetch_first_party_openai_style_models(connection, "https://api.openai.com/v1/models")
                 .await
@@ -732,6 +743,95 @@ async fn fetch_provider_models_response(
             "Provider {other} does not support models listing"
         ))),
     }
+}
+
+/// Fetch the Zed model catalog for the Providers page.
+///
+/// Port of 9router's `zed:` arm in `src/app/api/v1/models/route.js:119-134`:
+/// resolve the live catalog, return null when it is empty, and map each entry
+/// to `{id, name, capabilities}`. The `isDisabled` filter is already applied
+/// inside `resolve_zed_models` (it maps only non-disabled entries), so it is
+/// not repeated here — a second copy would be a second source of truth for
+/// the same rule.
+///
+/// Unlike the OpenAI-shaped arms this does not build its own HTTP client per
+/// call: `resolve_zed_models` owns a TTL cache and an in-flight de-dup keyed
+/// by account, and bypassing it would turn every dashboard open into a Zed API
+/// round trip.
+async fn fetch_zed_models(
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let (user_id, access_token, organization_id, system_id) =
+        crate::core::executor::zed_identity(connection);
+    if access_token.is_empty() {
+        return Err(RouteError::unauthorized(
+            "Zed connection has no access token",
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    let mut psd = connection.provider_specific_data.clone();
+    let catalog = crate::oauth::zed_auth::resolve_zed_models(
+        &client,
+        &user_id,
+        &access_token,
+        &organization_id,
+        system_id.as_deref(),
+        false,
+    )
+    .await
+    .map_err(|e| RouteError::bad_request(format!("Zed models lookup failed: {e}")))?;
+
+    // Persist before mapping, so a later offline resolve_model still finds the
+    // provider field even if this response turns out to be the last one served.
+    crate::core::executor::write_zed_models_psd(&mut psd, &catalog);
+
+    if catalog.models.is_empty() {
+        return Err(RouteError::bad_request(
+            "Zed returned no models for this account",
+        ));
+    }
+
+    Ok(response_with_models(
+        connection,
+        map_zed_catalog_models(&catalog.models),
+        None,
+    ))
+}
+
+/// Flatten a resolved Zed catalog into the listing shape.
+///
+/// Split out from `fetch_zed_models` so the mapping is testable without a
+/// network call — the same reason the g37k suite asserts on bytes rather than
+/// on plumbing. The input is already mapped and `isDisabled`-filtered by
+/// `resolve_zed_models`.
+fn map_zed_catalog_models(models: &[Value]) -> Vec<ProviderModel> {
+    models
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str)?;
+            let name = m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_string();
+            // 9router omits `capabilities` entirely for a model without tool
+            // support rather than sending `{tools:false}` — the dashboard
+            // distinguishes "no tools" from "tools not reported".
+            let mut extra = BTreeMap::new();
+            if m.get("supportsTools").and_then(Value::as_bool) == Some(true) {
+                extra.insert(
+                    "capabilities".to_string(),
+                    serde_json::json!({ "tools": true }),
+                );
+            }
+            Some(ProviderModel {
+                id: id.to_string(),
+                name,
+                extra,
+            })
+        })
+        .collect()
 }
 
 async fn fetch_first_party_openai_style_models(
@@ -2448,5 +2548,75 @@ mod discovery_parity_tests {
         // report false so /v1/models does not issue a doomed request.
         assert!(supports_models_discovery("deepseek-web"));
         assert!(!supports_models_discovery("definitely-not-a-provider"));
+    }
+}
+
+#[cfg(test)]
+mod zed_models_tests {
+    use super::*;
+
+    fn cat(id: &str, name: &str, tools: bool) -> Value {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "supportsTools": tools,
+            "provider": "zed",
+        })
+    }
+
+    /// THE REGRESSION. There was no `"zed" =>` arm, so Zed fell through to the
+    /// catch-all and every fetch returned "Provider zed does not support
+    /// models listing" — while cursor, qoder and codex all worked. The mapping
+    /// is what the Providers page consumes, so it is what the test pins.
+    #[test]
+    fn a_zed_catalog_maps_to_the_listing_shape() {
+        let out = map_zed_catalog_models(&[cat("claude-sonnet-4-5", "Claude Sonnet 4.5", true)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "claude-sonnet-4-5");
+        assert_eq!(out[0].name, "Claude Sonnet 4.5");
+    }
+
+    /// 9router emits `{tools: true}` for a tool-capable model and OMITS
+    /// `capabilities` for one that is not. Sending `{tools: false}` instead
+    /// would make the dashboard render a capability badge the user never had.
+    #[test]
+    fn capabilities_are_omitted_rather_than_sent_as_false() {
+        let with = map_zed_catalog_models(&[cat("a", "A", true)]);
+        assert_eq!(
+            with[0].extra.get("capabilities"),
+            Some(&serde_json::json!({"tools": true}))
+        );
+
+        let without = map_zed_catalog_models(&[cat("b", "B", false)]);
+        assert!(
+            !without[0].extra.contains_key("capabilities"),
+            "a model without tools must carry no capabilities key, got {:?}",
+            without[0].extra
+        );
+    }
+
+    /// A model with no display name falls back to its id rather than
+    /// rendering a blank row the user cannot select.
+    #[test]
+    fn a_missing_name_falls_back_to_the_id() {
+        let out = map_zed_catalog_models(&[serde_json::json!({"id": "zed-1"})]);
+        assert_eq!(out[0].name, "zed-1");
+    }
+
+    /// An entry with no id is unlistable and must be dropped, not emitted
+    /// with an empty id the client would then request.
+    #[test]
+    fn an_entry_without_an_id_is_dropped() {
+        let out = map_zed_catalog_models(&[
+            cat("keep", "Keep", true),
+            serde_json::json!({"name": "no id"}),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "keep");
+    }
+
+    #[test]
+    fn an_empty_catalog_yields_no_models() {
+        assert!(map_zed_catalog_models(&[]).is_empty());
     }
 }

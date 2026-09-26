@@ -206,7 +206,7 @@ pub async fn resolve_model(
 
 /// Identity fields the Zed cloud calls need, pulled out of the connection once
 /// so `resolve_model` and the executor do not each re-derive them.
-fn zed_identity(credentials: &ProviderConnection) -> (String, String, String, Option<String>) {
+pub fn zed_identity(credentials: &ProviderConnection) -> (String, String, String, Option<String>) {
     let psd = &credentials.provider_specific_data;
     let user_id = psd
         .get("userId")

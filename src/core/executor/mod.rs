@@ -123,7 +123,9 @@ pub use windsurf::{
     WindsurfExecutionRequest, WindsurfExecutor, WindsurfExecutorError, WindsurfExecutorResponse,
 };
 pub use xai::{XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse};
-pub use zed::{ZedExecutionRequest, ZedExecutor, ZedExecutorResponse};
+pub use zed::{
+    write_zed_models_psd, zed_identity, ZedExecutionRequest, ZedExecutor, ZedExecutorResponse,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorKind {
