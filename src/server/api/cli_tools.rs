@@ -2,6 +2,7 @@ mod claude_settings;
 mod cline_settings;
 mod cowork_settings;
 mod deepseek_tui_settings;
+mod devin_settings;
 mod grok_build_settings;
 mod hermes_settings;
 mod jcode_settings;
@@ -3015,6 +3016,7 @@ pub fn routes() -> Router<AppState> {
         .merge(cline_settings::routes())
         .merge(cowork_settings::routes())
         .merge(deepseek_tui_settings::routes())
+        .merge(devin_settings::routes())
         .merge(grok_build_settings::routes())
         .merge(hermes_settings::routes())
         .merge(jcode_settings::routes())

@@ -73,7 +73,9 @@ pub use default::{
     select_anthropic_beta, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
     ProviderConfig, TransportKind, UpstreamResponse,
 };
-pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
+pub use devin_cli::{
+    devin_bin_candidates, DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse,
+};
 pub use gemini_cli::{
     GeminiCliExecutionRequest, GeminiCliExecutor, GeminiCliExecutorError, GeminiCliExecutorResponse,
 };

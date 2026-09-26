@@ -41,6 +41,21 @@ pub struct DevinExecutorResponse {
     pub transport: TransportKind,
 }
 
+/// Installer locations probed in order before falling back to PATH.
+/// Shared with the `/api/cli-tools/devin-settings` detection route so the status
+/// the dashboard shows cannot drift from the binary the executor actually spawns.
+pub fn devin_bin_candidates() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    vec![
+        format!("{home}/.local/share/devin/bin/devin"),
+        format!("{home}/.devin/bin/devin"),
+        format!("{home}/.local/bin/devin"),
+        "/opt/homebrew/bin/devin".to_string(),
+        "/usr/local/bin/devin".to_string(),
+        "/usr/bin/devin".to_string(),
+    ]
+}
+
 /// Resolve the `devin` CLI binary exactly like resolveDevinBin():
 /// env override → platform installer paths → PATH fallback.
 fn resolve_devin_bin() -> String {
@@ -50,18 +65,9 @@ fn resolve_devin_bin() -> String {
             return trimmed.to_string();
         }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        format!("{home}/.local/share/devin/bin/devin"),
-        format!("{home}/.devin/bin/devin"),
-        format!("{home}/.local/bin/devin"),
-        "/opt/homebrew/bin/devin".to_string(),
-        "/usr/local/bin/devin".to_string(),
-        "/usr/bin/devin".to_string(),
-    ];
-    for c in &candidates {
-        if std::path::Path::new(c).exists() {
-            return c.clone();
+    for c in devin_bin_candidates() {
+        if std::path::Path::new(&c).exists() {
+            return c;
         }
     }
     "devin".to_string()
