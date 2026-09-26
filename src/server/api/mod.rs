@@ -2,6 +2,7 @@ pub mod a2a;
 pub mod admin_items;
 mod auth;
 pub mod budget_guard;
+pub mod catalog_sync;
 pub mod chat;
 pub mod chat_search;
 pub mod cli_tools;
@@ -101,6 +102,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 .route(
                     "/{kind}",
                     get(v1_models::list_models_by_kind).options(v1_models::cors_options),
+                )
+                .route(
+                    "/{provider}/{model}",
+                    get(v1_models::get_model_by_id).options(v1_models::cors_options),
                 ),
         )
         .merge(v1beta::routes())
@@ -334,6 +339,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(quota_auto_ping::routes())
         .merge(db_backups::routes())
         .merge(models_disabled::routes())
+        .merge(catalog_sync::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
         .merge(provider_filters::routes())

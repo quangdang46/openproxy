@@ -18,6 +18,12 @@ use crate::types::{CustomModel, ProviderConnection};
 
 const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
 const ANTHROPIC_COMPATIBLE_PREFIX: &str = "anthropic-compatible-";
+
+/// Marker sent with the outbound `/models` fetch a compatible connection is
+/// discovered through, and read back by the receiving `/v1/models` to skip its
+/// own dynamic fetch. Two proxies wired to each other would otherwise ping-pong
+/// until the timeout. 9router `INTERNAL_MODELS_FETCH_HEADER` (route.js:144).
+pub(crate) const INTERNAL_MODELS_FETCH_HEADER: &str = "x-9r-internal-models-fetch";
 const OLLAMA_LOCAL_DEFAULT_HOST: &str = "http://localhost:11434";
 /// Live-verified: `/v1/models` → 200 OpenAI shape (`{"object":"list","data":[…]}`),
 /// with or without a Bearer key. `/api/v1/models` → 404.
@@ -247,13 +253,13 @@ pub(super) async fn import_provider_models(
 
 pub(super) async fn fetch_compatible_model_ids(connection: &ProviderConnection) -> Vec<String> {
     let models = if is_openai_compatible_provider(&connection.provider) {
-        fetch_openai_compatible_models(connection)
+        fetch_openai_compatible_models(connection, true)
             .await
             .ok()
             .map(|payload| payload.models)
             .unwrap_or_default()
     } else if is_anthropic_compatible_provider(&connection.provider) {
-        fetch_anthropic_compatible_models(connection)
+        fetch_anthropic_compatible_models(connection, true)
             .await
             .ok()
             .map(|payload| payload.models)
@@ -427,11 +433,11 @@ async fn fetch_provider_models_response(
     connection: &ProviderConnection,
 ) -> Result<ProviderModelsResponse, RouteError> {
     if is_openai_compatible_provider(&connection.provider) {
-        return fetch_openai_compatible_models(connection).await;
+        return fetch_openai_compatible_models(connection, false).await;
     }
 
     if is_anthropic_compatible_provider(&connection.provider) {
-        return fetch_anthropic_compatible_models(connection).await;
+        return fetch_anthropic_compatible_models(connection, false).await;
     }
 
     match connection.provider.as_str() {
@@ -446,6 +452,7 @@ async fn fetch_provider_models_response(
                 "https://api.anthropic.com/v1/models",
                 &token,
                 Some("2023-06-01"),
+                false,
             )
             .await
         }
@@ -461,6 +468,7 @@ async fn fetch_provider_models_response(
                 connection,
                 &resolve_qwen_models_url(connection),
                 &token,
+                false,
             )
             .await
         }
@@ -732,7 +740,7 @@ async fn fetch_first_party_openai_style_models(
 ) -> Result<ProviderModelsResponse, RouteError> {
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
-    fetch_openai_style_models_with_bearer(connection, url, &token).await
+    fetch_openai_style_models_with_bearer(connection, url, &token, false).await
 }
 
 /// Static model list for deepseek-web (OmniRoute
@@ -822,36 +830,49 @@ async fn fetch_openrouter_models(
 
 async fn fetch_openai_compatible_models(
     connection: &ProviderConnection,
+    internal_marker: bool,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let base_url = provider_specific_string(connection, "baseUrl").ok_or_else(|| {
         RouteError::bad_request("No base URL configured for OpenAI compatible provider")
     })?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let token = connection.api_key.clone().unwrap_or_default();
-    fetch_openai_style_models_with_bearer(connection, &url, &token).await
+    fetch_openai_style_models_with_bearer(connection, &url, &token, internal_marker).await
 }
 
 async fn fetch_anthropic_compatible_models(
     connection: &ProviderConnection,
+    internal_marker: bool,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let base_url = provider_specific_string(connection, "baseUrl").ok_or_else(|| {
         RouteError::bad_request("No base URL configured for Anthropic compatible provider")
     })?;
     let normalized = normalize_anthropic_models_base_url(&base_url);
     let token = connection.api_key.clone().unwrap_or_default();
-    fetch_anthropic_models(connection, &normalized, &token, Some("2023-06-01")).await
+    fetch_anthropic_models(
+        connection,
+        &normalized,
+        &token,
+        Some("2023-06-01"),
+        internal_marker,
+    )
+    .await
 }
 
 async fn fetch_openai_style_models_with_bearer(
     connection: &ProviderConnection,
     url: &str,
     token: &str,
+    internal_marker: bool,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let client = http_client()?;
-    let request = client
+    let mut request = client
         .get(url)
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, format!("Bearer {token}"));
+    if internal_marker {
+        request = request.header(INTERNAL_MODELS_FETCH_HEADER, "1");
+    }
     let payload = fetch_json(request)
         .await
         .map_err(map_upstream_route_error)?;
@@ -867,6 +888,7 @@ async fn fetch_anthropic_models(
     url: &str,
     token: &str,
     version: Option<&str>,
+    internal_marker: bool,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let client = http_client()?;
     let mut request = client
@@ -876,6 +898,9 @@ async fn fetch_anthropic_models(
         .header(AUTHORIZATION, format!("Bearer {token}"));
     if let Some(version) = version {
         request = request.header("anthropic-version", version);
+    }
+    if internal_marker {
+        request = request.header(INTERNAL_MODELS_FETCH_HEADER, "1");
     }
     let payload = fetch_json(request)
         .await

@@ -131,7 +131,11 @@ async fn disable_models_handler(
     }
 
     let provider_alias = req.provider_alias.trim();
-    if provider_alias.is_empty() || req.ids.is_empty() {
+    // `ids: []` is a no-op, not a malformed request: 9router's guard is
+    // `Array.isArray(ids)`, which an empty array passes, and the merge it then
+    // runs leaves the existing set untouched. Rejecting it here would 400 a
+    // caller that is only clearing a selection the server never had.
+    if provider_alias.is_empty() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(json!({ "error": "providerAlias and ids[] required" })),
