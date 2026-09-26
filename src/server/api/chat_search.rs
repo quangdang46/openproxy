@@ -14,10 +14,15 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use crate::core::combo::{
+    execute_combo_strategy_full, get_combo_models_from_data, strategy_for_combo, ComboAttemptError,
+    ComboExecutionError, ComboStrategy, ModelCapacity,
+};
 use crate::core::media::search::{dispatch as search_dispatch, is_search_provider};
 use crate::core::proxy::resolve_proxy_target;
 use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
+use crate::types::PricingTable;
 
 use super::auth_error_response;
 use super::cors::{cors_preflight_response, with_cors_response};
@@ -243,16 +248,19 @@ pub async fn handle_search_completions(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    // The explicit `provider` field is the other half of 9router's
+    // `body.provider || body.model` (search.js:33) — the dashboard sends a
+    // web-search model under `model` because for webSearch the provider IS the
+    // model. Resolution below still prefers `model`, as it always has.
+    let provider_field = body
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let provider = model_str
         .and_then(resolve_search_provider)
-        .or_else(|| {
-            // Fallback: check explicit `provider` field.
-            body.get("provider")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(resolve_search_provider)
-        })
+        .or_else(|| provider_field.and_then(resolve_search_provider))
         .unwrap_or("serper");
 
     // -- Extract query --
@@ -311,46 +319,94 @@ pub async fn handle_search_completions(
     // -- Execute search with cross-provider failover: primary first, then
     // the remaining registry providers that have an active connection --
     let snapshot = state.db.snapshot();
-    let mut attempted: Vec<&'static str> = Vec::new();
-    let mut last_err_msg: Option<String> = None;
-    let mut last_err_code: Option<String> = None;
-    let mut success: Option<(Value, u64, &'static str)> = None;
 
-    for candidate in failover_order(provider) {
-        let connection = match select_search_connection(&snapshot, candidate) {
-            Some(c) => c,
-            None => continue,
-        };
-        attempted.push(candidate);
-        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
-        let client = match state.client_pool.get(candidate, proxy.as_ref()) {
-            Ok(c) => c,
-            Err(e) => {
-                last_err_msg = Some(format!("Failed to create HTTP client: {}", e));
-                last_err_code = Some("server_error".to_string());
-                continue;
-            }
-        };
-        match search_dispatch(&client, &connection, candidate, &search_body).await {
-            Some(Ok(raw_value)) => {
-                let results_arr = raw_value
-                    .get("results")
-                    .and_then(Value::as_array)
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                success = Some((raw_value, results_arr as u64, candidate));
-                break;
-            }
-            Some(Err(err)) => {
-                last_err_msg = Some(err.message().to_string());
-                last_err_code = Some(format!("search_{}", err.status()));
-                continue;
-            }
-            None => continue,
+    // 9router search.js:73-86 tests the provider/model string against the
+    // combo table BEFORE resolving a provider id, and hands a hit to
+    // handleComboChat with the same strategy + sticky settings chat uses. A
+    // combo configured over search providers therefore fans out here; without
+    // the branch it is read as a literal provider name and falls through to
+    // the `.unwrap_or("serper")` default.
+    if let Some(combo_name) = model_str.or(provider_field) {
+        if let Some(combo_models) = get_combo_models_from_data(combo_name, &snapshot.combos) {
+            let strategy = strategy_for_combo(&snapshot, combo_name);
+            let sticky_limit = snapshot.settings.combo_sticky_round_robin_limit.max(1);
+            let pricing = PricingTable::new();
+            let combo_state = state.clone();
+            let combo_search_body = search_body.clone();
+            let combo_snapshot = snapshot.clone();
+            let result = execute_combo_strategy_full(
+                &combo_models,
+                Some(combo_name),
+                strategy,
+                &[],
+                sticky_limit,
+                None,
+                &pricing,
+                |_: &str| ModelCapacity::Available,
+                move |member: &str| {
+                    let state = combo_state.clone();
+                    let search_body = combo_search_body.clone();
+                    let snapshot = combo_snapshot.clone();
+                    let member = member.to_string();
+                    async move {
+                        // 9router handleSingleProviderSearch answers 400
+                        // `Unknown provider: X` for a member that is not a
+                        // search provider, which handleComboChat treats as a
+                        // member failure and rotates past.
+                        let Some(member_provider) = resolve_search_provider(&member) else {
+                            return Err(ComboAttemptError {
+                                status: 400,
+                                message: format!("Unknown provider: {}", member),
+                                retry_after: None,
+                                upstream_body: None,
+                            });
+                        };
+                        let chain =
+                            run_search_chain(&state, &snapshot, member_provider, &search_body)
+                                .await;
+                        match chain.success {
+                            Some(success) => Ok(success),
+                            None => Err(chain.into_attempt_error(member_provider)),
+                        }
+                    }
+                },
+            )
+            .await;
+
+            return match result {
+                Ok((results_value, usage_tokens, effective_provider)) => build_search_response(
+                    &body,
+                    provider,
+                    &query,
+                    search_type,
+                    &results_value,
+                    usage_tokens,
+                    &effective_provider,
+                ),
+                Err(ComboExecutionError {
+                    status,
+                    message,
+                    earliest_retry_after: _,
+                    upstream_body: _,
+                }) => with_cors_response(
+                    (
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        Json(json!({
+                            "error": {
+                                "message": format!("Search failed: {}", message),
+                                "type": "server_error",
+                                "code": null
+                            }
+                        })),
+                    )
+                        .into_response(),
+                ),
+            };
         }
     }
 
-    if attempted.is_empty() {
+    let chain = run_search_chain(&state, &snapshot, provider, &search_body).await;
+    if !chain.attempted {
         return with_cors_response(
             (
                 StatusCode::BAD_REQUEST,
@@ -366,15 +422,15 @@ pub async fn handle_search_completions(
         );
     }
 
-    let Some((results_value, usage_tokens, effective_provider)) = success else {
+    let Some((results_value, usage_tokens, effective_provider)) = chain.success else {
         return with_cors_response(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
                     "error": {
-                        "message": format!("Search failed: {}", last_err_msg.unwrap_or_else(|| "all search providers failed".to_string())),
+                        "message": format!("Search failed: {}", chain.last_err_msg.unwrap_or_else(|| "all search providers failed".to_string())),
                         "type": "server_error",
-                        "code": last_err_code
+                        "code": chain.last_err_code
                     }
                 })),
             )
@@ -382,7 +438,120 @@ pub async fn handle_search_completions(
         );
     };
 
-    // -- Build the chat-completion-style response --
+    build_search_response(
+        &body,
+        provider,
+        &query,
+        search_type,
+        &results_value,
+        usage_tokens,
+        &effective_provider,
+    )
+}
+
+/// One provider's search attempt plus every cross-provider failover candidate
+/// behind it. Shared by the single-provider path and each combo member, so a
+/// member fails (and the combo rotates) with exactly the diagnostics the
+/// single-provider path would have produced.
+struct SearchChain {
+    /// The first provider that answered: raw payload, result count, provider id.
+    success: Option<(Value, u64, String)>,
+    /// Whether any candidate had a usable connection — `false` means the
+    /// provider is simply not configured.
+    attempted: bool,
+    last_err_msg: Option<String>,
+    last_err_code: Option<String>,
+}
+
+impl SearchChain {
+    /// The failure as a combo member error. "No credentials" stays a 400 so
+    /// the combo's own error is the actionable one rather than a blanket 502.
+    fn into_attempt_error(self, provider: &str) -> ComboAttemptError {
+        if !self.attempted {
+            return ComboAttemptError {
+                status: 400,
+                message: format!(
+                    "No active credentials found for search provider: {}",
+                    provider
+                ),
+                retry_after: None,
+                upstream_body: None,
+            };
+        }
+        ComboAttemptError {
+            status: 502,
+            message: self
+                .last_err_msg
+                .unwrap_or_else(|| "all search providers failed".to_string()),
+            retry_after: None,
+            upstream_body: None,
+        }
+    }
+}
+
+/// Search one provider, then the remaining registry providers that have an
+/// active connection. Returns on the first answer.
+async fn run_search_chain(
+    state: &AppState,
+    snapshot: &crate::types::AppDb,
+    provider: &str,
+    search_body: &Value,
+) -> SearchChain {
+    let mut chain = SearchChain {
+        success: None,
+        attempted: false,
+        last_err_msg: None,
+        last_err_code: None,
+    };
+
+    for candidate in failover_order(provider) {
+        let connection = match select_search_connection(snapshot, candidate) {
+            Some(c) => c,
+            None => continue,
+        };
+        chain.attempted = true;
+        let proxy = resolve_proxy_target(snapshot, &connection, &snapshot.settings);
+        let client = match state.client_pool.get(candidate, proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                chain.last_err_msg = Some(format!("Failed to create HTTP client: {}", e));
+                chain.last_err_code = Some("server_error".to_string());
+                continue;
+            }
+        };
+        match search_dispatch(&client, &connection, candidate, search_body).await {
+            Some(Ok(raw_value)) => {
+                let results_arr = raw_value
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                chain.success = Some((raw_value, results_arr as u64, candidate.to_string()));
+                break;
+            }
+            Some(Err(err)) => {
+                chain.last_err_msg = Some(err.message().to_string());
+                chain.last_err_code = Some(format!("search_{}", err.status()));
+                continue;
+            }
+            None => continue,
+        }
+    }
+
+    chain
+}
+
+/// Wrap a provider's results in the chat-completion envelope this endpoint
+/// answers with.
+fn build_search_response(
+    body: &Value,
+    fallback_model: &str,
+    query: &str,
+    search_type: &str,
+    results_value: &Value,
+    usage_tokens: u64,
+    effective_provider: &str,
+) -> Response {
     let results = results_value
         .get("results")
         .and_then(Value::as_array)
@@ -414,7 +583,7 @@ pub async fn handle_search_completions(
         "id": format!("searchcmpl-{}", uuid::Uuid::new_v4()),
         "object": "chat.completion",
         "created": now.timestamp(),
-        "model": body.get("model").and_then(Value::as_str).unwrap_or(provider),
+        "model": body.get("model").and_then(Value::as_str).unwrap_or(fallback_model),
         "choices": [
             {
                 "index": 0,
@@ -439,8 +608,7 @@ pub async fn handle_search_completions(
         }
     });
 
-    let resp = (StatusCode::OK, Json(response)).into_response();
-    with_cors_response(resp)
+    with_cors_response((StatusCode::OK, Json(response)).into_response())
 }
 
 #[cfg(test)]

@@ -53,6 +53,14 @@ impl UsageTracker {
             .unwrap_or(0);
         let cache_read_tokens = tokens.and_then(|t| t.cache_read_input_tokens).unwrap_or(0);
 
+        // 9router saveUsageStats returns before saveRequestUsage when the pair
+        // is all-zero, so a response that carried no usage at all (most SSE
+        // streams) leaves no history row, no daily aggregate and no lifetime
+        // increment.
+        if prompt_tokens == 0 && completion_tokens == 0 {
+            return;
+        }
+
         let cost = self.pricing.calculate_cost(
             provider,
             model,

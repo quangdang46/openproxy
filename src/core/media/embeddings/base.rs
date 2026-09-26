@@ -16,6 +16,33 @@ fn json_number(n: f64) -> Value {
     }
 }
 
+/// `String(value)` the way JS coerces it — 9router's Gemini adapter runs both
+/// the batch elements and the single input through `String(text)`
+/// (`embeddingProviders/gemini.js:24, :31`), which is `Array.prototype.toString`
+/// for an array, not `JSON.stringify`. So `[1,2]` is `"1,2"` and `[[1,2],[3,4]]`
+/// flattens to `"1,2,3,4"`; an object is `"[object Object]"`; an integral double
+/// loses the `.0` that `serde_json` would keep.
+fn js_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => i.to_string(),
+            None => match n.as_u64() {
+                Some(u) => u.to_string(),
+                None => match n.as_f64() {
+                    Some(f) if f.is_finite() && f.fract() == 0.0 => format!("{}", f as i64),
+                    Some(f) => f.to_string(),
+                    None => n.to_string(),
+                },
+            },
+        },
+        Value::Array(items) => items.iter().map(js_string).collect::<Vec<_>>().join(","),
+        Value::Object(_) => "[object Object]".to_string(),
+    }
+}
+
 /// One inbound embeddings request.
 #[derive(Debug, Clone)]
 pub struct EmbeddingRequest<'a> {
@@ -314,10 +341,7 @@ impl EmbeddingAdapter for GeminiAdapter {
             let requests: Vec<Value> = arr
                 .iter()
                 .map(|v| {
-                    let text = match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
+                    let text = js_string(v);
                     let mut req = json!({
                         "model": m,
                         "content": {"parts": [{"text": text}]},
@@ -332,10 +356,7 @@ impl EmbeddingAdapter for GeminiAdapter {
                 .collect();
             Ok(json!({"requests": requests}))
         } else {
-            let text = match input {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
+            let text = js_string(input);
             let mut body = json!({"model": m, "content": {"parts": [{"text": text}]}});
             if let Some(d) = dim {
                 if let Some(obj) = body.as_object_mut() {
@@ -451,6 +472,51 @@ mod tests {
         assert_eq!(normalized["object"], "list");
         assert_eq!(normalized["data"].as_array().unwrap().len(), 2);
         assert_eq!(normalized["data"][0]["embedding"], json!([0.1, 0.2]));
+    }
+
+    /// 9router `gemini.js:24, :31` coerces every element with `String(text)`.
+    /// `serde_json::Value::to_string` is `JSON.stringify`, so a numeric array
+    /// reached Gemini as `"[1,2]"` instead of JS's `"1,2"`.
+    #[test]
+    fn gemini_batch_stringifies_elements_like_js() {
+        let creds = ProviderConnection::default();
+        let body = json!({"input": [[1, 2], [[3], [4, 5]], 1.0, true, null, {"a": 1}, "x"]});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "embedding-001",
+            credentials: &creds,
+        };
+        let built = GEMINI.build_body(&req).unwrap();
+        let texts: Vec<String> = built["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                r["content"]["parts"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["1,2", "3,4,5", "1", "true", "null", "[object Object]", "x"]
+        );
+    }
+
+    /// The single-input `embedContent` arm applies the same `String()`, so an
+    /// integral double reaches Gemini as `"1"`, not serde_json's `"1.0"`.
+    #[test]
+    fn gemini_single_input_stringifies_like_js() {
+        let creds = ProviderConnection::default();
+        let body = json!({"input": 1.0});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "embedding-001",
+            credentials: &creds,
+        };
+        let built = GEMINI.build_body(&req).unwrap();
+        assert_eq!(built["content"]["parts"][0]["text"], "1");
     }
 
     #[test]

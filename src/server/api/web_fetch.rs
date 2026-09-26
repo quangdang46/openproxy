@@ -18,7 +18,7 @@ use crate::core::combo::{
     check_fallback_error, get_combo_models_from_data, strategy_for_combo, ComboStrategy,
 };
 use crate::server::state::AppState;
-use crate::types::ProviderConnection;
+use crate::types::{PricingTable, ProviderConnection};
 
 use super::auth_error_response;
 use super::cors::cors_preflight_response;
@@ -164,24 +164,45 @@ async fn execute_combo_fetch(
     let url = url.clone();
     let format = format.to_string();
     let state = state.clone();
+    // 9router fetch.js:97 hands `settings.comboStickyRoundRobinLimit` to
+    // handleComboChat so a round-robin web/search combo pins each member for
+    // the same run of requests chat does. `execute_combo_strategy` hardcodes
+    // 1, which would rotate on every call.
+    let sticky_limit = state
+        .db
+        .snapshot()
+        .settings
+        .combo_sticky_round_robin_limit
+        .max(1);
+    let pricing = PricingTable::new();
 
-    crate::core::combo::execute_combo_strategy(models, combo_name, strategy, move |model: &str| {
-        let model_owned = model.to_string();
-        let url = url.clone();
-        let format = format.clone();
-        let max_chars = max_chars;
-        let state = state.clone();
-        async move {
-            execute_single_fetch(&state, &model_owned, &url, &format, max_chars)
-                .await
-                .map_err(|e| crate::core::combo::ComboAttemptError {
-                    status: e.status,
-                    message: e.message,
-                    retry_after: None,
-                    upstream_body: None,
-                })
-        }
-    })
+    crate::core::combo::execute_combo_strategy_full(
+        models,
+        combo_name,
+        strategy,
+        &[],
+        sticky_limit,
+        None,
+        &pricing,
+        |_: &str| crate::core::combo::ModelCapacity::Available,
+        move |model: &str| {
+            let model_owned = model.to_string();
+            let url = url.clone();
+            let format = format.clone();
+            let max_chars = max_chars;
+            let state = state.clone();
+            async move {
+                execute_single_fetch(&state, &model_owned, &url, &format, max_chars)
+                    .await
+                    .map_err(|e| crate::core::combo::ComboAttemptError {
+                        status: e.status,
+                        message: e.message,
+                        retry_after: None,
+                        upstream_body: None,
+                    })
+            }
+        },
+    )
     .await
     .map_err(|e| crate::core::combo::ComboExecutionError {
         status: e.status,
