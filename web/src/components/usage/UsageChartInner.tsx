@@ -18,7 +18,7 @@ interface UsageChartInnerProps {
 }
 
 interface ChartDataPoint {
-  date: string;
+  label: string;
   tokens?: number;
   cost?: number;
 }
@@ -41,8 +41,10 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
     try {
       const res = await fetch(`/api/usage/chart?period=${period}`);
       if (res.ok) {
+        // 9router UsageChart.js reads the bucket array straight off the
+        // response — there is no `{ data: … }` envelope to unwrap.
         const result = await res.json();
-        setData(result.data || []);
+        setData(Array.isArray(result) ? result : []);
       }
     } catch (error) {
       console.error("Failed to fetch usage chart data:", error);
@@ -107,7 +109,7 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
         <AreaChart data={data}>
           <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
           <XAxis
-            dataKey="date"
+            dataKey="label"
             tick={{ fill: "#888", fontSize: 12 }}
             stroke="#888"
           />

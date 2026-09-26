@@ -42,6 +42,11 @@ pub struct ModelPricing {
     pub cache_creation_price_per_million: f64,
     #[serde(default)]
     pub cache_read_price_per_million: f64,
+    /// Reasoning tokens bill at their own rate on some models (Anthropic bills
+    /// them above `output`). `None` means "same as output", which is 9router's
+    /// `pricing.reasoning || pricing.output` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_price_per_million: Option<f64>,
     #[serde(default)]
     pub flat_monthly_price: f64,
     #[serde(default)]
@@ -58,6 +63,7 @@ impl ModelPricing {
             output_price_per_million: 0.0,
             cache_creation_price_per_million: 0.0,
             cache_read_price_per_million: 0.0,
+            reasoning_price_per_million: None,
             flat_monthly_price: 0.0,
             credits: 0.0,
         }
@@ -72,6 +78,7 @@ impl ModelPricing {
             output_price_per_million: price_per_million,
             cache_creation_price_per_million: 0.0,
             cache_read_price_per_million: 0.0,
+            reasoning_price_per_million: None,
             flat_monthly_price: 0.0,
             credits: 0.0,
         }
@@ -86,6 +93,7 @@ impl ModelPricing {
             output_price_per_million: 0.0,
             cache_creation_price_per_million: 0.0,
             cache_read_price_per_million: 0.0,
+            reasoning_price_per_million: None,
             flat_monthly_price: price,
             credits: 0.0,
         }
@@ -100,6 +108,7 @@ impl ModelPricing {
             output_price_per_million: 0.0,
             cache_creation_price_per_million: 0.0,
             cache_read_price_per_million: 0.0,
+            reasoning_price_per_million: None,
             flat_monthly_price: 0.0,
             credits: 0.0,
         }
@@ -114,27 +123,61 @@ impl ModelPricing {
             output_price_per_million: 0.0,
             cache_creation_price_per_million: 0.0,
             cache_read_price_per_million: 0.0,
+            reasoning_price_per_million: None,
             flat_monthly_price: 0.0,
             credits: amount,
         }
     }
 
+    /// 9router `calculateCostFromTokens` (open-sse/providers/pricing.js:418-449).
+    ///
+    /// `input_tokens` is cache-INCLUSIVE — cached and cache-created tokens are
+    /// subsets of it — so charging all three independently bills the same tokens
+    /// twice, once at the full input rate. Subtract the subsets first, then
+    /// charge each at its own rate.
+    ///
+    /// The `0.0 → input` fallbacks on the cache rates reproduce 9router's
+    /// `pricing.cached || pricing.input`: a single-rate table leaves those keys
+    /// unset, and JS `||` treats the missing rate as "charge the input rate"
+    /// rather than "charge nothing".
     pub fn calculate_cost(
         &self,
         input_tokens: u64,
         output_tokens: u64,
         cache_creation_tokens: u64,
         cache_read_tokens: u64,
+        reasoning_tokens: u64,
     ) -> f64 {
-        match self.cost_model {
-            CostModel::PerToken => {
-                (input_tokens as f64 / 1_000_000.0) * self.input_price_per_million
-                    + (output_tokens as f64 / 1_000_000.0) * self.output_price_per_million
-                    + (cache_creation_tokens as f64 / 1_000_000.0)
-                        * self.cache_creation_price_per_million
-                    + (cache_read_tokens as f64 / 1_000_000.0) * self.cache_read_price_per_million
-            }
-            CostModel::FlatMonthly | CostModel::Free | CostModel::Credits => 0.0,
+        if !matches!(self.cost_model, CostModel::PerToken) {
+            return 0.0;
+        }
+
+        let non_cached_input =
+            input_tokens.saturating_sub(cache_read_tokens + cache_creation_tokens);
+        let cache_read_price = self.rate_or(
+            self.cache_read_price_per_million,
+            self.input_price_per_million,
+        );
+        let cache_creation_price = self.rate_or(
+            self.cache_creation_price_per_million,
+            self.input_price_per_million,
+        );
+        let reasoning_price = self
+            .reasoning_price_per_million
+            .unwrap_or(self.output_price_per_million);
+
+        (non_cached_input as f64 / 1_000_000.0) * self.input_price_per_million
+            + (cache_read_tokens as f64 / 1_000_000.0) * cache_read_price
+            + (output_tokens as f64 / 1_000_000.0) * self.output_price_per_million
+            + (reasoning_tokens as f64 / 1_000_000.0) * reasoning_price
+            + (cache_creation_tokens as f64 / 1_000_000.0) * cache_creation_price
+    }
+
+    fn rate_or(&self, configured: f64, fallback: f64) -> f64 {
+        if configured == 0.0 {
+            fallback
+        } else {
+            configured
         }
     }
 }
@@ -255,6 +298,30 @@ impl Pricing {
         cache_creation_tokens: u64,
         cache_read_tokens: u64,
     ) -> f64 {
+        self.calculate_cost_with_reasoning(
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            0,
+        )
+    }
+
+    /// The full cost model. Callers that have a reasoning-token count — a
+    /// thinking model bills those above `output` — must use this rather than
+    /// the four-counter convenience above, which drops the term.
+    pub fn calculate_cost_with_reasoning(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        reasoning_tokens: u64,
+    ) -> f64 {
         self.get(provider, model)
             .map(|p| {
                 p.calculate_cost(
@@ -262,6 +329,7 @@ impl Pricing {
                     output_tokens,
                     cache_creation_tokens,
                     cache_read_tokens,
+                    reasoning_tokens,
                 )
             })
             .unwrap_or(0.0)
@@ -297,6 +365,12 @@ pub(crate) fn parse_model_pricing(provider: &str, model: &str, value: &Value) ->
         let api_output = obj.get("output").and_then(Value::as_f64);
         let api_cached = obj.get("cached").and_then(Value::as_f64);
         let api_cache_creation = obj.get("cache_creation").and_then(Value::as_f64);
+        // Reasoning has no legacy flat rate: an absent key means "bill at the
+        // output rate", so it stays `None` rather than defaulting to a number.
+        let api_reasoning = obj
+            .get("reasoning")
+            .or_else(|| obj.get("reasoningPricePerMillion"))
+            .and_then(Value::as_f64);
 
         // Try per-field per-million names
         let field_input = obj.get("inputPricePerMillion").and_then(Value::as_f64);
@@ -323,6 +397,7 @@ pub(crate) fn parse_model_pricing(provider: &str, model: &str, value: &Value) ->
             output_price_per_million,
             cache_creation_price_per_million,
             cache_read_price_per_million,
+            reasoning_price_per_million: api_reasoning,
             flat_monthly_price,
             credits,
         };
@@ -346,7 +421,7 @@ mod tests {
         assert_eq!(p.cost_model, CostModel::PerToken);
         assert_eq!(p.input_price_per_million, 0.6);
         assert_eq!(p.output_price_per_million, 0.6);
-        let cost = p.calculate_cost(1_000_000, 500_000, 0, 0);
+        let cost = p.calculate_cost(1_000_000, 500_000, 0, 0, 0);
         assert!((cost - 0.9).abs() < 0.001);
     }
 
@@ -372,7 +447,7 @@ mod tests {
         let pricing = Pricing::new();
         let p = pricing.get("kiro", "all").unwrap();
         assert_eq!(p.cost_model, CostModel::Free);
-        assert_eq!(p.calculate_cost(1_000_000, 500_000, 0, 0), 0.0);
+        assert_eq!(p.calculate_cost(1_000_000, 500_000, 0, 0, 0), 0.0);
     }
 
     #[test]
@@ -426,11 +501,84 @@ mod tests {
         assert_eq!(p.cache_read_price_per_million, 0.5);
         assert_eq!(p.cache_creation_price_per_million, 3.0);
 
-        // 1M input @ 2.0 = 2.0, 1M output @ 10.0 = 10.0
-        // 500k cache creation @ 3.0 = 1.5, 200k cache read @ 0.5 = 0.1
-        // Total = 13.6
-        let cost = p.calculate_cost(1_000_000, 1_000_000, 500_000, 200_000);
-        assert!((cost - 13.6).abs() < 0.001);
+        // The cache counters are subsets of the 1M input, so the input rate only
+        // covers the remaining 300k: 300k @ 2.0 = 0.6. Then 1M output @ 10.0 =
+        // 10.0, 200k cache read @ 0.5 = 0.1, 500k cache creation @ 3.0 = 1.5.
+        // Total = 12.2
+        let cost = p.calculate_cost(1_000_000, 1_000_000, 500_000, 200_000, 0);
+        assert!((cost - 12.2).abs() < 0.001);
+    }
+
+    /// The bug this guards: the old sum billed all three counters independently,
+    /// so a fully-cached turn cost the full input rate PLUS the cache rate —
+    /// 10x the real charge for the same tokens.
+    #[test]
+    fn a_fully_cached_turn_costs_the_cache_rate_not_the_input_rate() {
+        let p = parse_model_pricing(
+            "test-provider",
+            "test-model",
+            &serde_json::json!({ "input": 3.0, "output": 15.0, "cached": 0.3 }),
+        );
+
+        let cost = p.calculate_cost(1_000_000, 0, 0, 1_000_000, 0);
+        assert!(
+            (cost - 0.3).abs() < 0.0001,
+            "1M cached tokens @ 0.3/1M is $0.30, got {cost}"
+        );
+    }
+
+    #[test]
+    fn reasoning_tokens_use_the_reasoning_rate_and_fall_back_to_output() {
+        let priced = parse_model_pricing(
+            "test-provider",
+            "test-model",
+            &serde_json::json!({ "input": 3.0, "output": 15.0, "reasoning": 22.5 }),
+        );
+        assert_eq!(priced.reasoning_price_per_million, Some(22.5));
+        let with_reasoning = priced.calculate_cost(0, 0, 0, 0, 1_000_000);
+        assert!(
+            (with_reasoning - 22.5).abs() < 0.0001,
+            "got {with_reasoning}"
+        );
+
+        // No `reasoning` key → 9router's `pricing.reasoning || pricing.output`.
+        let unpriced = parse_model_pricing(
+            "test-provider",
+            "test-model",
+            &serde_json::json!({ "input": 3.0, "output": 15.0 }),
+        );
+        assert_eq!(unpriced.reasoning_price_per_million, None);
+        let fallback = unpriced.calculate_cost(0, 0, 0, 0, 1_000_000);
+        assert!((fallback - 15.0).abs() < 0.0001, "got {fallback}");
+    }
+
+    /// The subtraction must not shift a turn that never touched the cache.
+    #[test]
+    fn a_zero_cache_turn_is_unchanged() {
+        let p = parse_model_pricing(
+            "test-provider",
+            "test-model",
+            &serde_json::json!({ "input": 2.0, "output": 10.0, "cached": 0.5, "cache_creation": 3.0 }),
+        );
+        let cost = p.calculate_cost(1_000_000, 1_000_000, 0, 0, 0);
+        assert!((cost - 12.0).abs() < 0.001, "got {cost}");
+    }
+
+    /// `Math.max(0, …)`: a provider whose input count excludes its cache count
+    /// (Anthropic's `input_tokens` does) must floor at zero, not wrap.
+    #[test]
+    fn a_cache_count_larger_than_the_input_floors_at_zero() {
+        let p = parse_model_pricing(
+            "test-provider",
+            "test-model",
+            &serde_json::json!({ "input": 2.0, "output": 10.0, "cached": 0.5 }),
+        );
+        let cost = p.calculate_cost(100, 0, 0, 5_000, 0);
+        assert!(
+            (cost - 0.0025).abs() < 0.0001,
+            "the 100 input tokens floor at zero and only the 5k cached tokens \
+             are chargeable at $0.50/1M, got {cost}"
+        );
     }
 
     #[test]
@@ -451,7 +599,7 @@ mod tests {
         assert_eq!(p.cost_model, CostModel::PerToken);
 
         // 1M input tokens: 1 * 1.75 = 1.75
-        let cost = p.calculate_cost(1_000_000, 0, 0, 0);
+        let cost = p.calculate_cost(1_000_000, 0, 0, 0, 0);
         assert!((cost - 1.75).abs() < 0.001);
     }
 

@@ -358,20 +358,16 @@ async fn validate_provider(
         // Anthropic-compatible
         p if is_anthropic_compatible(p) => {
             let snapshot = state.db.snapshot();
-            let mut base_url = snapshot.provider_nodes.iter()
+            let base_url = snapshot.provider_nodes.iter()
                 .find(|n| n.id == p)
                 .and_then(|n| n.base_url.as_deref())
                 .map(str::trim)
-                .map(|u| u.trim_end_matches('/').to_string())
                 .unwrap_or_default();
-            if base_url.ends_with("/messages") {
-                base_url = base_url[..base_url.len()-9].to_string();
-            }
             // Fall back to the provider's well-known Anthropic-compatible
             // endpoint so a user who hasn't configured a custom node still
             // gets a real validation instead of being routed at Anthropic.
             let url = if !base_url.is_empty() {
-                format!("{}/messages", base_url)
+                anthropic_compatible_messages_url(base_url)
             } else {
                 match p {
                     "glm" => "https://api.z.ai/api/anthropic/v1/messages".to_string(),
@@ -401,21 +397,11 @@ async fn validate_provider(
                 .json(&body)
                 .send().await {
                 Ok(resp) => {
-                    let status = resp.status();
-                    // Treat any non-auth 2xx/4xx as proof the key works:
-                    // some upstreams 400 on the dummy body but still validate
-                    // the key. Only 401/403 mean the key is wrong.
-                    let code = status.as_u16();
-                    if code == 401 || code == 403 { (false, Some("Invalid API key".into())) }
-                    else if status.is_success() || (400..500).contains(&code) && code != 429 {
-                        let body_text = resp.text().await.unwrap_or_default();
-                        let body_lower = body_text.to_lowercase();
-                        let looks_auth = body_lower.contains("invalid api key")
-                            || body_lower.contains("unauthorized")
-                            || body_lower.contains("authentication failed");
-                        (!looks_auth, if looks_auth { Some("Invalid API key".into()) } else { None })
+                    let code = resp.status().as_u16();
+                    if anthropic_compatible_is_valid(code) {
+                        (true, None)
                     } else {
-                        (status.is_success(), None)
+                        (false, Some("Invalid API key".into()))
                     }
                 },
                 Err(e) => (false, Some(e.to_string())),
@@ -579,6 +565,27 @@ fn is_anthropic_compatible(provider: &str) -> bool {
         provider,
         "custom-anthropic" | "glm" | "kimi" | "minimax" | "minimax-cn"
     )
+}
+
+/// 9router normalizeBase + messagesUrl (validate/route.js:150-158): drop a
+/// trailing slash, drop a trailing `/messages` an operator may have pasted in
+/// full, then append `/v1/messages`. Probing `<base>/messages` instead hits a
+/// route these endpoints do not expose, and the 404 it returns used to be read
+/// as proof the key was accepted.
+fn anthropic_compatible_messages_url(base_url: &str) -> String {
+    let mut normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.ends_with("/messages") {
+        normalized.truncate(normalized.len() - "/messages".len());
+    }
+    format!("{normalized}/v1/messages")
+}
+
+/// "400/529 still confirms key accepted; only 401/403 = bad key"
+/// (validate/route.js:180). A dummy body is routinely rejected on its own terms
+/// — a 400 or a 529 from an overloaded gateway still proves the credential
+/// reached the account, so reporting those as a bad key breaks working nodes.
+fn anthropic_compatible_is_valid(status: u16) -> bool {
+    status != 401 && status != 403
 }
 
 /// 9router parity for the `default:` arm of the provider match
@@ -1077,8 +1084,9 @@ async fn run_service_probe(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_arm_for, endpoint_is_safe, is_media_only, is_web_only, probe_models_url,
-        DefaultArm, ProbeAuth, ServiceProbe, MEDIA_PROBES, WEB_PROBES,
+        anthropic_compatible_is_valid, anthropic_compatible_messages_url, default_arm_for,
+        endpoint_is_safe, is_media_only, is_web_only, probe_models_url, DefaultArm, ProbeAuth,
+        ServiceProbe, MEDIA_PROBES, WEB_PROBES,
     };
 
     /// Regression (audit finding #30): `azureEndpoint` is interpolated into a
@@ -1316,6 +1324,48 @@ mod tests {
                 );
                 let _ = param;
             }
+        }
+    }
+
+    /// The anthropic-compatible arm has to probe the same path 9router probes.
+    /// `<base>/messages` is not a route these endpoints expose, so every probe
+    /// 404'd — and a 404 read as "key accepted" persisted a broken node.
+    #[test]
+    fn anthropic_compatible_validate_posts_to_v1_messages() {
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com"),
+            "https://api.example.com/v1/messages"
+        );
+        // A pasted-in trailing slash normalizes away.
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/"),
+            "https://api.example.com/v1/messages"
+        );
+        // An operator who pasted the full messages URL gets the suffix stripped
+        // rather than doubled.
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/v1/messages"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/messages"),
+            "https://api.example.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn anthropic_compatible_rejects_only_401_and_403() {
+        for status in [200u16, 400, 404, 405, 429, 500, 529] {
+            assert!(
+                anthropic_compatible_is_valid(status),
+                "{status} still proves the key was accepted"
+            );
+        }
+        for status in [401u16, 403] {
+            assert!(
+                !anthropic_compatible_is_valid(status),
+                "{status} is a bad key"
+            );
         }
     }
 }
