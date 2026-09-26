@@ -14,32 +14,24 @@ interface DashboardLayoutProps {
 function getToastStyle(type: string) {
   if (type === "success") {
     return {
-      wrapper: "bg-surface border border-hairline before:bg-success-text",
-      iconColor: "text-success-text",
-      titleColor: "text-ink",
+      wrapper: "border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400",
       icon: "check_circle",
     };
   }
   if (type === "error") {
     return {
-      wrapper: "bg-surface border border-hairline before:bg-brand-coral",
-      iconColor: "text-brand-coral",
-      titleColor: "text-ink",
+      wrapper: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
       icon: "error",
     };
   }
   if (type === "warning") {
     return {
-      wrapper: "bg-surface border border-hairline before:bg-accent-amber",
-      iconColor: "text-accent-amber",
-      titleColor: "text-ink",
+      wrapper: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
       icon: "warning",
     };
   }
   return {
-    wrapper: "bg-surface border border-hairline before:bg-brand-blue-deep",
-    iconColor: "text-brand-blue-deep",
-    titleColor: "text-ink",
+    wrapper: "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400",
     icon: "info",
   };
 }
@@ -67,45 +59,25 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-canvas">
-      {/* Release-readiness blocker B8: the toast container and every toast were
-          bare divs with no aria-live, role="status" or role="alert" anywhere in
-          the block (and none anywhere in the repo). Toasts render in the
-          top-right corner, outside reading order, and self-destruct after 5s
-          (8s for errors). On the error path the row stays put and the toast is
-          the ONLY feedback channel — so a screen-reader user deleting a
-          connection that 500s gets no announcement at all and cannot tell
-          whether the delete worked. aria-live="polite" on the container plus
-          role="alert" on error toasts makes the announcement. */}
-      <div
-        className="fixed top-4 right-4 z-[80] flex w-[min(92vw,380px)] flex-col gap-2"
-        role="status"
-        aria-live="polite"
-        aria-atomic="false"
-        aria-label="Notifications"
-      >
+      <div className="fixed top-4 right-4 z-[80] flex w-[min(92vw,380px)] flex-col gap-2">
         {notifications.map((n) => {
           const style = getToastStyle(n.type);
           return (
             <div
               key={n.id}
-              // Errors assert immediately (assertive); successes and info wait
-              // for a pause in speech, so a burst of success toasts cannot drown
-              // out the one failure that matters.
-              role={n.type === "error" ? "alert" : undefined}
-              aria-live={n.type === "error" ? "assertive" : undefined}
-              className={`relative overflow-hidden rounded-mini-md pl-4 pr-3 py-3 shadow-modal before:absolute before:left-0 before:top-0 before:bottom-0 before:w-[3px] ${style.wrapper}`}
+              className={`rounded-lg border px-3 py-2 shadow-lg backdrop-blur-sm ${style.wrapper}`}
             >
-              <div className="flex items-start gap-2.5">
-                <span className={`material-symbols-outlined text-[20px] leading-5 ${style.iconColor}`}>{style.icon}</span>
+              <div className="flex items-start gap-2">
+                <span className="material-symbols-outlined text-[18px] leading-5">{style.icon}</span>
                 <div className="min-w-0 flex-1">
-                  {n.title ? <p className={`text-[13px] font-semibold mb-0.5 ${style.titleColor}`}>{n.title}</p> : null}
-                  <p className="text-[12px] leading-snug text-text-muted whitespace-pre-wrap break-words">{n.message}</p>
+                  {n.title ? <p className="text-xs font-semibold mb-0.5">{n.title}</p> : null}
+                  <p className="text-xs whitespace-pre-wrap break-words">{n.message}</p>
                 </div>
                 {n.dismissible ? (
                   <button
                     type="button"
                     onClick={() => removeNotification(n.id)}
-                    className="text-text-muted hover:text-ink transition-colors"
+                    className="text-current/70 hover:text-current"
                     aria-label="Dismiss notification"
                   >
                     <span className="material-symbols-outlined text-[16px]">close</span>

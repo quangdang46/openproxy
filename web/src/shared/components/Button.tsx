@@ -18,7 +18,7 @@ import type { ButtonProps } from "@/types";
  *   secondary-on-dark -> dark-elevated pill for use over dark surfaces
  *
  * Radius is `rounded-mini-md` (8px) — the Claude spec's standard button
- * radius — not a full pill. Buttons stay 36–44px tall depending on size.
+ * radius — not a full pill. Buttons stay 28–44px tall depending on size.
  */
 const variants = {
   primary:
@@ -40,9 +40,9 @@ const variants = {
 };
 
 const sizes = {
-  sm: "h-8 px-3 text-[12px] font-medium",
-  md: "h-10 px-4 text-[14px] font-medium",
-  lg: "h-12 px-6 text-[15px] font-medium",
+  sm: "h-7 px-3 text-xs",
+  md: "h-9 px-4 text-sm",
+  lg: "h-11 px-6 text-sm",
 };
 
 export default function Button({
@@ -60,9 +60,9 @@ export default function Button({
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-mini-md leading-none",
+        "inline-flex items-center justify-center gap-2 rounded-mini-md leading-none font-semibold",
         "transition-colors duration-150 ease-out cursor-pointer tracking-tight",
-        "active:scale-[0.99] disabled:cursor-not-allowed disabled:active:scale-100",
+        "active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-coral/30 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
         variants[variant],
         sizes[size],

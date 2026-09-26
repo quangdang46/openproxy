@@ -14,21 +14,18 @@ import NineRemotePromoModal from "./NineRemotePromoModal";
 import React from "react";
 
 /**
- * Shared style strings for sidebar nav items. The active treatment uses a
- * coral left-rail marker against a cream `surface-card` pill — the
- * Claude editorial signal of the current section without painting the
- * full row coral.
+ * Shared style strings for sidebar nav items. The active treatment tints the
+ * whole row coral; inactive rows recolour their glyph on hover, so the current
+ * section reads without a separate rail marker.
  */
 const NAV_ITEM_BASE =
-  "relative flex items-center gap-3 pl-4 pr-3 py-1.5 rounded-mini-md transition-colors group";
-const NAV_ITEM_ACTIVE =
-  "bg-surface-card text-ink font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[3px] before:rounded-r-full before:bg-brand-coral";
-const NAV_ITEM_INACTIVE = "text-body hover:bg-surface-soft hover:text-ink";
+  "relative flex items-center gap-3 px-3 py-1 rounded-lg transition-all group";
+const NAV_ITEM_ACTIVE = "bg-primary/10 text-primary";
+const NAV_ITEM_INACTIVE = "text-text-muted hover:bg-surface-2 hover:text-text-main";
 
 const NAV_ITEM_NESTED_BASE =
-  "relative flex items-center gap-3 pl-6 pr-3 py-1.5 rounded-mini-md transition-colors group";
-const NAV_ITEM_NESTED_ACTIVE =
-  "bg-surface-card text-ink font-medium before:content-[''] before:absolute before:left-2 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-r-full before:bg-brand-coral";
+  "relative flex items-center gap-3 px-4 py-1 rounded-lg transition-all group";
+const NAV_ITEM_NESTED_ACTIVE = "bg-primary/10 text-primary";
 
 const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
@@ -41,17 +38,12 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { href: "/dashboard/endpoint", label: "Endpoint", icon: "api" },
+  { href: "/dashboard/endpoint", label: "Endpoint & Key", icon: "api" },
   { href: "/dashboard/providers", label: "Providers", icon: "dns" },
-  { href: "/dashboard/combos", label: "Combos", icon: "layers" },
-  { href: "/dashboard/token-saver", label: "Token Saver", icon: "token" },
-  { href: "/dashboard/compression", label: "Compression", icon: "compress" },
-  { href: "/dashboard/pxpipe", label: "PXPIPE", icon: "compress" },
-  { href: "/dashboard/payload-rules", label: "Payload Rules", icon: "tune" },
-  { href: "/dashboard/db-backups", label: "DB Backups", icon: "backup" },
+  { href: "/dashboard/combos", label: "Combo & Vision Adapter", icon: "layers" },
   { href: "/dashboard/usage", label: "Usage", icon: "bar_chart" },
   { href: "/dashboard/quota", label: "Quota Tracker", icon: "data_usage" },
-  { href: "/dashboard/mitm", label: "MITM", icon: "security" },
+  { href: "/dashboard/token-saver", label: "Token Saver", icon: "savings" },
   { href: "/dashboard/cli-tools", label: "CLI Tools", icon: "terminal" },
 ];
 
@@ -63,10 +55,6 @@ const debugItems: NavItem[] = [
 const systemItems: NavItem[] = [
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
   { href: "/dashboard/skills", label: "Skills", icon: "extension" },
-];
-
-const footerItems: NavItem[] = [
-  { href: "/dashboard/profile", label: "Settings", icon: "settings" },
 ];
 
 interface SidebarProps {
@@ -92,7 +80,9 @@ interface UpdateProgressProps {
 }
 
 export default function Sidebar({ onClose }: SidebarProps) {
-  const [pathname, setPathname] = useState("");
+  const [pathname, setPathname] = useState(() =>
+    typeof window !== "undefined" ? window.location.pathname : ""
+  );
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -102,8 +92,6 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
   const [mediaOpen, setMediaOpen] = useState(false);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
-  const [showShutdownModal, setShowShutdownModal] = useState(false);
-  const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ latestVersion: string } | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
@@ -133,7 +121,11 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
   const isActive = (href: string) => {
     if (href === "/dashboard/endpoint") {
-      return pathname === "/dashboard" || pathname.startsWith("/dashboard/endpoint");
+      return (
+        pathname === "/dashboard" ||
+        pathname === "/" ||
+        pathname.startsWith("/dashboard/endpoint")
+      );
     }
     return pathname.startsWith(href);
   };
@@ -173,21 +165,9 @@ export default function Sidebar({ onClose }: SidebarProps) {
     return () => { stopped = true; clearInterval(id); };
   }, [isUpdating, isDisconnected, STATUS_URL]);
 
-  const handleShutdown = async () => {
-    setIsShuttingDown(true);
-    try {
-      await fetch("/api/dashboard/shutdown", { method: "POST" });
-    } catch (e) {
-      // Expected to fail as server shuts down; ignore error
-    }
-    setIsShuttingDown(false);
-    setShowShutdownModal(false);
-    setIsDisconnected(true);
-  };
-
   return (
     <>
-      <aside className="flex w-72 flex-col border-r border-hairline-soft bg-canvas transition-colors duration-300 min-h-full">
+      <aside className="flex w-72 flex-col border-r border-border-subtle bg-vibrancy backdrop-blur-xl transition-colors duration-300 min-h-full">
         {/* Traffic lights */}
         <div className="flex items-center gap-2 px-6 pt-5 pb-2">
           <div className="w-3 h-3 rounded-full bg-[#FF5F56]" />
@@ -251,12 +231,12 @@ export default function Sidebar({ onClose }: SidebarProps) {
               <span
                 className={cn(
                   "material-symbols-outlined text-[18px]",
-                  isActive(item.href) ? "fill-1" : ""
+                  isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
                 )}
               >
                 {item.icon}
               </span>
-              <span className="text-[13px]">{item.label}</span>
+              <span className="text-[13px] font-medium">{item.label}</span>
             </a>
           ))}
 
@@ -278,7 +258,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
               )}
             >
               <span className="material-symbols-outlined text-[18px]">perm_media</span>
-              <span className="text-[13px] flex-1 text-left">Media Providers</span>
+              <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>
               <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
                 expand_more
               </span>
@@ -331,16 +311,16 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 <span
                   className={cn(
                     "material-symbols-outlined text-[18px]",
-                    isActive(item.href) ? "fill-1" : ""
+                    isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
                   )}
                 >
                   {item.icon}
                 </span>
-                <span className="text-[13px]">{item.label}</span>
+                <span className="text-[13px] font-medium">{item.label}</span>
               </a>
             ))}
 
-            {/* Debug items (inside System section, before Profile) */}
+            {/* Debug items (inside System section, before Settings) */}
             {debugItems.map((item) => {
               const show = item.href !== "/dashboard/translator" || enableTranslator;
               return show ? (
@@ -356,85 +336,74 @@ export default function Sidebar({ onClose }: SidebarProps) {
                   <span
                     className={cn(
                       "material-symbols-outlined text-[18px]",
-                      isActive(item.href) ? "fill-1" : ""
+                      isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
                     )}
                   >
                     {item.icon}
                   </span>
-                  <span className="text-[13px]">{item.label}</span>
+                  <span className="text-[13px] font-medium">{item.label}</span>
                 </a>
               ) : null;
             })}
 
-            {/* Settings is already in footerItems — avoid duplicate Profile entry (9router parity). */}
-          </div>
-        </nav>
+            {/* 9Remote */}
+            <button
+              onClick={() => setShowRemoteModal(true)}
+              className={cn(
+                NAV_ITEM_BASE,
+                "w-full text-left",
+                NAV_ITEM_INACTIVE,
+              )}
+            >
+              <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
+                computer
+              </span>
+              <span className="text-[13px] font-medium">9Remote</span>
+            </button>
 
-        {/* Footer section */}
-        <div className="p-3 border-t border-hairline-soft space-y-1">
-          {footerItems.map((item) => (
+            {/* 9English */}
             <a
-              key={item.href}
-              href={item.href}
+              href="https://9english.net/"
+              target="_blank"
+              rel="noreferrer"
               onClick={onClose}
               className={cn(
                 NAV_ITEM_BASE,
-                isActive(item.href) ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
+                "w-full",
+                NAV_ITEM_INACTIVE,
+              )}
+            >
+              <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
+                translate
+              </span>
+              <span className="text-[13px] font-medium">9English</span>
+            </a>
+
+            {/* Settings */}
+            <a
+              href="/dashboard/profile"
+              onClick={onClose}
+              className={cn(
+                NAV_ITEM_BASE,
+                isActive("/dashboard/profile") ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
               )}
             >
               <span
                 className={cn(
                   "material-symbols-outlined text-[18px]",
-                  isActive(item.href) ? "fill-1" : ""
+                  isActive("/dashboard/profile") ? "fill-1" : "group-hover:text-primary transition-colors"
                 )}
               >
-                {item.icon}
+                settings
               </span>
-              <span className="text-[13px]">{item.label}</span>
+              <span className="text-[13px] font-medium">Settings</span>
             </a>
-          ))}
-          {/* Remote */}
-          <button
-            onClick={() => setShowRemoteModal(true)}
-            className={cn(
-              NAV_ITEM_BASE,
-              "w-full text-left",
-              NAV_ITEM_INACTIVE,
-            )}
-          >
-            <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
-              computer
-            </span>
-            <span className="text-[13px]">Remote</span>
-          </button>
-          {/* Shutdown button */}
-          <Button
-            variant="secondary"
-            fullWidth
-            icon="power_settings_new"
-            onClick={() => setShowShutdownModal(true)}
-            className="text-[color:var(--color-danger)] border-[color:var(--color-danger)]/30 hover:bg-[color:var(--color-danger)]/10 hover:border-[color:var(--color-danger)]/50"
-          >
-            Shutdown
-          </Button>
-        </div>
+          </div>
+        </nav>
       </aside>
 
       {/* Remote Promo Modal */}
       <NineRemotePromoModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
-
-      {/* Shutdown Confirmation Modal */}
-      <ConfirmModal
-        isOpen={showShutdownModal}
-        onClose={() => setShowShutdownModal(false)}
-        onConfirm={handleShutdown}
-        title="Close Proxy"
-        message="Are you sure you want to close the proxy server?"
-        confirmText="Close"
-        cancelText="Cancel"
-        variant="danger"
-        loading={isShuttingDown}
-      />
 
       {/* Update Confirmation Modal */}
       <ConfirmModal
