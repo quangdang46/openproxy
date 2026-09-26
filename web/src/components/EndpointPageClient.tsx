@@ -8,16 +8,12 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import CacheStatsCard from "@/components/CacheStatsCard";
+import { CAVEMAN_LEVELS, WENYAN_LOCALES } from "@/shared/constants/caveman";
+import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 
 interface TunnelBenefit {
   icon: string;
   title: string;
-  desc: string;
-}
-
-interface CavemanLevel {
-  id: string;
-  label: string;
   desc: string;
 }
 
@@ -113,12 +109,6 @@ async function clientPingAny(...urls: Array<string | undefined | null>): Promise
   });
 }
 
-const CAVEMAN_LEVELS: CavemanLevel[] = [
-  { id: "lite", label: "Lite", desc: "Drop filler, keep grammar" },
-  { id: "full", label: "Full", desc: "Drop articles, fragments OK" },
-  { id: "ultra", label: "Ultra", desc: "Telegraphic, max compression" },
-];
-
 export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -136,6 +126,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [rtkEnabled, setRtkEnabledState] = useState<boolean>(true);
   const [cavemanEnabled, setCavemanEnabled] = useState<boolean>(false);
   const [cavemanLevel, setCavemanLevel] = useState<string>("full");
+  const [locale, setLocale] = useState<string>("en");
 
   // Cloudflare Tunnel state
   const [tunnelChecking, setTunnelChecking] = useState<boolean>(true);
@@ -245,10 +236,32 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     } catch { /* ignore poll errors */ }
   }, [updateReachable]);
 
+  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
+  const visibleCavemanLevels = isWenyanLocale
+    ? CAVEMAN_LEVELS
+    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
+
   useEffect(() => {
     fetchData();
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    setLocale(getCurrentLocale() || navigator.language || "en");
+    return onLocaleChange(() => {
+      setLocale(getCurrentLocale() || navigator.language || "en");
+    });
+  }, []);
+
+  // A 文言文 level saved under a Chinese locale has to fall back rather than
+  // render as an unselected button once the locale changes.
+  useEffect(() => {
+    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
+    if (current?.wenyan && !isWenyanLocale) {
+      setCavemanLevel("ultra");
+      patchSetting({ cavemanLevel: "ultra" });
+    }
+  }, [isWenyanLocale, cavemanLevel]);
 
   // Detect non-loopback access so we can warn when API key is not required.
   useEffect(() => {
@@ -1264,7 +1277,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
           <div className="flex items-center gap-3 shrink-0">
             {cavemanEnabled && (
               <div className="flex items-center gap-1.5">
-                {CAVEMAN_LEVELS.map((lvl) => (
+                {visibleCavemanLevels.map((lvl) => (
                   <button
                     key={lvl.id}
                     onClick={() => handleCavemanLevel(lvl.id)}
