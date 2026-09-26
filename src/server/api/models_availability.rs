@@ -168,22 +168,7 @@ async fn clear_cooldown(
                 .iter_mut()
                 .filter(|connection| connection.provider == provider)
             {
-                let has_lock = connection
-                    .extra
-                    .get(&lock_key)
-                    .is_some_and(|value| !value.is_null());
-                if !has_lock {
-                    continue;
-                }
-
-                connection.extra.insert(lock_key.clone(), Value::Null);
-                if connection.test_status.as_deref() == Some("unavailable") {
-                    connection.test_status = Some("active".to_string());
-                    connection.last_error = None;
-                    connection.last_error_at = None;
-                    connection.backoff_level = Some(0);
-                }
-                connection.updated_at = Some(now.clone());
+                clear_cooldown_on_connection(connection, &lock_key, &now);
             }
         })
         .await;
@@ -195,5 +180,141 @@ async fn clear_cooldown(
             Json(serde_json::json!({ "error": "Failed to clear cooldown" })),
         )
             .into_response(),
+    }
+}
+
+/// Drop `lock_key` from a connection, and — when that connection was
+/// `unavailable` — put it back in rotation.
+///
+/// The re-enable has to clear more than the one lock the click named. 9router
+/// sends a patch carrying `testStatus: "active"`, and the repository expands any
+/// such patch into a full health reset (connectionsRepo.js:15-33, reached from
+/// `src/app/api/models/availability/route.js:81-92`): `errorCode`,
+/// `rateLimitedUntil`, `backoffLevel` and EVERY `modelLock_*` key on the row.
+/// Hand-picking four fields here cleared one lock and left the rest — a
+/// connection could come back "active" while other models stayed locked.
+///
+/// Returns true when the connection held the lock and was touched; a connection
+/// without it is skipped so the route never wakes a healthy row.
+pub(crate) fn clear_cooldown_on_connection(
+    connection: &mut ProviderConnection,
+    lock_key: &str,
+    now: &str,
+) -> bool {
+    let has_lock = connection
+        .extra
+        .get(lock_key)
+        .is_some_and(|value| !value.is_null());
+    if !has_lock {
+        return false;
+    }
+
+    connection.extra.insert(lock_key.to_string(), Value::Null);
+    if connection.test_status.as_deref() == Some("unavailable") {
+        connection.test_status = Some("active".to_string());
+        connection.last_error = None;
+        connection.last_error_at = None;
+        crate::core::account_fallback::reset_health_state_on_activation(connection);
+    }
+    connection.updated_at = Some(now.to_string());
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ProviderConnection;
+
+    const FAR_FUTURE: &str = "2099-01-01T00:00:00Z";
+    const NOW: &str = "2026-01-01T00:00:00+00:00";
+
+    fn locked_connection() -> ProviderConnection {
+        let mut conn = ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            test_status: Some("unavailable".into()),
+            error_code: Some("429".into()),
+            backoff_level: Some(6),
+            rate_limited_until: Some(FAR_FUTURE.into()),
+            ..Default::default()
+        };
+        conn.extra
+            .insert("modelLock_gpt-4o".into(), Value::String(FAR_FUTURE.into()));
+        conn.extra.insert(
+            "modelLock_claude-opus-4".into(),
+            Value::String(FAR_FUTURE.into()),
+        );
+        conn.extra
+            .insert("poolId".into(), Value::String("p1".into()));
+        conn
+    }
+
+    #[test]
+    fn clearing_one_models_cooldown_clears_every_lock_and_the_health_state() {
+        let mut conn = locked_connection();
+
+        assert!(clear_cooldown_on_connection(
+            &mut conn,
+            "modelLock_gpt-4o",
+            NOW
+        ));
+
+        assert!(
+            conn.extra["modelLock_gpt-4o"].is_null(),
+            "the requested model"
+        );
+        assert!(
+            conn.extra["modelLock_claude-opus-4"].is_null(),
+            "9router nulls EVERY modelLock_* key"
+        );
+        assert!(conn.error_code.is_none());
+        assert!(conn.rate_limited_until.is_none());
+        assert_eq!(conn.backoff_level, Some(0));
+        assert_eq!(conn.consecutive_errors, Some(0));
+        assert_eq!(conn.test_status.as_deref(), Some("active"));
+        assert_eq!(
+            conn.extra.get("poolId").and_then(Value::as_str),
+            Some("p1"),
+            "unrelated extra keys survive"
+        );
+    }
+
+    // 9router route.js:83 — the `testStatus: "active"` expansion is only
+    // attached when the connection is `unavailable`. An already-active
+    // connection keeps everything except the one named lock.
+    #[test]
+    fn clearing_a_cooldown_on_an_active_connection_only_drops_that_one_lock() {
+        let mut conn = locked_connection();
+        conn.test_status = Some("active".into());
+
+        assert!(clear_cooldown_on_connection(
+            &mut conn,
+            "modelLock_gpt-4o",
+            NOW
+        ));
+
+        assert!(conn.extra["modelLock_gpt-4o"].is_null());
+        assert!(!conn.extra["modelLock_claude-opus-4"].is_null());
+        assert_eq!(conn.error_code.as_deref(), Some("429"));
+    }
+
+    #[test]
+    fn a_connection_without_the_lock_is_skipped() {
+        let mut conn = ProviderConnection {
+            id: "c2".into(),
+            provider: "openai".into(),
+            test_status: Some("unavailable".into()),
+            ..Default::default()
+        };
+        conn.extra
+            .insert("poolId".into(), Value::String("p1".into()));
+
+        assert!(!clear_cooldown_on_connection(
+            &mut conn,
+            "modelLock_gpt-4o",
+            NOW
+        ));
+        assert_eq!(conn.test_status.as_deref(), Some("unavailable"));
+        assert!(conn.updated_at.is_none(), "an untouched row is not stamped");
     }
 }

@@ -1589,6 +1589,12 @@ async fn create_imported_oauth_connection(
             existing.refresh_token = connection.refresh_token.clone();
             existing.expires_at = connection.expires_at.clone();
             existing.test_status = connection.test_status.clone();
+            // Every OAuth re-login lands on "active" (all 20+ construction
+            // sites in this file set it), and 9router expands such a write into
+            // a full health reset (connectionsRepo.js:15-33). Without it a
+            // cooled-down account stayed invisible to dispatch after a
+            // successful re-auth.
+            crate::core::account_fallback::reset_health_state_on_activation(existing);
             existing.token_type = connection.token_type.clone();
             existing.scope = connection.scope.clone();
             existing.id_token = connection.id_token.clone();

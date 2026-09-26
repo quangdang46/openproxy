@@ -252,7 +252,7 @@ async fn execute_single_fetch(
                 let current_backoff = connection.backoff_level.unwrap_or(0);
                 let decision = check_fallback_error(status, &message, current_backoff);
                 let cooldown = decision.cooldown;
-                let backoff_level = decision.new_backoff_level.unwrap_or(current_backoff + 1);
+                let backoff_level = decision.new_backoff_level.unwrap_or(current_backoff);
 
                 if decision.should_fallback {
                     mark_connection_unavailable(

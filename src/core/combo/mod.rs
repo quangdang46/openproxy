@@ -23,7 +23,6 @@ pub mod shadow;
 
 pub use ordering::{sort_models_by_cost, sort_models_by_latency};
 
-const LONG_COOLDOWN: Duration = Duration::from_secs(120);
 const SHORT_COOLDOWN: Duration = Duration::from_secs(5);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -593,16 +592,10 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
             cooldown: TRANSIENT_COOLDOWN,
             new_backoff_level: None,
         },
-        // 9router parity: checkFallbackError ALWAYS returns shouldFallback:
-        // true — even for 400/401/402/403. A "permanent" error on one combo
-        // member (e.g. cache_control budget exceeded on Claude) should still
-        // try the next member. Use a long cooldown so we don't spam a
-        // misconfigured or unauthorized provider.
-        ErrorClassification::Permanent => FallbackDecision {
-            should_fallback: true,
-            cooldown: LONG_COOLDOWN,
-            new_backoff_level: None,
-        },
+        // 9router parity (accountFallback.js:23-50): the rule walk has no
+        // "permanent" tier. Every error falls back to the next member, and the
+        // duration comes from ERROR_RULES — so an unmatched 400 gets the same
+        // 30 s transient a 500 does, not a longer lock.
     }
 }
 
@@ -1461,6 +1454,78 @@ mod tests {
             attempted.first().map(|s| s.as_str()),
             Some("anthropic/claude-3-sonnet"),
             "quality strategy must try the vision-capable model first"
+        );
+    }
+
+    // 9router errorConfig.js:59-76 + accountFallback.js:23-50. The whole
+    // table, pinned in one sweep: 401/402/403/404 take the 2-minute long
+    // cooldown, 429 escalates the backoff level, and everything else — a bare
+    // 400 included — lands on the 30 s transient default. Before this the
+    // unmatched 4xx tier handed out 120 s, so a single malformed request
+    // locked the account out of rotation four times longer than 9router does.
+    #[test]
+    fn fallback_cooldowns_match_the_js_rule_table() {
+        for (status, secs) in [
+            (401u16, 120u64),
+            (402, 120),
+            (403, 120),
+            (404, 120),
+            (400, 30),
+            (418, 30),
+            (500, 30),
+        ] {
+            let decision = check_fallback_error(status, "boom", 0);
+            assert_eq!(
+                decision.cooldown,
+                Duration::from_secs(secs),
+                "status {status}"
+            );
+            assert!(decision.should_fallback, "9router always falls back");
+        }
+    }
+
+    #[test]
+    fn only_a_backoff_classification_advances_the_level() {
+        assert_eq!(
+            check_fallback_error(429, "boom", 0).new_backoff_level,
+            Some(1),
+            "429 is the only status rule that bumps the level"
+        );
+        assert_eq!(
+            check_fallback_error(429, "rate limit", 0).new_backoff_level,
+            Some(1),
+            "so is the rate-limit text rule"
+        );
+        for status in [400u16, 401, 402, 403, 404, 500] {
+            assert_eq!(
+                check_fallback_error(status, "boom", 7).new_backoff_level,
+                None,
+                "status {status} must leave the level alone"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_400_locks_the_account_for_30s_not_two_minutes() {
+        let decision = check_fallback_error(400, "invalid request: tool schema too long", 0);
+        assert_eq!(
+            decision.cooldown, TRANSIENT_COOLDOWN,
+            "9router TRANSIENT_COOLDOWN_MS"
+        );
+        assert!(decision.should_fallback, "the next account is still tried");
+    }
+
+    #[test]
+    fn a_text_rule_still_wins_over_the_status_default() {
+        // The ordered walk is intact: 400 has no status rule, so the message
+        // is what decides — and 9router sends this one to the long cooldown.
+        assert_eq!(
+            check_fallback_error(400, "improperly formed request", 0).cooldown,
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            check_fallback_error(400, "request not allowed", 0).cooldown,
+            SHORT_COOLDOWN
         );
     }
 }

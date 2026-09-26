@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use serde_json::Value;
 
 use crate::types::ProviderConnection;
 
@@ -782,6 +783,38 @@ pub fn build_model_lock_update(model: &str, cooldown_seconds: i64) -> (String, S
     (key, until)
 }
 
+/// 9router `resetHealthStateOnActivation` (connectionsRepo.js:15-33).
+///
+/// Every write that lands a connection on `test_status == "active"` — the
+/// dashboard Test button, a manual cooldown clear, a successful token
+/// refresh, an OAuth re-login — is a re-enable. 9router expands that into a
+/// full health reset at the repository layer, so the same click clears
+/// `errorCode`, `rateLimitedUntil`, `backoffLevel` and EVERY `modelLock_*` key
+/// on the row. Without it a connection can read "active" while still being
+/// gated out of routing by a lock the operator can neither see nor clear.
+///
+/// Returns true when the reset was applied, so callers on the error path stay
+/// untouched: `markAccountUnavailable` writes "unavailable" and is the one
+/// write that must not clear its own state.
+pub fn reset_health_state_on_activation(connection: &mut ProviderConnection) -> bool {
+    if connection.test_status.as_deref() != Some("active") {
+        return false;
+    }
+    let locks: Vec<String> = connection
+        .extra
+        .keys()
+        .filter(|key| key.starts_with(MODEL_LOCK_PREFIX))
+        .cloned()
+        .collect();
+    for key in locks {
+        connection.extra.insert(key, Value::Null);
+    }
+    connection.error_code = None;
+    connection.rate_limited_until = None;
+    connection.backoff_level = Some(0);
+    connection.consecutive_errors = Some(0);
+    true
+}
 /// Build update object to clear all model locks on a connection.
 /// Build a list of `(field, None)` updates to clear ALL model lock fields
 /// from a connection's `extra` metadata. Used when a request succeeds
@@ -1285,5 +1318,101 @@ mod tests {
             "openai"
         )
         .is_none());
+    }
+
+    // 9router connectionsRepo.js:15-33. Before this helper existed no write
+    // that set test_status = "active" touched the routing gates, so a
+    // connection the dashboard showed as healthy could still be invisible to
+    // dispatch: `modelLock_*` in `extra` and `rate_limited_until` survived the
+    // re-enable, and select_connection's `!is_model_locked(...)` kept skipping
+    // it until the lock expired on its own.
+    #[test]
+    fn activation_clears_every_model_lock() {
+        let mut conn = make_connection("c1");
+        conn.extra.insert(
+            "modelLock_gpt-4o".into(),
+            Value::String("2099-01-01T00:00:00Z".into()),
+        );
+        conn.extra.insert(
+            "modelLock___all".into(),
+            Value::String("2099-01-01T00:00:00Z".into()),
+        );
+        conn.extra
+            .insert("proxyPoolId".into(), Value::String("pool-7".into()));
+        conn.test_status = Some("active".into());
+
+        assert!(reset_health_state_on_activation(&mut conn));
+        assert!(conn
+            .extra
+            .get("modelLock_gpt-4o")
+            .is_some_and(Value::is_null));
+        assert!(conn
+            .extra
+            .get("modelLock___all")
+            .is_some_and(Value::is_null));
+        assert_eq!(
+            conn.extra.get("proxyPoolId").and_then(Value::as_str),
+            Some("pool-7"),
+            "unrelated extra keys must survive"
+        );
+    }
+
+    #[test]
+    fn activation_clears_rate_limit_error_code_and_backoff() {
+        let mut conn = make_connection("c2");
+        conn.rate_limited_until = Some("2099-01-01T00:00:00Z".into());
+        conn.error_code = Some("429".into());
+        conn.backoff_level = Some(9);
+        conn.consecutive_errors = Some(7);
+        conn.test_status = Some("active".into());
+
+        assert!(reset_health_state_on_activation(&mut conn));
+        assert!(conn.rate_limited_until.is_none());
+        assert!(conn.error_code.is_none());
+        assert_eq!(conn.backoff_level, Some(0));
+        assert_eq!(conn.consecutive_errors, Some(0));
+    }
+
+    #[test]
+    fn non_active_writes_do_not_reset() {
+        let mut conn = make_connection("c3");
+        conn.test_status = Some("unavailable".into());
+        conn.error_code = Some("429".into());
+        conn.extra.insert(
+            "modelLock_gpt-4o".into(),
+            Value::String("2099-01-01T00:00:00Z".into()),
+        );
+
+        assert!(!reset_health_state_on_activation(&mut conn));
+        assert_eq!(
+            conn.error_code.as_deref(),
+            Some("429"),
+            "markAccountUnavailable's own write must survive"
+        );
+        assert!(is_model_lock_active(&conn, "gpt-4o", Utc::now()));
+    }
+
+    // The assertion that actually encodes the gap: a re-enabled account has to
+    // be routable again, not merely labelled active.
+    #[test]
+    fn an_activation_reset_makes_a_locked_account_selectable_again() {
+        let mut conn = make_connection("c4");
+        conn.extra.insert(
+            "modelLock_gpt-4o".into(),
+            Value::String("2099-01-01T00:00:00Z".into()),
+        );
+        conn.rate_limited_until = Some("2099-01-01T00:00:00Z".into());
+        conn.test_status = Some("active".into());
+
+        assert!(is_model_lock_active(&conn, "gpt-4o", Utc::now()));
+        assert!(is_account_unavailable(&conn, Utc::now()));
+
+        reset_health_state_on_activation(&mut conn);
+
+        assert!(
+            !is_model_lock_active(&conn, "gpt-4o", Utc::now()),
+            "9router recovers immediately; the lock must not outlive the activation"
+        );
+        assert!(!is_account_unavailable(&conn, Utc::now()));
     }
 }
