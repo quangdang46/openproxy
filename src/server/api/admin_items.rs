@@ -240,6 +240,11 @@ async fn update_provider(
         .update({
             let id = id.clone();
             move |db| {
+                // Which provider to renumber, and only if this update actually
+                // carried a priority. 9router reorders on create, on update
+                // when `priority` is present, and on delete — never on an
+                // unrelated field edit.
+                let mut priority_touched: Option<String> = None;
                 if let Some(connection) = db
                     .provider_connections
                     .iter_mut()
@@ -261,6 +266,11 @@ async fn update_provider(
                     }
                     if let Some(priority) = req.priority {
                         connection.priority = Some(priority);
+                        // 9router reorderInTx is called only when `priority`
+                        // is present in the update (connectionsRepo.js:225).
+                        // An update that leaves priority alone must not
+                        // renumber, or every field edit would reshuffle.
+                        priority_touched = Some(connection.provider.clone());
                     }
                     if let Some(global_priority) = req.global_priority {
                         connection.global_priority = Some(global_priority);
@@ -325,6 +335,9 @@ async fn update_provider(
                     }
 
                     connection.updated_at = Some(Utc::now().to_rfc3339());
+                }
+                if let Some(provider) = priority_touched {
+                    super::reorder_provider_connections(&mut db.provider_connections, &provider);
                 }
             }
         })
@@ -403,8 +416,19 @@ async fn delete_provider(
     match state
         .db
         .update(move |db| {
-            db.provider_connections
-                .retain(|connection| connection.id != id);
+            if let Some(victim) = db
+                .provider_connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .map(|c| c.provider.clone())
+            {
+                db.provider_connections
+                    .retain(|connection| connection.id != id);
+                // 9router reorderInTx on delete: without this, removing the
+                // first of three leaves priorities 2 and 3 and every later
+                // insert has to guess around the gap.
+                super::reorder_provider_connections(&mut db.provider_connections, &victim);
+            }
         })
         .await
     {

@@ -1001,11 +1001,19 @@ async fn list_providers_api(
     let paginate = query.page.is_some() || query.page_size.is_some();
 
     if !paginate {
-        let connections: Vec<Value> = snapshot
-            .provider_connections
-            .iter()
-            .map(connection_to_list_value)
-            .collect();
+        // The paginated branch below sorts by priority; this one did not, so
+        // the default (unpaginated) listing came back in DB insertion order.
+        // That is why the dashboard's move-up/move-down appeared to do nothing:
+        // the order it wrote was never the order it rendered.
+        let mut ordered = snapshot.provider_connections.clone();
+        let sort = query
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("priority");
+        sort_provider_connections(&mut ordered, sort);
+        let connections: Vec<Value> = ordered.iter().map(connection_to_list_value).collect();
         return Json(json!({ "connections": connections })).into_response();
     }
 
@@ -1260,6 +1268,10 @@ async fn create_provider_api(
         .db
         .update(|db| {
             db.provider_connections.push(default_conn.clone());
+            // 9router reorderInTx on create: a new connection lands at 1..n
+            // instead of carrying whatever priority the client sent, which
+            // could collide with an existing row.
+            reorder_provider_connections(&mut db.provider_connections, &provider);
         })
         .await;
 
@@ -3527,6 +3539,172 @@ mod tests {
         assert!(
             MODAL.contains("addedModelValues.includes(combo.name)"),
             "an already-added combo must render a distinct chip state"
+        );
+    }
+}
+
+/// Re-densify a provider's connection priorities to `1..n` after a mutation.
+///
+/// Port of 9router `reorderInTx` (src/lib/db/repos/connectionsRepo.js:112-124),
+/// which 9router calls inside the transaction on create, on update when
+/// `priority` is present, and on delete.
+///
+/// The sort is the contract, and one detail of it is easy to get backwards:
+/// a connection with no priority sorts FIRST, not last — 9router compares
+/// `(a.priority || 0)`, so unset and 0 are the same value and both lead.
+/// Sorting unset last would move an un-prioritised connection to the end on
+/// every unrelated edit. Ties break on `updatedAt` DESC, so the most
+/// recently touched connection wins its slot.
+///
+/// Without this, priorities accumulate gaps and duplicates: deleting the
+/// first of three leaves 2 and 3, and the dashboard's move-up/move-down has
+/// nothing stable to persist. Runtime selection tolerates the mess (it sorts
+/// ascending with `unwrap_or(999)`), which is exactly why only the dashboard
+/// visibly breaks.
+pub(crate) fn reorder_provider_connections(
+    connections: &mut Vec<crate::types::ProviderConnection>,
+    provider: &str,
+) {
+    let mut group: Vec<usize> = connections
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.provider == provider)
+        .map(|(i, _)| i)
+        .collect();
+
+    group.sort_by(|&a, &b| {
+        let (ca, cb) = (&connections[a], &connections[b]);
+        let pa = ca.priority.unwrap_or(0);
+        let pb = cb.priority.unwrap_or(0);
+        pa.cmp(&pb).then_with(|| {
+            // Newest first. Unparseable/absent timestamps sort last, matching
+            // JS `new Date(b || 0) - new Date(a || 0)`.
+            let ta = ca.updated_at.as_deref().and_then(parse_rfc3339_epoch);
+            let tb = cb.updated_at.as_deref().and_then(parse_rfc3339_epoch);
+            tb.cmp(&ta)
+        })
+    });
+
+    for (rank, index) in group.into_iter().enumerate() {
+        connections[index].priority = Some(rank as u32 + 1);
+    }
+}
+
+fn parse_rfc3339_epoch(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+#[cfg(test)]
+mod connection_priority_tests {
+    use super::*;
+    use crate::types::ProviderConnection;
+
+    fn conn(id: &str, provider: &str, priority: Option<u32>, updated: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: id.into(),
+            provider: provider.into(),
+            auth_type: "apikey".into(),
+            priority,
+            updated_at: Some(updated.into()),
+            ..Default::default()
+        }
+    }
+
+    /// id -> resulting priority, SORTED, because the helper renumbers in place
+    /// and deliberately does NOT reorder the slice: 9router's reorderInTx only
+    /// runs `UPDATE ... SET priority` and never moves a row, so order is
+    /// defined by the number, not by position. Asserting on slice position
+    /// would be asserting something 9router does not do.
+    fn prios(conns: &[ProviderConnection]) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = conns
+            .iter()
+            .map(|c| (c.id.clone(), c.priority.unwrap_or(0)))
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        out
+    }
+
+    /// THE REGRESSION. Priorities accumulated gaps and duplicates: deleting the
+    /// first of three left 2 and 3, and a new connection kept whatever
+    /// priority the client sent, colliding with an existing row. The
+    /// dashboard's move-up/move-down had nothing stable to persist.
+    #[test]
+    fn priorities_are_redensified_to_one_through_n() {
+        let mut v = vec![
+            conn("a", "zed", Some(1), "2026-01-01T00:00:00Z"),
+            conn("b", "zed", Some(2), "2026-01-02T00:00:00Z"),
+            conn("c", "zed", Some(3), "2026-01-03T00:00:00Z"),
+        ];
+        v.retain(|c| c.id != "a");
+        reorder_provider_connections(&mut v, "zed");
+        assert_eq!(prios(&v), vec![("b".into(), 1), ("c".into(), 2)]);
+    }
+
+    /// THE DETAIL THAT IS EASY TO INVERT. 9router compares
+    /// `(a.priority || 0)`, so an unset priority is 0 and sorts FIRST. Sorting
+    /// it last would silently move an un-prioritised connection to the end of
+    /// its provider on every unrelated edit.
+    #[test]
+    fn an_unset_priority_sorts_first_not_last() {
+        let mut v = vec![
+            conn("set", "zed", Some(1), "2026-01-01T00:00:00Z"),
+            conn("unset", "zed", None, "2026-01-02T00:00:00Z"),
+        ];
+        reorder_provider_connections(&mut v, "zed");
+        assert_eq!(prios(&v), vec![("unset".into(), 1), ("set".into(), 2)]);
+    }
+
+    /// Ties break on updatedAt DESC: the most recently touched connection
+    /// takes the earlier slot.
+    #[test]
+    fn equal_priorities_break_on_newest_updated_at_first() {
+        let mut v = vec![
+            conn("old", "zed", Some(1), "2026-01-01T00:00:00Z"),
+            conn("new", "zed", Some(1), "2026-06-01T00:00:00Z"),
+        ];
+        reorder_provider_connections(&mut v, "zed");
+        assert_eq!(prios(&v), vec![("new".into(), 1), ("old".into(), 2)]);
+    }
+
+    /// Per-provider, not global. Reordering zed must not renumber opencode.
+    #[test]
+    fn only_the_named_provider_is_renumbered() {
+        let mut v = vec![
+            conn("z1", "zed", Some(7), "2026-01-01T00:00:00Z"),
+            conn("o1", "opencode", Some(4), "2026-01-01T00:00:00Z"),
+            conn("o2", "opencode", Some(9), "2026-01-01T00:00:00Z"),
+        ];
+        reorder_provider_connections(&mut v, "zed");
+        assert_eq!(v[0].priority, Some(1), "zed was renumbered");
+        assert_eq!(v[1].priority, Some(4), "opencode untouched");
+        assert_eq!(v[2].priority, Some(9), "opencode untouched");
+    }
+
+    /// A provider with no connections is a no-op, not a panic — the explicit
+    /// `reorderProviderConnections` endpoint calls this unconditionally.
+    #[test]
+    fn an_unknown_provider_is_a_no_op() {
+        let mut v = vec![conn("a", "zed", Some(3), "2026-01-01T00:00:00Z")];
+        reorder_provider_connections(&mut v, "does-not-exist");
+        assert_eq!(v[0].priority, Some(3));
+    }
+
+    /// #29. The un-paginated listing skipped the sort the paginated branch
+    /// applies, so the dashboard rendered DB insertion order while writing
+    /// priority order — which is why move-up/move-down looked inert.
+    #[test]
+    fn the_priority_sort_orders_lowest_number_first() {
+        let mut v = vec![
+            conn("c", "zed", Some(3), "2026-01-03T00:00:00Z"),
+            conn("a", "zed", Some(1), "2026-01-01T00:00:00Z"),
+            conn("b", "zed", Some(2), "2026-01-02T00:00:00Z"),
+        ];
+        sort_provider_connections(&mut v, "priority");
+        assert_eq!(
+            v.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
         );
     }
 }
