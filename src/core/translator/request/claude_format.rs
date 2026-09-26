@@ -12,7 +12,6 @@ use base64::Engine as _;
 
 use crate::core::config::runtime_config::DEFAULT_MAX_TOKENS;
 use crate::core::utils::claude_cloaking::apply_cloaking;
-use crate::core::utils::claude_header_cache::get_cached_claude_headers;
 
 /// Default thinking signature injected when an `anthropic-compatible`
 /// provider serves a thinking block without a valid signature.
@@ -946,11 +945,52 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
             || provider.starts_with("anthropic-compatible"))
             && !api_key.is_empty()
         {
-            let session_id = get_cached_claude_headers()
-                .and_then(|h| h.get("x-claude-code-session-id").cloned());
+            // 9router claude.js:614 takes the session id from the session
+            // MANAGER, per request: `sessionId || resolveSessionId({...})`.
+            // It was never meant to come from the header cache — that was a
+            // global, so the fake user_id carried whichever client called
+            // last. `generateFakeUserID` falls back to a random uuid when
+            // this is empty, so the derivation is best-effort by design.
+            //
+            // The headers/connectionId inputs 9router passes are not in scope
+            // in this function's signature; the body-derived id is the part
+            // that matters for per-request consistency, and threading the other
+            // two is a wider change than this removal.
+            // Seeded from the request body rather than from a global.
+            //
+            // 9router reads `resolveSessionId({headers: rawHeaders, body,
+            // connectionId, scope: "claude"})` (claude.js:614), but
+            // prepare_claude_request has no headers parameter and neither does
+            // translate_request_with_strip, so the header half of that seed is
+            // not reachable from here without widening two APIs. Hashing the
+            // body is the reachable part of the same idea: per-request, so no
+            // cross-client bleed, and stable for a repeated identical request.
+            //
+            // KNOWN LIMIT, stated rather than hidden: a real conversation's body
+            // grows each turn, so this id changes per turn. 9router has the
+            // same property whenever it cannot find a session id upstream of
+            // this call — generateFakeUserID falls back to a fresh random uuid.
+            // Threading rawHeaders in is the real fix and is filed separately.
+            let seed = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(serde_json::to_string(body).unwrap_or_default().as_bytes());
+                h.finalize()
+                    .iter()
+                    .take(8)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            };
+            let session_id = crate::core::utils::session_manager::resolve_session_identity(
+                None,
+                Some(body),
+                Some(&seed),
+                "claude",
+            )
+            .session_id;
             // apply_cloaking takes &Value, returns Value — we need to rebuild
             let cloned = body.clone();
-            let cloaked = apply_cloaking(&cloned, api_key, session_id.as_deref());
+            let cloaked = apply_cloaking(&cloned, api_key, Some(session_id.as_str()));
             *body = cloaked;
         }
     }
@@ -1592,6 +1632,107 @@ mod tests {
         assert!(
             has_valid_content(&msg),
             "document block should be valid content"
+        );
+    }
+}
+
+#[cfg(test)]
+mod no_global_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The cloaked `metadata.user_id` is a JSON string
+    /// ({device_id, account_uuid, session_id}). Only `session_id` is the part
+    /// the removed cache fed — device_id and account_uuid are derived inside
+    /// `generate_fake_user_id` and are not touched by this change.
+    fn session_id_of(body: &Value) -> String {
+        let raw = body
+            .pointer("/metadata/user_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|v| {
+                v.get("session_id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .unwrap_or_default()
+    }
+
+    fn has_user_id(body: &Value) -> bool {
+        body.pointer("/metadata/user_id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    fn claude_body(user: &str) -> Value {
+        json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": user}],
+        })
+    }
+
+    /// THE LEAK. `claude_header_cache` was a single process-wide
+    /// `OnceLock<RwLock<Option<HashMap>>>`, written by whichever client last
+    /// looked like Claude Code and replayed onto EVERY other client's request.
+    /// 9router deleted it for exactly this reason in 13ed1456: "leaking one
+    /// client's headers ... onto another client/account sharing the same
+    /// server."
+    ///
+    /// The cloaked `user_id` embedded that shared session id, so client B's
+    /// request carried client A's identity upstream. This asserts the two now
+    /// differ, which is the property the global destroyed.
+    ///
+    /// Uses an OAuth-shaped key because `apply_cloaking` is a no-op otherwise,
+    /// so a non-OAuth key would make this pass vacuously.
+    #[test]
+    fn two_clients_do_not_share_one_cloaked_identity() {
+        let key = "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut alice = claude_body("alice is asking about billing");
+        let mut bob = claude_body("bob is asking about something else entirely");
+
+        prepare_claude_request(&mut alice, "claude", Some(key));
+        prepare_claude_request(&mut bob, "claude", Some(key));
+
+        let a = session_id_of(&alice);
+        let b = session_id_of(&bob);
+        assert!(has_user_id(&alice), "cloaking must have applied: {alice}");
+        assert!(has_user_id(&bob), "cloaking must have applied: {bob}");
+        assert!(!a.is_empty(), "session id must be present: {alice}");
+        assert_ne!(
+            a, b,
+            "two clients shared one cloaked identity — the global cache is back"
+        );
+    }
+
+    /// The session id is derived PER REQUEST, so the same body cloaked twice is
+    /// stable (9router: `sessionId || resolveSessionId({headers, body, ...})`).
+    /// Non-determinism here would be a different bug — a fingerprint that
+    /// changes every turn — so it is pinned in the other direction.
+    #[test]
+    fn the_same_request_cloaks_to_the_same_identity() {
+        let key = "sk-ant-oat01-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut first = claude_body("same question");
+        let mut second = claude_body("same question");
+        prepare_claude_request(&mut first, "claude", Some(key));
+        prepare_claude_request(&mut second, "claude", Some(key));
+        // Only the session_id is asserted stable. device_id/account_uuid are
+        // generated upstream of this change and are out of scope here; pinning
+        // them would be asserting behaviour this commit does not own.
+        assert_eq!(session_id_of(&first), session_id_of(&second));
+    }
+
+    /// A non-OAuth key must not be cloaked at all — the guard that would
+    /// otherwise make the test above pass for the wrong reason.
+    #[test]
+    fn a_non_oauth_key_is_not_cloaked() {
+        let mut body = claude_body("plain apikey user");
+        prepare_claude_request(&mut body, "claude", Some("sk-ant-api03-plain"));
+        assert!(
+            body.pointer("/metadata/user_id").is_none(),
+            "a non-OAuth key must pass through untouched: {body}"
         );
     }
 }

@@ -389,10 +389,6 @@ async fn chat_completions_impl(
         })
         .collect();
 
-    // 9router parity: cache Claude-specific headers from incoming request
-    // for replay on subsequent requests (claudeHeaderCache).
-    crate::core::utils::claude_header_cache::cache_claude_headers(&headers_map);
-
     let client_tool = detect_client_tool(&headers_map, &body);
 
     // Accept/stream preference is applied via resolve_stream_flags on the plan

@@ -5,7 +5,6 @@
 
 pub mod bypass_handler;
 pub mod claude_cloaking;
-pub mod claude_header_cache;
 pub mod client_detector;
 pub mod cursor_checksum;
 pub mod error;

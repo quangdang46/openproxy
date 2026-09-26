@@ -1910,23 +1910,6 @@ impl DefaultExecutor {
                 }
             }
             // Claude header cache overlay for anthropic/claude providers
-            if matches!(self.provider.as_str(), "claude" | "anthropic") {
-                if let Some(overlay) =
-                    crate::core::utils::claude_header_cache::get_cached_claude_headers()
-                {
-                    for (k, v) in overlay {
-                        if let (Ok(name), Ok(val)) = (
-                            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
-                            HeaderValue::from_str(&v),
-                        ) {
-                            if !headers.contains_key(&name) {
-                                headers.insert(name, val);
-                            }
-                        }
-                    }
-                }
-            }
-
             if self.provider == "kilocode" {
                 if let Some(org_id) =
                     compatible_value(credentials.provider_specific_data.get("orgId"))
