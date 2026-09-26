@@ -120,6 +120,16 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     : false;
   const providerRegions = regionConfig(connection?.provider, connection?.providerSpecificData?.region).list;
 
+  // A region-aware provider's blob also carries proxyPoolId, baseUrl and friends,
+  // so saving a region merges into what is stored instead of replacing it
+  // (9router EditConnectionModal.js:71-74).
+  const buildRegionSpecificData = (): ProviderSpecificData | undefined => {
+    if (providerRegions.length > 0 && region) {
+      return { ...(connection?.providerSpecificData || {}), region };
+    }
+    return undefined;
+  };
+
   const handleTest = async () => {
     if (!connection?.provider) return;
     setTesting(true);
@@ -148,6 +158,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           apiKey: formData.apiKey,
           ...(isAzure ? { providerSpecificData: azureData } : {}),
           ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+          // The validator dials the region the user picked, not the default
+          // (9router EditConnectionModal.js:104).
+          ...(providerRegions.length > 0 ? { providerSpecificData: buildRegionSpecificData() } : {}),
         }),
       });
       const data = await res.json();
@@ -188,6 +201,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 apiKey: formData.apiKey,
                 ...(isAzure ? { providerSpecificData: azureData } : {}),
                 ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+                ...(providerRegions.length > 0 ? { providerSpecificData: buildRegionSpecificData() } : {}),
               }),
             });
             const data = await res.json();
@@ -216,6 +230,12 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       }
       if (isCloudflareAi) {
         updates.providerSpecificData = { accountId: cloudflareData.accountId };
+      }
+      // Last write wins over the azure/cloudflare branches above, as in 9router:
+      // no provider declares both a region and azure config
+      // (EditConnectionModal.js:170-173).
+      if (providerRegions.length > 0 && region) {
+        updates.providerSpecificData = buildRegionSpecificData();
       }
 
       await onSave(updates);
@@ -312,15 +332,6 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           </>
         )}
 
-        {providerRegions.length > 0 && (
-          <Select
-            label="Region"
-            value={region}
-            onChange={(e: ChangeEvent<HTMLSelectElement>) => setRegion(e.target.value)}
-            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
-          />
-        )}
-
         {isAzure && (
           <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
             <h3 className="font-semibold mb-3 text-sm">Azure OpenAI Configuration</h3>
@@ -355,6 +366,15 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
               />
             </div>
           </div>
+        )}
+
+        {providerRegions.length > 0 && (
+          <Select
+            label="Region"
+            value={region}
+            onChange={(e: ChangeEvent<HTMLSelectElement>) => setRegion(e.target.value)}
+            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
+          />
         )}
 
         {!isCompatible && !isAzure && !isCloudflareAi && (

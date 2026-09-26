@@ -1,6 +1,7 @@
 ---
 import { ThemeProvider } from '@/shared/components/ThemeProvider';
 import { RuntimeI18nProvider } from '@/i18n/RuntimeI18nProvider';
+import { ClientRouter } from 'astro:transitions';
 import '@/lib/consoleLogBuffer';
 import '@/shared/components/styles/global.css';
 
@@ -26,6 +27,15 @@ const isDashboard = Astro.url.pathname.startsWith('/dashboard');
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#0a0a0a" />
     <title>{pageTitle}</title>
+    <!--
+      In-app navigation. 9router is a Next.js App Router app, so every sidebar,
+      header and breadcrumb click is a `<Link>` and the document never
+      reloads; `astro:transitions` ships with astro, so this costs one import.
+      The islands below are deliberately not `transition:persist` — each page
+      mounts a different one, so re-mounting it is what a full load did anyway;
+      we only drop the reload.
+    -->
+    <ClientRouter />
     <!--
       Apply the persisted theme synchronously before first paint to avoid a
       flash of light-mode background on multi-page navigation. The Zustand
