@@ -715,6 +715,82 @@ pub async fn images_edits(
     with_cors_response(generic_media_handler(state, headers, body, "images/edits").await)
 }
 
+/// Does 9router expand a combo for this media route?
+///
+/// Derived from `.tmp/9router/src/sse/handlers/`: `getComboModels` appears
+/// twice in `tts.js` and twice in `imageGeneration.js`, and ZERO times in
+/// `stt.js`, `videoGeneration.js` or `embeddings.js`. Widening this list is
+/// therefore a parity change that has to be justified against that reference,
+/// not a convenience.
+fn combo_expands(route_kind: &str) -> bool {
+    matches!(route_kind, "audio/speech" | "images/generations")
+}
+
+/// Run a TTS or image request against every member of a combo, in the combo's
+/// configured order, and return the first member that succeeds.
+///
+/// Modelled on the two sites that already do this correctly —
+/// `chat_search.rs:329-348` and `web_fetch.rs:179` — rather than on
+/// `execute_combo_strategy_full`, which prices LLM tokens and has no meaning
+/// for a byte stream or an image.
+async fn combo_media_response(
+    state: &AppState,
+    body: &Value,
+    combo_name: &str,
+    resolved: &crate::core::model::ResolvedModel,
+    route_kind: &str,
+) -> Response {
+    let Some(combo) = state
+        .db
+        .snapshot()
+        .combos
+        .iter()
+        .find(|c| c.name == combo_name)
+        .cloned()
+    else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Combo not found: {combo_name}"),
+        );
+    };
+    if combo.models.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Combo has no models: {combo_name}"),
+        );
+    }
+
+    let mut last: Option<Response> = None;
+    for member in &combo.models {
+        // Each member is `provider/model`; a bare provider is valid too, and
+        // get_model_info resolves both the same way the direct path does.
+        let (provider, model) = match member.split_once('/') {
+            Some((p, m)) => (p.to_string(), m.to_string()),
+            None => (String::new(), member.clone()),
+        };
+        let provider = if provider.is_empty() {
+            None
+        } else {
+            Some(provider)
+        };
+        let attempt = execute_media_provider(state, body, &provider, &model, route_kind).await;
+        if attempt.status().is_success() {
+            return attempt;
+        }
+        last = Some(attempt);
+    }
+    // Every member failed. The last attempt's own error is the most specific
+    // one available, so return it rather than synthesising a combo-level error
+    // the client cannot act on.
+    let _ = resolved;
+    last.unwrap_or_else(|| {
+        json_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("All combo members failed for {combo_name}"),
+        )
+    })
+}
+
 async fn generic_media_handler(
     state: AppState,
     headers: HeaderMap,
@@ -766,6 +842,16 @@ async fn generic_media_handler(
     let resolved = get_model_info(model_str, &snapshot);
 
     match resolved.route_kind {
+        ModelRouteKind::Combo if combo_expands(route_kind) => {
+            // 9router expands a combo on TTS and image generation
+            // (tts.js:47-62, imageGeneration.js:49-64) but NOT on stt,
+            // videoGeneration or embeddings — verified by grepping
+            // getComboModels across .tmp/9router/src/sse/handlers/, which
+            // returns 2 for tts and imageGeneration and 0 for the rest. So
+            // this arm is gated, and the rejection below is kept for the
+            // routes that genuinely do not support combos.
+            combo_media_response(&state, &body, model_str, &resolved, route_kind).await
+        }
         ModelRouteKind::Combo => json_error_response(
             StatusCode::BAD_REQUEST,
             &format!("Combos not supported for {}", route_kind),
@@ -3708,5 +3794,42 @@ mod tests {
             "a bad prompt must not ratchet towards the rate-limit cap"
         );
         assert_eq!(stored.rate_limited_until, None);
+    }
+}
+
+#[cfg(test)]
+mod combo_media_tests {
+    use super::combo_expands;
+
+    /// THE REGRESSION. `audio/speech` and `images/generations` fell through to
+    /// the shared `ModelRouteKind::Combo` rejection, so a combo over TTS or
+    /// image providers was a 400 on every call — the feature did not work at
+    /// all, rather than working differently.
+    #[test]
+    fn tts_and_image_expand_combos() {
+        assert!(combo_expands("audio/speech"));
+        assert!(combo_expands("images/generations"));
+    }
+
+    /// The other half, and the reason the arm is gated rather than the shared
+    /// rejection removed: 9router expands on exactly two of these. `grep -c
+    /// getComboModels` over .tmp/9router/src/sse/handlers/ is 2 for tts.js and
+    /// imageGeneration.js and 0 for stt.js, videoGeneration.js and
+    /// embeddings.js.
+    ///
+    /// Widening this list without re-checking that reference would silently
+    /// give stt and video a fallback chain the reference does not have.
+    #[test]
+    fn stt_video_and_embeddings_still_reject_combos() {
+        for route in [
+            "audio/transcriptions",
+            "audio/music",
+            "embeddings",
+            "images/edits",
+            "rerank",
+            "moderations",
+        ] {
+            assert!(!combo_expands(route), "{route} must not expand combos");
+        }
     }
 }
