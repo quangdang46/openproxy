@@ -488,3 +488,89 @@ async fn a_video_provider_with_no_account_is_a_plain_400() {
         json!("No credentials for provider: xai")
     );
 }
+
+/// The other half of 9router's precedence: when a previous attempt DID record
+/// an error code, that code is the status — not 503.
+///
+/// The 503 case above is the cold path (nothing attempted). This is the warm
+/// one: a connection left cooling down after a real 402 must answer 402, or a
+/// client cannot tell a billing problem from a scheduling one and will retry
+/// the wrong thing.
+#[tokio::test]
+async fn a_cooled_down_account_echoes_its_recorded_error_code_as_the_status() {
+    let mut cooled = connection("conn-xai", "xai", "sk-xai");
+    cooled.rate_limited_until =
+        Some((chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339());
+    cooled.error_code = Some("402".to_string());
+    let state = app_state_with(vec![cooled]).await;
+
+    let response = openproxy::build_app(state)
+        .oneshot(video_request("/v1/videos/generations"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status().as_u16(),
+        402,
+        "9router: `lastStatus || Number(credentials.lastErrorCode) || 503`"
+    );
+}
+
+/// `Number("")` is 0 in JS, and 0 is falsy, so an empty error code must fall
+/// through to 503 rather than become status 0. A recorded code that is not a
+/// number at all (a slug, an upstream error name) behaves the same way.
+#[tokio::test]
+async fn an_unusable_recorded_error_code_falls_back_to_503() {
+    for code in ["", "   ", "not-a-number", "0"] {
+        let mut cooled = connection("conn-xai", "xai", "sk-xai");
+        cooled.rate_limited_until =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339());
+        cooled.error_code = Some(code.to_string());
+        let state = app_state_with(vec![cooled]).await;
+
+        let response = openproxy::build_app(state)
+            .oneshot(video_request("/v1/videos/generations"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "error_code {code:?} must not be used as a status"
+        );
+    }
+}
+
+/// The message names the provider and carries the real recorded error, per
+/// 9router `[${provider}/${model || "video"}] ${lastError}`. The old canned
+/// "All accounts are rate limited; retry later" said nothing about which
+/// upstream failed or why.
+#[tokio::test]
+async fn the_unavailable_message_carries_the_recorded_error() {
+    let mut cooled = connection("conn-xai", "xai", "sk-xai");
+    cooled.rate_limited_until =
+        Some((chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339());
+    cooled.last_error = Some("monthly credit exhausted".to_string());
+    let state = app_state_with(vec![cooled]).await;
+
+    let response = openproxy::build_app(state)
+        .oneshot(video_request("/v1/videos/generations"))
+        .await
+        .unwrap();
+
+    let body = String::from_utf8_lossy(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned();
+
+    assert!(
+        body.contains("monthly credit exhausted"),
+        "the recorded error must reach the client, got: {body}"
+    );
+    assert!(
+        body.contains("[xai/"),
+        "the message must name the provider and route, got: {body}"
+    );
+}

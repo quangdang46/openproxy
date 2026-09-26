@@ -520,7 +520,7 @@ async fn video_forward_raw(
 
     let connections = video_candidate_connections(&state, provider, &headers, None);
     if connections.is_empty() {
-        return video_unavailable_or_missing(&state, provider);
+        return video_unavailable_or_missing(&state, provider, None, None);
     }
 
     let snapshot = state.db.snapshot();
@@ -1162,13 +1162,79 @@ fn video_retry_after(state: &AppState, provider: &str) -> Option<i64> {
         .min()
 }
 
-/// 429 with `Retry-After` — every video account is in cooldown.
-fn video_unavailable_response(provider: &str, state: &AppState) -> Response {
-    let retry_after = video_retry_after(state, provider);
-    let mut response = video_error_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        &format!("[{provider}] All accounts are rate limited; retry later"),
+/// The status and message for "every video account is in cooldown".
+///
+/// Port of 9router `videoGeneration.js:139-141`:
+///
+///   const errorMsg = lastError || credentials.lastError || "Unavailable";
+///   const status = lastStatus || Number(credentials.lastErrorCode)
+///                        || HTTP_STATUS.SERVICE_UNAVAILABLE;
+///
+/// The previous version hardcoded 429 and a canned sentence. That is wrong in
+/// both directions: a client that saw 429 could not tell a genuinely
+/// rate-limited upstream from one that was merely in cooldown, and 429 is not a
+/// status this route can invent when nothing was attempted — which is exactly
+/// the all-cooling-down-on-first-contact case.
+///
+/// `last_status` is the status of the most recent failed attempt in THIS
+/// request's rotation loop, if any. `last_error_code` is the per-connection
+/// code recorded by an earlier request. Both are absent on a cold call, so the
+/// `None` fallthrough to 503 is the common path, not an edge case.
+fn video_unavailable_detail(
+    provider: &str,
+    state: &AppState,
+    last_status: Option<u16>,
+    last_error: Option<&str>,
+) -> (StatusCode, String) {
+    let now = chrono::Utc::now();
+    let snapshot = state.db.snapshot();
+    let cooling: Vec<&crate::types::ProviderConnection> = snapshot
+        .provider_connections
+        .iter()
+        .filter(|c| {
+            c.provider == provider
+                && c.is_active()
+                && crate::core::account_fallback::is_account_unavailable(c, now)
+        })
+        .collect();
+
+    // Any non-empty stored error is a usable message; JS `||` takes the first.
+    let stored_error = cooling
+        .iter()
+        .find_map(|c| c.last_error.as_deref())
+        .map(str::to_string);
+    let error_msg = last_error.map(str::to_string).or(stored_error);
+
+    let stored_code = cooling
+        .iter()
+        .find_map(|c| c.error_code.as_deref())
+        // `Number("")` is 0, which is falsy in JS, so an empty code must not
+        // become status 0.
+        .and_then(|code| code.trim().parse::<u16>().ok())
+        .filter(|code| *code != 0);
+
+    let status = last_status
+        .or(stored_code)
+        .and_then(|s| StatusCode::from_u16(s).ok())
+        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+
+    let message = format!(
+        "[{provider}/video] {}",
+        error_msg.unwrap_or_else(|| "Unavailable".to_string())
     );
+    (status, message)
+}
+
+/// Unavailable response with `Retry-After` — every video account is in cooldown.
+fn video_unavailable_response(
+    provider: &str,
+    state: &AppState,
+    last_status: Option<u16>,
+    last_error: Option<&str>,
+) -> Response {
+    let retry_after = video_retry_after(state, provider);
+    let (status, message) = video_unavailable_detail(provider, state, last_status, last_error);
+    let mut response = video_error_response(status, &message);
     if let Some(seconds) = retry_after {
         if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
             response.headers_mut().insert(header::RETRY_AFTER, value);
@@ -1181,9 +1247,14 @@ fn video_unavailable_response(provider: &str, state: &AppState) -> Response {
 /// "they are all cooling down" (429 + `Retry-After`) — 9router
 /// `getProviderCredentials` returns `allRateLimited` for the second case and the
 /// handler answers `unavailableResponse` (videoGeneration.js:141).
-fn video_unavailable_or_missing(state: &AppState, provider: &str) -> Response {
+fn video_unavailable_or_missing(
+    state: &AppState,
+    provider: &str,
+    last_status: Option<u16>,
+    last_error: Option<&str>,
+) -> Response {
     if video_retry_after(state, provider).is_some() {
-        return video_unavailable_response(provider, state);
+        return video_unavailable_response(provider, state, last_status, last_error);
     }
     video_error_response(
         StatusCode::BAD_REQUEST,
@@ -1798,7 +1869,7 @@ async fn video_create_handler(
 
     let connections = video_candidate_connections(&state, &provider, &headers, model.as_deref());
     if connections.is_empty() {
-        return video_unavailable_or_missing(&state, &provider);
+        return video_unavailable_or_missing(&state, &provider, None, None);
     }
 
     let snapshot = state.db.snapshot();
