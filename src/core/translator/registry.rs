@@ -1193,6 +1193,48 @@ mod parity_tests {
     use super::*;
     use serde_json::json;
 
+    /// The guard that makes openproxy-qxxf finding 15 unreachable.
+    ///
+    /// The finding claims every Codex/Responses client that sends a `developer`
+    /// message has it re-framed as a user turn by `openai_to_cursor`, changing
+    /// the tool-loop shape. It cannot: `translate_request_with_strip` calls
+    /// `apply_normalization_hooks` unconditionally (registry.rs:512) BEFORE the
+    /// target transform runs, and that hook rewrites `developer` -> `system`.
+    ///
+    /// This asserts the HOOK, not the end-to-end result, and the difference
+    /// matters: `openai_to_cursor` handles `role == "developer"` itself, so an
+    /// end-to-end assertion sees a `user` role either way and passes whether or
+    /// not the hook ran. I wrote that version first, mutation-tested it by
+    /// disabling `normalize_developer_role`, and it still passed — a vacuous
+    /// guard. This version fails when the hook is disabled.
+    ///
+    /// The `developer` arm in `openai_to_cursor.rs:115` is deliberately left in
+    /// place: removing it would make the transform fragile if it is ever called
+    /// directly, and it costs nothing. What needed proving was the finding.
+    ///
+    /// If this test ever fails, the finding becomes real again.
+    #[test]
+    fn the_normalization_hook_rewrites_developer_to_system() {
+        let mut body = json!({
+            "messages": [
+                {"role": "developer", "content": "be terse"},
+                {"role": "user", "content": "hi"},
+            ],
+        });
+        apply_normalization_hooks(&mut body);
+        let roles: Vec<String> = body["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["system".to_string(), "user".to_string()],
+            "developer must be rewritten to system before any target transform"
+        );
+    }
+
     #[test]
     fn detect_responses_requires_no_messages() {
         let body = json!({"input": "hi", "messages": [{"role": "user", "content": "x"}]});
