@@ -15,7 +15,7 @@ expression: last
   "object": "chat.completion.chunk",
   "usage": {
     "completion_tokens": 12,
-    "prompt_tokens": 0,
-    "total_tokens": 12
+    "prompt_tokens": 2000,
+    "total_tokens": 2012
   }
 }

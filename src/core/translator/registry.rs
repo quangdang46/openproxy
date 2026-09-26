@@ -135,6 +135,11 @@ pub struct ResponseTransformState {
     /// Generic scratch map for Value-based response transforms
     /// (openai→claude, openai→antigravity, chat→responses, etc.).
     pub generic: serde_json::Map<String, Value>,
+    /// The client request this stream answers, when the caller has one to
+    /// offer. Read only by the response translators, to size the input half of
+    /// an estimated usage block for a provider that reported none; `None`
+    /// leaves the input estimate at 0.
+    pub request_body: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]

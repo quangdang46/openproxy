@@ -7,6 +7,9 @@
 
 use serde_json::{json, Map, Value};
 
+use super::usage;
+use crate::core::translator::registry::Format;
+
 /// Convert one Claude SSE event into zero or more OpenAI chunks.
 ///
 /// `state` is the per-stream scratch space; the same map is threaded
@@ -120,6 +123,7 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                 Some("text_delta") => {
                     if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str()) {
                         if !text.is_empty() {
+                            usage::note_content(state, text);
                             results.push(make_chunk(state, json!({"content": text}), Value::Null));
                         }
                     }
@@ -130,6 +134,7 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                         .and_then(|v| v.as_str())
                     {
                         if !thinking.is_empty() {
+                            usage::note_content(state, thinking);
                             results.push(make_chunk(
                                 state,
                                 json!({"reasoning_content": thinking}),
@@ -258,37 +263,8 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                 let mut final_chunk =
                     make_chunk(state, json!({}), Value::String(finish.to_string()));
 
-                if let Some(usage) = state.get("usage").cloned() {
-                    let mut openai_usage = json!({
-                        "prompt_tokens": usage.get("prompt_tokens").cloned().unwrap_or(Value::from(0u64)),
-                        "completion_tokens": usage.get("completion_tokens").cloned().unwrap_or(Value::from(0u64)),
-                        "total_tokens": usage.get("total_tokens").cloned().unwrap_or(Value::from(0u64)),
-                    });
-                    let cache_read = usage
-                        .get("cache_read_input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cache_create = usage
-                        .get("cache_creation_input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    if cache_read > 0 || cache_create > 0 {
-                        let mut details = Map::new();
-                        if cache_read > 0 {
-                            details.insert("cached_tokens".into(), Value::from(cache_read));
-                        }
-                        if cache_create > 0 {
-                            details.insert(
-                                "cache_creation_input_tokens".into(),
-                                Value::from(cache_create),
-                            );
-                        }
-                        openai_usage["prompt_tokens_details"] = Value::Object(details);
-                    }
-                    if let Some(obj) = final_chunk.as_object_mut() {
-                        obj.insert("usage".into(), openai_usage);
-                    }
-                }
+                let tracked = state.get("usage").map(to_openai_usage);
+                attach_terminal_usage(state, &mut final_chunk, tracked);
 
                 results.push(final_chunk);
                 state.insert("finishReasonSent".into(), Value::Bool(true));
@@ -328,16 +304,12 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    if let Some(obj) = final_chunk.as_object_mut() {
-                        obj.insert(
-                            "usage".into(),
-                            json!({
-                                "prompt_tokens": input_tokens,
-                                "completion_tokens": output_tokens,
-                                "total_tokens": input_tokens + output_tokens,
-                            }),
-                        );
-                    }
+                    let tracked = json!({
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens,
+                    });
+                    attach_terminal_usage(state, &mut final_chunk, Some(tracked));
                 }
                 results.push(final_chunk);
                 state.insert("finishReasonSent".into(), Value::Bool(true));
@@ -348,6 +320,55 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
     }
 
     results
+}
+
+/// Attach the client-visible usage block to a terminal chunk. 9router applies
+/// the pad/estimate rule to every terminal item, not just the one
+/// `message_delta` produces (stream.js:356-366 keys off `finish_reason`).
+fn attach_terminal_usage(
+    state: &mut Map<String, Value>,
+    chunk: &mut Value,
+    tracked: Option<Value>,
+) {
+    if let Some(client_usage) = usage::terminal_usage_block(state, Format::OpenAi, tracked) {
+        if let Some(obj) = chunk.as_object_mut() {
+            obj.insert("usage".into(), client_usage);
+        }
+    }
+}
+
+/// Express the merged Claude usage counters in OpenAI's shape (9router
+/// `toOpenAIUsage`). `prompt_tokens` already folds the cache counters in, so
+/// the cache split rides along in `prompt_tokens_details` — which is where
+/// `filter_usage_for_format` expects to find it.
+fn to_openai_usage(usage: &Value) -> Value {
+    let mut openai_usage = json!({
+        "prompt_tokens": usage.get("prompt_tokens").cloned().unwrap_or(Value::from(0u64)),
+        "completion_tokens": usage.get("completion_tokens").cloned().unwrap_or(Value::from(0u64)),
+        "total_tokens": usage.get("total_tokens").cloned().unwrap_or(Value::from(0u64)),
+    });
+    let cache_read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_create = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if cache_read > 0 || cache_create > 0 {
+        let mut details = Map::new();
+        if cache_read > 0 {
+            details.insert("cached_tokens".into(), Value::from(cache_read));
+        }
+        if cache_create > 0 {
+            details.insert(
+                "cache_creation_input_tokens".into(),
+                Value::from(cache_create),
+            );
+        }
+        openai_usage["prompt_tokens_details"] = Value::Object(details);
+    }
+    openai_usage
 }
 
 /// Build an OpenAI `chat.completion.chunk`. `delta` is the per-event
@@ -421,6 +442,7 @@ pub fn claude_to_openai_streaming(
             if val.get("type").is_some() {
                 state.anthropic.line_buffer.clear();
                 let inner = &mut state.anthropic.claude_state;
+                usage::seed_request_body(inner, state.request_body.as_ref());
                 return claude_to_openai_response(&val, inner)
                     .into_iter()
                     .map(|v| {
@@ -461,6 +483,7 @@ pub fn claude_to_openai_streaming(
         if let Some(payload) = data_payload {
             if let Ok(val) = serde_json::from_str::<Value>(&payload) {
                 let inner = &mut state.anthropic.claude_state;
+                usage::seed_request_body(inner, state.request_body.as_ref());
                 for v in claude_to_openai_response(&val, inner) {
                     out.push(format!(
                         "data: {}\n\n",
@@ -516,11 +539,14 @@ mod tests {
             .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
             .collect();
         assert_eq!(texts, vec!["Hello", " world"]);
-        // Final chunk has finish_reason: stop and usage block.
+        // Final chunk has finish_reason: stop and a usage block. The client
+        // copy carries the +2000 context head-room 9router pads every
+        // terminal frame with; completion_tokens is not padded.
         let final_chunk = out.last().unwrap();
         assert_eq!(final_chunk["choices"][0]["finish_reason"], "stop");
-        assert_eq!(final_chunk["usage"]["prompt_tokens"], 5);
+        assert_eq!(final_chunk["usage"]["prompt_tokens"], 2005);
         assert_eq!(final_chunk["usage"]["completion_tokens"], 10);
+        assert_eq!(final_chunk["usage"]["total_tokens"], 2015);
     }
 
     #[test]
