@@ -160,13 +160,27 @@ async fn app_state() -> AppState {
     AppState::new(db)
 }
 
+/// A GET that enforces the client API-key gate through
+/// `require_api_key_with_reload` — the same `require_api_key` /
+/// `extract_presented_key` path every key header below is judged by.
+///
+/// The auth assertions in this file deliberately do NOT use `/v1/models`:
+/// 9router's `GET /v1/models` carries no `isValidApiKey` call at all
+/// (`.tmp/9router/src/app/api/v1/models/route.js`, whose only `apiKey`
+/// references are outbound connection credentials), and OpenProxy matches
+/// that — `tests/models_api_tail.rs::models_listing_is_unauthenticated_even_when_require_login_is_on`
+/// pins it. A client model picker lists the catalog before it has a key to
+/// offer, so gating that one route would break discovery while protecting
+/// nothing the other `/v1/*` routes do not already protect.
+const GATED_GET: &str = "/api/observability/logs";
+
 #[tokio::test]
 async fn valid_bearer_key_allows_models_request() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("authorization", "Bearer valid-bearer")
                 .body(Body::empty())
                 .unwrap(),
@@ -183,7 +197,7 @@ async fn bearer_scheme_is_case_insensitive() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("authorization", "bearer valid-bearer")
                 .body(Body::empty())
                 .unwrap(),
@@ -200,7 +214,7 @@ async fn valid_x_api_key_allows_models_request() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("x-api-key", "valid-bearer")
                 .body(Body::empty())
                 .unwrap(),
@@ -215,16 +229,16 @@ async fn valid_x_api_key_allows_models_request() {
 async fn missing_invalid_and_inactive_keys_return_unauthorized() {
     for request in [
         Request::builder()
-            .uri("/v1/models")
+            .uri(GATED_GET)
             .body(Body::empty())
             .unwrap(),
         Request::builder()
-            .uri("/v1/models")
+            .uri(GATED_GET)
             .header("authorization", "Bearer missing-key")
             .body(Body::empty())
             .unwrap(),
         Request::builder()
-            .uri("/v1/models")
+            .uri(GATED_GET)
             .header("authorization", "Bearer inactive-key")
             .body(Body::empty())
             .unwrap(),
@@ -241,7 +255,7 @@ async fn bearer_takes_precedence_over_x_api_key() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("authorization", "Bearer wrong-key")
                 .header("x-api-key", "valid-bearer")
                 .header("x-9r-cli-token", cli_token("machine1", "cli01"))
@@ -260,7 +274,7 @@ async fn valid_cli_token_allows_models_request() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("x-9r-cli-token", cli_token("machine1", "cli01"))
                 .body(Body::empty())
                 .unwrap(),
@@ -289,7 +303,7 @@ async fn cli_token_machine_id_mismatch_is_unauthorized() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("x-9r-cli-token", cli_token("machine1", "cli01"))
                 .body(Body::empty())
                 .unwrap(),
@@ -321,7 +335,7 @@ async fn valid_key_still_resolves_with_many_stored_keys() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(GATED_GET)
                 .header("x-9r-cli-token", cli_token("machine1", "cli01"))
                 .body(Body::empty())
                 .unwrap(),

@@ -81,14 +81,21 @@ fn the_9router_prefix_rules_still_win() {
 }
 
 /// Guards the ordering dependency: with the `grok-` arm pruned, `grok-build`
-/// must still reach gcli through the built-in alias, not the openai fallback.
+/// must still reach grok-cli through the built-in alias, not the openai
+/// fallback.
+///
+/// The target is `grok-cli`, not the `gcli` the built-in spells it with.
+/// 9router feeds the target's provider half back through `resolveProviderAlias`
+/// (model.js:73) and `grok-cli.js` declares `alias: "gcli"`, so the bare name
+/// and `gcli/grok-build` land alike on the id a connection is stored under —
+/// and the credential gate compares that id byte for byte.
 #[test]
 fn the_builtin_alias_still_wins_over_the_openai_fallback() {
     assert_eq!(
         get_model_info("grok-build", &AppDb::default())
             .provider
             .as_deref(),
-        Some("gcli")
+        Some("grok-cli")
     );
 }
 
