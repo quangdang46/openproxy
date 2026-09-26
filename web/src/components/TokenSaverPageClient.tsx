@@ -4,15 +4,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, Button, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
+import { CAVEMAN_LEVELS, WENYAN_LOCALES } from "@/shared/constants/caveman";
 import React from "react";
 import { useSettingsStore } from "@/store/settingsStore";
-
-interface CavemanLevel {
-  id: string;
-  label: string;
-  desc: string;
-  wenyan?: boolean;
-}
 
 interface PonytailLevel {
   id: string;
@@ -39,17 +33,6 @@ interface HeadroomExtras {
   available: string[];
   loading: boolean;
 }
-
-const WENYAN_LOCALES = ["zh-CN", "zh-TW"];
-
-const CAVEMAN_LEVELS: CavemanLevel[] = [
-  { id: "lite", label: "Lite", desc: "Drop filler, keep grammar" },
-  { id: "full", label: "Full", desc: "Drop articles, fragments OK" },
-  { id: "ultra", label: "Ultra", desc: "Telegraphic, max compression" },
-  { id: "wenyan-lite", label: "文 Lite", desc: "Classical Chinese, light compression", wenyan: true },
-  { id: "wenyan", label: "文 Full", desc: "Maximum 文言文, 80-90% reduction", wenyan: true },
-  { id: "wenyan-ultra", label: "文 Ultra", desc: "Extreme classical compression", wenyan: true },
-];
 
 const PONYTAIL_LEVELS: PonytailLevel[] = [
   { id: "lite", label: "Lite", desc: "Build asked, name lazier option" },
