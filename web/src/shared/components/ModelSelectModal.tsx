@@ -493,13 +493,15 @@ export default function ModelSelectModal({
     return groups;
   }, [filteredActiveProviders, resolvedAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap, liveModelsByAlias, freeOnlyByAlias, catalogReady]);
 
-  // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
+  // Filter combos by search query (and hide combos when a kind or capability
+  // filter is set — combos are LLM-only by design, and a capacity-adapter slot
+  // must hold a concrete provider model).
   const filteredCombos = useMemo(() => {
-    if (kindFilter) return [];
+    if (kindFilter || capFilter) return [];
     if (!searchQuery.trim()) return combos;
     const query = searchQuery.toLowerCase();
     return combos.filter(c => c.name.toLowerCase().includes(query));
-  }, [combos, searchQuery, kindFilter]);
+  }, [combos, searchQuery, kindFilter, capFilter]);
 
   // Filter models by search query
   // Sort models alphabetically, with added models floated to top
@@ -601,19 +603,15 @@ export default function ModelSelectModal({
               </Button>
             </div>
           </div>
-        ) : !closeOnSelect ? (
-          <Button
-            onClick={() => {
-              onClose();
-              setSearchQuery("");
-            }}
-            fullWidth
-          >
-            Done
-          </Button>
         ) : null
       }
     >
+      {/* Info bar */}
+      <div className="flex items-center gap-2 mb-3 px-2.5 py-2 bg-primary/8 border border-primary/20 rounded-lg text-xs text-text-muted">
+        <span className="material-symbols-outlined text-primary shrink-0" style={{ fontSize: "14px" }}>info</span>
+        <span>Click to add, click again to remove. Changes are saved automatically.</span>
+      </div>
+
       {/* Search - compact */}
       <div className="mb-3">
         <div className="relative">
@@ -630,8 +628,10 @@ export default function ModelSelectModal({
         </div>
       </div>
 
-      {/* Provider outline - quick jump when many providers */}
-      {Object.keys(filteredGroups).length > 1 && (
+      {/* Provider outline - quick jump when many providers. Multi-select
+          only: the single-select render matches 9router, which has no such
+          row and pushes nothing above the list. */}
+      {selectionMode === "multi" && Object.keys(filteredGroups).length > 1 && (
         <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1 scrollbar-thin">
           {Object.entries(filteredGroups).map(([pid, grp]) => (
             <button
@@ -673,13 +673,18 @@ export default function ModelSelectModal({
                     key={combo.id}
                     onClick={() => handleSelect({ id: combo.name, name: combo.name, value: combo.name })}
                     className={`
-                      px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
+                      px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer flex items-center gap-1
                       ${isSelected
                         ? "bg-primary text-white border-primary"
-                        : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
+                        : addedModelValues.includes(combo.name)
+                          ? "bg-primary border-primary text-white hover:bg-primary-hover"
+                          : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
                       }
                     `}
                   >
+                    {addedModelValues.includes(combo.name) && (
+                      <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>
+                    )}
                     {combo.name}
                   </button>
                 );

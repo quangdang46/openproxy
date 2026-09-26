@@ -1074,14 +1074,20 @@ async fn chat_completions_rejects_connections_without_credentials() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // 9router chat.js:244-247 — a provider that was never attempted because
+    // it has no usable credential is a 404 `model_not_found`, not a 400.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("No credentials"));
+    assert_eq!(
+        json["error"]["code"], "model_not_found",
+        "404 must carry the model_not_found code: {json}"
+    );
+    assert_eq!(
+        json["error"]["message"],
+        "No active credentials for provider: node-openai"
+    );
     assert!(upstream.received_requests().await.unwrap().is_empty());
 }

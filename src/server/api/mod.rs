@@ -2492,6 +2492,12 @@ async fn update_settings_api(
         || req.oidc_enabled.is_some();
     // Capture before move so the oidc_enabled legacy path can still decide.
     let auth_mode_was_set = req.auth_mode.is_some();
+    // 9router settings/route.js:90-97 tests the PATCH body with
+    // `hasOwnProperty`, not the resulting value, so a no-op assignment like
+    // `{comboStrategy: "fallback"}` still invalidates the cached rotation.
+    let combo_routing_touched = req.combo_strategy.is_some()
+        || req.combo_strategies.is_some()
+        || req.combo_sticky_round_robin_limit.is_some();
 
     let result = state
         .db
@@ -2691,6 +2697,12 @@ async fn update_settings_api(
             if oidc_touched {
                 // Best-effort reload; discovery failure leaves the previous client.
                 state.reload_oidc_from_settings().await;
+            }
+            if combo_routing_touched {
+                // Every combo's rotation index and sticky counter are stale the
+                // moment a routing knob changes, so drop them process-wide and
+                // let the next request start at member 0.
+                crate::core::combo::reset_combo_rotation(None);
             }
             let db_path = state.db.data_dir.join("openproxy.sqlite");
             let db_path_str = db_path.display().to_string();
@@ -3353,4 +3365,151 @@ fn normalize_create_provider_proxy_pool(
     }
 
     Ok(Some(raw.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::combo::{
+        get_rotated_models, reset_combo_rotation, rotation_index, ComboStrategy,
+    };
+    use axum::http::HeaderMap;
+    use std::sync::Arc;
+
+    /// The rotation maps are process-global and these tests drive the
+    /// clear-all form, so they must not overlap.
+    fn rotation_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn settings_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let state = AppState::new(Arc::new(db));
+        // The dashboard session gate is the only thing standing between the
+        // test and the handler; it is not what these assertions are about.
+        state
+            .db
+            .update(|db| db.settings.require_login = false)
+            .await
+            .unwrap();
+        state
+    }
+
+    fn seed_rotation() {
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        reset_combo_rotation(None);
+        get_rotated_models(&models, Some("c1"), ComboStrategy::RoundRobin, 1);
+        get_rotated_models(&models, Some("c1"), ComboStrategy::RoundRobin, 1);
+        assert!(rotation_index("c1").is_some(), "fixture must be primed");
+    }
+
+    async fn patch_settings(state: &AppState, body: serde_json::Value) -> StatusCode {
+        let req: UpdateSettingsRequest = serde_json::from_value(body).expect("valid PATCH body");
+        update_settings_api(State(state.clone()), HeaderMap::new(), Json(req))
+            .await
+            .status()
+    }
+
+    // 9router settings/route.js:90-97 clears the cached rotation whenever the
+    // PATCH body carries a routing key. Storing the value without clearing let
+    // a combo switched to round-robin start mid-cycle from the stale index.
+    #[tokio::test]
+    async fn settings_patch_resets_combo_rotation() {
+        for body in [
+            serde_json::json!({ "comboStrategy": "fallback" }),
+            serde_json::json!({ "comboStickyRoundRobinLimit": 2 }),
+            serde_json::json!({ "comboStrategies": { "c1": "round-robin" } }),
+        ] {
+            let _guard = rotation_test_guard();
+            let state = settings_state().await;
+            seed_rotation();
+
+            let status = patch_settings(&state, body.clone()).await;
+
+            assert_eq!(status, StatusCode::OK, "PATCH should be accepted");
+            assert!(
+                rotation_index("c1").is_none(),
+                "{body} must invalidate the cached rotation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_settings_patch_leaves_rotation_alone() {
+        let _guard = rotation_test_guard();
+        let state = settings_state().await;
+        seed_rotation();
+
+        let status = patch_settings(&state, serde_json::json!({ "cavemanEnabled": true })).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(rotation_index("c1").is_some());
+    }
+
+    // --- dashboard source guards -------------------------------------------
+    //
+    // The repo has no web test runner (web/package.json is dev/build/preview
+    // only), so the dashboard-facing parity fixes are pinned here as guards on
+    // the source they change.
+
+    /// 9router exposes Move up / Move down on every combo member row
+    /// (ComboFormModal.js:36-43) — the only affordance a keyboard operator
+    /// has, since the drag handle there is a plain span.
+    #[test]
+    fn combo_modal_exposes_keyboard_reorder() {
+        static MODAL: &str = include_str!("../../../web/src/shared/components/ComboFormModal.tsx");
+        assert!(MODAL.contains(r#"title="Move up""#), "no move-up control");
+        assert!(
+            MODAL.contains(r#"title="Move down""#),
+            "no move-down control"
+        );
+        assert!(
+            MODAL.contains("onKeyDown"),
+            "the drag handle must answer the keyboard"
+        );
+    }
+
+    /// The combos page renders members as chips too (combos/page.js:785-808),
+    /// so reordering must not require opening the modal.
+    #[test]
+    fn combos_page_has_inline_reorder() {
+        static PAGE: &str = include_str!("../../../web/src/components/CombosPageClient.tsx");
+        assert!(
+            PAGE.contains("Move model up") || PAGE.contains("Move up"),
+            "no inline reorder control on the combos page"
+        );
+    }
+
+    /// 9router ModelSelectModal.js:427 — `if (kindFilter || capFilter)`.
+    /// Combos are LLM-only, so they can never be a valid capacity-adapter pick.
+    #[test]
+    fn model_picker_hides_combos_under_cap_filter() {
+        static MODAL: &str =
+            include_str!("../../../web/src/shared/components/ModelSelectModal.tsx");
+        assert!(
+            MODAL.contains("if (kindFilter || capFilter) return [];"),
+            "the cap filter must hide the Combos group"
+        );
+        assert!(
+            MODAL.contains("[combos, searchQuery, kindFilter, capFilter]"),
+            "capFilter must be a dependency of the filteredCombos memo"
+        );
+    }
+
+    #[test]
+    fn model_picker_has_hint_bar_and_added_chip_state() {
+        static MODAL: &str =
+            include_str!("../../../web/src/shared/components/ModelSelectModal.tsx");
+        assert!(
+            MODAL.contains("Click to add, click again to remove"),
+            "9router's hint bar is the modal's only explanation of the \
+             click-to-add / autosave interaction"
+        );
+        assert!(
+            MODAL.contains("addedModelValues.includes(combo.name)"),
+            "an already-added combo must render a distinct chip state"
+        );
+    }
 }

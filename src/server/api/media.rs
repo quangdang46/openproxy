@@ -323,17 +323,17 @@ async fn video_edits_extensions_proxy(
         // Parse into Json<Value> and reuse the JSON pipeline.
         let bytes = match axum::body::to_bytes(request.into_body(), 32 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
+            Err(_) => return video_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
         };
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(v) => video_create_handler(state, headers, Ok(Json(v)), action).await,
-            Err(_) => json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+            Err(_) => video_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
         }
     } else {
         // Multipart / other: forward raw bytes verbatim.
         let raw_body = match axum::body::to_bytes(request.into_body(), 512 * 1024 * 1024).await {
             Ok(b) => b,
-            Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
+            Err(_) => return video_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
         };
         video_forward_raw(state, headers, &content_type, raw_body, action).await
     }
@@ -357,7 +357,7 @@ async fn video_forward_raw(
         .min_by_key(|c| c.priority.unwrap_or(999))
         .cloned()
     else {
-        return json_error_response(
+        return video_error_response(
             StatusCode::BAD_REQUEST,
             &format!("No credentials for provider: {provider}"),
         );
@@ -366,7 +366,7 @@ async fn video_forward_raw(
     let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
     let client = match state.client_pool.get(provider, proxy.as_ref()) {
         Ok(c) => c,
-        Err(e) => return json_error_response(StatusCode::BAD_GATEWAY, &format!("{e}")),
+        Err(e) => return video_error_response(StatusCode::BAD_GATEWAY, &format!("{e}")),
     };
 
     let token = connection
@@ -400,7 +400,7 @@ async fn video_forward_raw(
             resp
         }
         Err(e) => {
-            return json_error_response(
+            return video_error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("{provider} video POST failed: {e}"),
             )
@@ -1216,6 +1216,19 @@ fn json_error_response(status: StatusCode, message: &str) -> Response {
     with_cors_response((status, Json(body)).into_response())
 }
 
+/// The `/v1/videos/*` counterpart of [`json_error_response`].
+///
+/// `json_error_response` runs the chat-oriented `infer_status_from_message` +
+/// `friendly_error_message` heuristics, which rewrite a client-chosen status
+/// (a 400 "Combos are not supported for video generation" came back as 406)
+/// and replace the text with generic prose that drops the provider name.
+/// 9router's `errorResponse` uses the status verbatim and the message
+/// untouched (open-sse/utils/error.js:30-38).
+fn video_error_response(status: StatusCode, message: &str) -> Response {
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(message));
+    with_cors_response((status, Json(body)).into_response())
+}
+
 fn with_cors_response(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -1289,7 +1302,7 @@ async fn video_create_handler(
 
     let Json(mut body) = match body_result {
         Ok(body) => body,
-        Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+        Err(_) => return video_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
     };
 
     let (provider, model) = match resolve_video_provider_model(&state, &body) {
@@ -1312,7 +1325,7 @@ async fn video_create_handler(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("application/json"))
     {
-        return json_error_response(
+        return video_error_response(
             StatusCode::BAD_REQUEST,
             "OpenRouter video requires an application/json body",
         );
@@ -1330,7 +1343,7 @@ async fn video_create_handler(
     }
     if canonical_provider == "openrouter" && action != "generations" {
         // ponytail: generations only — OpenRouter has no edits/extensions endpoint.
-        return json_error_response(
+        return video_error_response(
             StatusCode::BAD_REQUEST,
             &format!("OpenRouter video supports 'generations' only (got '{action}')"),
         );
@@ -1338,7 +1351,7 @@ async fn video_create_handler(
     if canonical_provider == "vertex" {
         if action != "generations" {
             // ponytail: Veo extend/edit go through generations with `video`/`image` in the body.
-            return json_error_response(
+            return video_error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Vertex video supports 'generations' only (got '{action}')"),
             );
@@ -1367,7 +1380,7 @@ async fn video_create_handler(
     let body_bytes = match serde_json::to_vec(&forward_body) {
         Ok(b) => b,
         Err(e) => {
-            return json_error_response(
+            return video_error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Serialization error: {}", e),
             )
@@ -1391,7 +1404,7 @@ async fn video_create_handler(
         }
     }
     if connections.is_empty() {
-        return json_error_response(
+        return video_error_response(
             StatusCode::BAD_REQUEST,
             &format!("No credentials for provider: {provider}"),
         );
@@ -1407,7 +1420,7 @@ async fn video_create_handler(
             match resolve_vertex_token(connection).await {
                 Ok(token) => Some(token),
                 Err(message) => {
-                    last_error = Some(json_error_response(StatusCode::BAD_REQUEST, &message));
+                    last_error = Some(video_error_response(StatusCode::BAD_REQUEST, &message));
                     continue;
                 }
             }
@@ -1419,7 +1432,7 @@ async fn video_create_handler(
             match build_video_headers(&provider, connection, vertex_token.as_deref()) {
                 Ok(h) => h,
                 Err(e) => {
-                    last_error = Some(json_error_response(
+                    last_error = Some(video_error_response(
                         StatusCode::BAD_REQUEST,
                         &format!("Header error: {}", e),
                     ));
@@ -1439,7 +1452,7 @@ async fn video_create_handler(
         ) {
             Ok(url) => url,
             Err(message) => {
-                last_error = Some(json_error_response(StatusCode::BAD_REQUEST, &message));
+                last_error = Some(video_error_response(StatusCode::BAD_REQUEST, &message));
                 continue;
             }
         };
@@ -1462,7 +1475,7 @@ async fn video_create_handler(
         let client = match state.client_pool.get(&provider, proxy.as_ref()) {
             Ok(c) => c,
             Err(e) => {
-                last_error = Some(json_error_response(
+                last_error = Some(video_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Client error: {:?}", e),
                 ));
@@ -1484,7 +1497,7 @@ async fn video_create_handler(
         {
             Ok(r) => r,
             Err(e) => {
-                return json_error_response(
+                return video_error_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("{provider} video POST aborted: {}", e),
                 );
@@ -1582,7 +1595,7 @@ async fn video_create_handler(
 
     // All accounts failed with a rotation status — return the last response.
     last_error.unwrap_or_else(|| {
-        json_error_response(StatusCode::BAD_GATEWAY, "All video accounts failed")
+        video_error_response(StatusCode::BAD_GATEWAY, "All video accounts failed")
     })
 }
 
@@ -1616,7 +1629,7 @@ async fn video_get_handler_with_query(
     }
 
     if request_id.trim().is_empty() {
-        return json_error_response(StatusCode::BAD_REQUEST, "Missing video request id");
+        return video_error_response(StatusCode::BAD_REQUEST, "Missing video request id");
     }
 
     let provider = resolve_video_get_provider(&state, &headers, raw_query.as_deref());
@@ -1647,7 +1660,7 @@ async fn video_get_handler_with_query(
     let mut upstream_headers = match build_video_headers(&provider, &connection, None) {
         Ok(h) => h,
         Err(e) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
+            return video_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
         }
     };
 
@@ -1656,7 +1669,7 @@ async fn video_get_handler_with_query(
     let client = match state.client_pool.get(&provider, proxy.as_ref()) {
         Ok(c) => c,
         Err(e) => {
-            return json_error_response(
+            return video_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Client error: {:?}", e),
             )
@@ -1671,7 +1684,7 @@ async fn video_get_handler_with_query(
     {
         Ok(r) => r,
         Err(e) => {
-            return json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
+            return video_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
         }
     };
 
@@ -1714,7 +1727,7 @@ async fn video_get_handler_with_query(
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        return json_error_response(
+                        return video_error_response(
                             StatusCode::BAD_GATEWAY,
                             &format!("Request failed: {}", e),
                         )
@@ -1758,7 +1771,7 @@ fn resolve_video_provider_model(
     let resolved = get_model_info(model_str, &snapshot);
 
     match resolved.route_kind {
-        ModelRouteKind::Combo => Err(json_error_response(
+        ModelRouteKind::Combo => Err(video_error_response(
             StatusCode::BAD_REQUEST,
             "Combos are not supported for video generation",
         )),
@@ -1769,14 +1782,14 @@ fn resolve_video_provider_model(
                 // provider. Prefix-less inference targets chat providers only.
                 Some(_) if !model_str.contains('/') => DEFAULT_VIDEO_PROVIDER.to_string(),
                 Some(p) => {
-                    return Err(json_error_response(
+                    return Err(video_error_response(
                         StatusCode::BAD_REQUEST,
                         &format!("Provider '{}' does not support video generation", p),
                     ));
                 }
                 None if !model_str.contains('/') => DEFAULT_VIDEO_PROVIDER.to_string(),
                 None => {
-                    return Err(json_error_response(
+                    return Err(video_error_response(
                         StatusCode::BAD_REQUEST,
                         "Invalid model format",
                     ));
@@ -1948,13 +1961,13 @@ fn validate_vertex_create_body(body: &Value) -> Result<(), Response> {
         .map(str::trim)
         .filter(|m| !m.is_empty());
     let Some(model) = model else {
-        return Err(json_error_response(
+        return Err(video_error_response(
             StatusCode::BAD_REQUEST,
             "Vertex video requires a model (e.g. vertex/veo-3.1-generate-preview)",
         ));
     };
     if !is_safe_vertex_model_id(model) {
-        return Err(json_error_response(
+        return Err(video_error_response(
             StatusCode::BAD_REQUEST,
             "Invalid Vertex video model id",
         ));
@@ -1965,7 +1978,7 @@ fn validate_vertex_create_body(body: &Value) -> Result<(), Response> {
         .is_some_and(|p| !p.trim().is_empty());
     let has_image = body.get("image").is_some() || body.get("image_url").is_some();
     if !has_prompt && !has_image {
-        return Err(json_error_response(
+        return Err(video_error_response(
             StatusCode::BAD_REQUEST,
             "Vertex video requires a prompt or an image",
         ));
@@ -2390,11 +2403,13 @@ async fn video_vertex_poll(
 ) -> Response {
     let operation_name = match decode_vertex_job_id(&request_id) {
         Some(name) => name,
-        None => return json_error_response(StatusCode::BAD_REQUEST, "Invalid Vertex video job id"),
+        None => {
+            return video_error_response(StatusCode::BAD_REQUEST, "Invalid Vertex video job id")
+        }
     };
     let (token, _project, _location) = match resolve_vertex_auth(&connection).await {
         Ok(auth) => auth,
-        Err(message) => return json_error_response(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return video_error_response(StatusCode::BAD_REQUEST, &message),
     };
     let base = connection
         .provider_specific_data
@@ -2409,7 +2424,7 @@ async fn video_vertex_poll(
     let headers = match build_video_headers(&connection.provider, &connection, Some(&token)) {
         Ok(h) => h,
         Err(e) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
+            return video_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
         }
     };
     let snapshot = state.db.snapshot();
@@ -2417,7 +2432,7 @@ async fn video_vertex_poll(
     let client = match state.client_pool.get(&connection.provider, proxy.as_ref()) {
         Ok(c) => c,
         Err(e) => {
-            return json_error_response(
+            return video_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Client error: {:?}", e),
             )
@@ -2432,7 +2447,7 @@ async fn video_vertex_poll(
         .await
     {
         Ok(response) => proxy_vertex_response(response, headers, &connection).await,
-        Err(e) => json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e)),
+        Err(e) => video_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e)),
     }
 }
 
@@ -2475,6 +2490,21 @@ fn select_video_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+
+    async fn error_message(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("message"))
+                    .or_else(|| v.get("error"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    }
     #[test]
     fn create_rotation_statuses_matches_9router() {
         // 9router videoGeneration.js CREATE_ROTATION_STATUSES = Set([401, 403, 429]).
@@ -2637,6 +2667,51 @@ mod tests {
         assert_eq!(completed["status"], json!("completed"));
         assert_eq!(completed["video"]["url"], json!("gs://bucket/v.mp4"));
         assert_eq!(completed["videos"][0]["mime_type"], json!("video/mp4"));
+    }
+
+    // P261-001: `json_error_response` runs the chat-oriented status/message
+    // heuristics, so "Combos are not supported for video generation" came back
+    // as 406 and the provider arm lost its `Provider 'x'` to generic prose.
+    // 9router's `errorResponse` (open-sse/utils/error.js:30-38) is verbatim.
+    #[tokio::test]
+    async fn video_combo_rejection_stays_400() {
+        let response = video_error_response(
+            StatusCode::BAD_REQUEST,
+            "Combos are not supported for video generation",
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_message(response).await,
+            "Combos are not supported for video generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_provider_rejection_keeps_provider_name() {
+        let response = video_error_response(
+            StatusCode::BAD_REQUEST,
+            "Provider 'anthropic' does not support video generation",
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_message(response).await,
+            "Provider 'anthropic' does not support video generation"
+        );
+    }
+
+    /// And the contrast that makes the bug visible: the shared chat-oriented
+    /// constructor really does mangle the same input.
+    #[tokio::test]
+    async fn shared_json_error_response_rewrites_video_text() {
+        let response = json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Combos are not supported for video generation",
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "infer_status_from_message turns this into 406"
+        );
     }
 
     #[test]
