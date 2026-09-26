@@ -392,7 +392,10 @@ fn parse_responses_api_stream(sse: &str) -> Option<ResponsesStreamSummary> {
                     summary.output[idx] = item.clone();
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.done" => {
+                // 9router streamToJsonConverter.js:30 treats `response.done`
+                // as the same terminal as `response.completed`; some
+                // Responses-compatible upstreams send only the alias.
                 summary.status = "completed".to_string();
                 if let Some(usage) = parsed.pointer("/response/usage") {
                     let mut map = serde_json::Map::new();
@@ -428,6 +431,203 @@ fn parse_responses_api_stream(sse: &str) -> Option<ResponsesStreamSummary> {
     Some(summary)
 }
 
+/// The parts of a Responses SSE stream every projection needs, parsed once.
+///
+/// 9router collapses the stream in one place and then renders it three ways
+/// depending on the CLIENT's format (sseToJsonHandler.js:226-282). Splitting
+/// the parse from the projection is what lets the three shapes agree on the
+/// text and the token counts instead of each re-deriving them.
+struct CollapsedResponses {
+    response_id: String,
+    created_at: i64,
+    status: String,
+    /// The `output` items, gap-filled the way 9router does
+    /// (streamToJsonConverter.js:90-93).
+    output: Vec<Value>,
+    /// `input_tokens` EXCLUDES cached tokens on cache-capable upstreams, so
+    /// the cache counters stay separate until a projection folds them in.
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
+}
+
+impl CollapsedResponses {
+    /// Prompt tokens with the cache counters folded in, matching 9router
+    /// sseToJsonHandler.js:237-239.
+    fn folded_input(&self) -> u64 {
+        self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens
+    }
+
+    /// The assistant text, from every `message` output item.
+    fn text(&self) -> String {
+        let mut text_parts: Vec<String> = Vec::new();
+        for item in &self.output {
+            if item.get("type").and_then(|v| v.as_str()) != Some("message") {
+                continue;
+            }
+            let Some(content_arr) = item.get("content").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for part in content_arr {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        text_parts.push(text.to_string());
+                    }
+                }
+            }
+        }
+        text_parts.join("")
+    }
+
+    /// `function_call` output items lifted into OpenAI `tool_calls`
+    /// (9router sseToJsonHandler.js:249-258).
+    ///
+    /// These were dropped entirely, so a forceStream request that called a tool
+    /// reached the client as a text-only completion that had silently lost the
+    /// call.
+    fn tool_calls(&self) -> Vec<Value> {
+        self.output
+            .iter()
+            .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
+            .enumerate()
+            .map(|(idx, item)| {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "call_{}_{}_{}",
+                            name,
+                            chrono::Utc::now().timestamp_millis(),
+                            idx
+                        )
+                    });
+                let arguments = match item.get("arguments") {
+                    Some(Value::String(s)) => Value::String(s.clone()),
+                    Some(other) if !other.is_null() => other.clone(),
+                    _ => Value::String("{}".to_string()),
+                };
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments }
+                })
+            })
+            .collect()
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn collapse_responses_stream(sse: &str) -> Option<CollapsedResponses> {
+    let summary = parse_responses_api_stream(sse)?;
+    let now = now_secs();
+    let usage = |key: &str| summary.usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    // Gaps in the output index are filled rather than emitted as nulls
+    // (9router streamToJsonConverter.js:90-93).
+    let output: Vec<Value> = summary
+        .output
+        .into_iter()
+        .map(|item| {
+            if item.is_null() {
+                json!({"type": "message", "content": [], "role": "assistant"})
+            } else {
+                item
+            }
+        })
+        .collect();
+    Some(CollapsedResponses {
+        response_id: summary.response_id,
+        created_at: summary.created.unwrap_or(now),
+        status: summary.status,
+        output,
+        input_tokens: usage("input_tokens"),
+        output_tokens: usage("output_tokens"),
+        total_tokens: usage("total_tokens"),
+        cache_read_input_tokens: usage("cache_read_input_tokens") + usage("cached_tokens"),
+        cache_creation_input_tokens: usage("cache_creation_input_tokens"),
+    })
+}
+
+/// Collapse a Responses SSE stream back into the Responses object itself.
+///
+/// For a Responses client (9router sseToJsonHandler.js:227-229: "Client is
+/// Responses API → return as-is"). Handing such a client a `chat.completion`
+/// is not a degraded rendering — it is an object with no `output` array and no
+/// `usage` in the shape the client reads, so the response is unusable.
+pub fn responses_stream_to_responses(input: &[u8]) -> Option<Value> {
+    let sse = String::from_utf8_lossy(input);
+    let sse = sse.trim();
+    if !looks_like_sse(input) {
+        return None;
+    }
+    let collapsed = collapse_responses_stream(sse)?;
+    Some(json!({
+        "id": if collapsed.response_id.is_empty() {
+            format!("resp_{}", chrono::Utc::now().timestamp_millis())
+        } else {
+            collapsed.response_id
+        },
+        "object": "response",
+        "created_at": collapsed.created_at,
+        "status": collapsed.status,
+        "output": collapsed.output,
+        "usage": {
+            "input_tokens": collapsed.input_tokens,
+            "output_tokens": collapsed.output_tokens,
+            "total_tokens": collapsed.total_tokens,
+        }
+    }))
+}
+
+/// Collapse a Responses SSE stream into the Gemini `candidates` envelope a
+/// Gemini, Gemini-CLI or Antigravity client expects
+/// (9router sseToJsonHandler.js:260-268).
+///
+/// Without it these clients get a `chat.completion`, whose `choices[].message`
+/// they do not read, and a model that answered normally looks like it returned
+/// nothing.
+pub fn responses_stream_to_gemini(input: &[u8], fallback_model: Option<&str>) -> Option<Value> {
+    let sse = String::from_utf8_lossy(input);
+    let sse = sse.trim();
+    if !looks_like_sse(input) {
+        return None;
+    }
+    let collapsed = collapse_responses_stream(sse)?;
+    let in_tokens = collapsed.folded_input();
+    let out_tokens = collapsed.output_tokens;
+    let model = fallback_model.unwrap_or("unknown");
+    Some(json!({
+        "response": {
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": collapsed.text() }] },
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {
+                "promptTokenCount": in_tokens,
+                "candidatesTokenCount": out_tokens,
+                "totalTokenCount": in_tokens + out_tokens
+            },
+            "modelVersion": model,
+            "responseId": if collapsed.response_id.is_empty() {
+                format!("resp_{}", chrono::Utc::now().timestamp_millis())
+            } else {
+                collapsed.response_id
+            }
+        }
+    }))
+}
+
 /// Convert an OpenAI Responses API SSE stream to a single `chat.completion`
 /// JSON response.
 ///
@@ -443,94 +643,71 @@ fn parse_responses_api_stream(sse: &str) -> Option<ResponsesStreamSummary> {
 /// data: {"type":"response.completed","response":{"usage":{...}}}
 /// ```
 fn convert_responses_api_stream(sse: &str, fallback_model: Option<&str>) -> Option<Value> {
-    let summary = parse_responses_api_stream(sse)?;
+    let collapsed = collapse_responses_stream(sse)?;
 
-    // Extract text content from output items.
-    let mut text_parts: Vec<String> = Vec::new();
-    for item in &summary.output {
-        if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
-            if item_type == "message" {
-                if let Some(content_arr) = item.get("content").and_then(|v| v.as_array()) {
-                    for part in content_arr {
-                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                            if !text.is_empty() {
-                                text_parts.push(text.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let content_text = collapsed.text();
+    let tool_calls = collapsed.tool_calls();
+    let has_tool_calls = !tool_calls.is_empty();
+    let folded_input = collapsed.folded_input();
+    let total_tokens = collapsed.total_tokens;
 
-    let content_text = text_parts.join("");
-    let input_tokens = summary
-        .usage
-        .get("input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = summary
-        .usage
-        .get("output_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    // 9router sseToJsonHandler.js: `input_tokens` EXCLUDES cached tokens on
-    // cache-capable upstreams. Fold cache_read (cached_tokens) + cache_creation
-    // into the client-facing prompt_tokens and surface them in
-    // prompt_tokens_details so a client can tell a cache hit from a small prompt.
-    let cache_read = summary
-        .usage
-        .get("cache_read_input_tokens")
-        .or_else(|| summary.usage.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let cache_create = summary
-        .usage
-        .get("cache_creation_input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let folded_input = input_tokens + cache_read + cache_create;
-    let total_tokens = summary
-        .usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_else(|| folded_input + output_tokens);
-
-    // prompt_tokens_details: only when a cache counter is non-zero.
+    // 9router sseToJsonHandler.js:240-245 — prompt_tokens_details only when a
+    // cache counter is non-zero, so a client can tell a cache hit from a small
+    // prompt.
     let mut usage_json = json!({
         "prompt_tokens": folded_input,
-        "completion_tokens": output_tokens,
+        "completion_tokens": collapsed.output_tokens,
         "total_tokens": total_tokens,
     });
-    if cache_read > 0 || cache_create > 0 {
+    if collapsed.cache_read_input_tokens > 0 || collapsed.cache_creation_input_tokens > 0 {
         let mut details = serde_json::Map::new();
-        if cache_read > 0 {
-            details.insert("cached_tokens".into(), json!(cache_read));
+        if collapsed.cache_read_input_tokens > 0 {
+            details.insert(
+                "cached_tokens".into(),
+                json!(collapsed.cache_read_input_tokens),
+            );
         }
-        if cache_create > 0 {
-            details.insert("cache_creation_tokens".into(), json!(cache_create));
+        if collapsed.cache_creation_input_tokens > 0 {
+            details.insert(
+                "cache_creation_tokens".into(),
+                json!(collapsed.cache_creation_input_tokens),
+            );
         }
         usage_json["prompt_tokens_details"] = Value::Object(details);
     }
 
     let model = fallback_model.unwrap_or("unknown");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+
+    // 9router sseToJsonHandler.js:270-273 — tool calls replace the text, and
+    // `finish_reason` follows them; a stream that only made tool calls carries a
+    // null content so a client does not render an empty string as the answer.
+    let message = if has_tool_calls {
+        json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "tool_calls": tool_calls,
+        })
+    } else {
+        json!({ "role": "assistant", "content": content_text })
+    };
+    let response_done = collapsed.status == "completed" || collapsed.status == "done";
+    let finish_reason = if has_tool_calls {
+        "tool_calls"
+    } else if response_done {
+        "stop"
+    } else {
+        collapsed.status.as_str()
+    };
 
     Some(json!({
         "id": format!("chatcmpl-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000")),
         "object": "chat.completion",
-        "created": summary.created.unwrap_or(now),
+        "created": collapsed.created_at,
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content_text,
-            },
-            "finish_reason": if summary.status == "completed" { "stop" } else { "error" },
+            "message": message,
+            "finish_reason": finish_reason,
         }],
         "usage": usage_json,
     }))
@@ -725,6 +902,131 @@ mod tests {
             result["usage"]["prompt_tokens_details"]["cache_creation_tokens"],
             3
         );
+    }
+
+    /// A canned stream carrying BOTH a `message` item and a `function_call`
+    /// item, which is what a tool-using turn actually looks like.
+    fn tool_calling_responses_sse() -> String {
+        concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool\",\"created_at\":1712345678}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Looking that up\"}],\"role\":\"assistant\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\":\\\"SF\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":8,\"total_tokens\":28}}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string()
+    }
+
+    /// A Responses client cannot read a `chat.completion` — it looks for
+    /// `output` and `usage.input_tokens`, and neither exists there. 9router
+    /// returns the collapsed object verbatim for this client
+    /// (sseToJsonHandler.js:227-229).
+    #[test]
+    fn responses_source_returns_the_responses_object_not_chat_completion() {
+        let sse = tool_calling_responses_sse();
+        let result = responses_stream_to_responses(sse.as_bytes()).unwrap();
+        assert_eq!(result["object"], "response");
+        assert_eq!(result["id"], "resp_tool");
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["created_at"], 1712345678);
+        assert_eq!(result["usage"]["input_tokens"], 20);
+        assert_eq!(result["usage"]["output_tokens"], 8);
+        assert_eq!(result["usage"]["total_tokens"], 28);
+        let output = result["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[1]["type"], "function_call");
+        assert!(
+            result.get("choices").is_none(),
+            "must not be a chat.completion"
+        );
+    }
+
+    /// A Gemini-family client reads `response.candidates[0].content.parts`
+    /// and `response.usageMetadata`, and nothing else.
+    #[test]
+    fn gemini_source_wraps_the_candidates_envelope() {
+        let sse = tool_calling_responses_sse();
+        let result = responses_stream_to_gemini(sse.as_bytes(), Some("gemini-2.5-pro")).unwrap();
+        let text = &result["response"]["candidates"][0]["content"]["parts"][0]["text"];
+        assert_eq!(text, "Looking that up");
+        assert_eq!(result["response"]["candidates"][0]["finishReason"], "STOP");
+        assert_eq!(result["response"]["candidates"][0]["index"], 0);
+        let usage = &result["response"]["usageMetadata"];
+        assert_eq!(usage["promptTokenCount"], 20);
+        assert_eq!(usage["candidatesTokenCount"], 8);
+        assert_eq!(usage["totalTokenCount"], 28);
+        assert_eq!(result["response"]["modelVersion"], "gemini-2.5-pro");
+        assert_eq!(result["response"]["responseId"], "resp_tool");
+        assert!(result.get("object").is_none(), "not a chat.completion");
+    }
+
+    /// `function_call` items were dropped, so a tool-using forceStream request
+    /// reached the client as a text-only completion that had silently lost the
+    /// call.
+    #[test]
+    fn function_call_items_become_openai_tool_calls() {
+        let sse = tool_calling_responses_sse();
+        let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
+        let message = &result["choices"][0]["message"];
+        let calls = message["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_abc");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        assert_eq!(
+            calls[0]["function"]["arguments"].as_str().unwrap(),
+            r#"{"location":"SF"}"#
+        );
+        assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
+        // A tool call is not text, so the text field is null rather than "".
+        assert!(message["content"].is_null());
+    }
+
+    /// Text-only turns must keep their content — the null is for tool calls.
+    #[test]
+    fn a_text_only_turn_keeps_its_content_and_a_stop_reason() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_text\",\"created_at\":1}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}],\"role\":\"assistant\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n",
+        );
+        let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"], "hi");
+        assert!(result["choices"][0]["message"].get("tool_calls").is_none());
+        assert_eq!(result["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// Cache counters fold into the Gemini prompt count, as they do for the
+    /// chat.completion projection.
+    #[test]
+    fn the_gemini_projection_folds_cache_counters_into_the_prompt_count() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_c\",\"created_at\":1}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15,\"cache_read_input_tokens\":20}}}\n\n",
+        );
+        let result = responses_stream_to_gemini(sse.as_bytes(), Some("gemini-2.5-pro")).unwrap();
+        let usage = &result["response"]["usageMetadata"];
+        assert_eq!(usage["promptTokenCount"], 30);
+        assert_eq!(usage["candidatesTokenCount"], 5);
+        assert_eq!(usage["totalTokenCount"], 35);
+    }
+
+    /// A stream that is not SSE is not a Responses stream.
+    #[test]
+    fn the_responses_projections_reject_non_sse_input() {
+        assert!(responses_stream_to_responses(b"{\"id\":\"x\"}").is_none());
+        assert!(responses_stream_to_gemini(b"{\"id\":\"x\"}", None).is_none());
+        assert!(responses_stream_to_responses(b"").is_none());
     }
 
     #[test]

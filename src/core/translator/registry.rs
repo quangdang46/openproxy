@@ -616,6 +616,9 @@ impl TranslationRegistry {
     /// chunk (finish_reason) + `data: [DONE]` when the upstream closed without
     /// an explicit messageStopEvent (9router transformEventStreamToSSE
     /// `finish()` — a missing terminal is a protocol failure otherwise).
+    /// OpenAiResponses: emits the terminal chunk when the stream closed without
+    /// `response.completed`, so a client waiting on `finish_reason` is not left
+    /// hanging.
     pub fn finish_stream(
         &self,
         source: Format,
@@ -657,6 +660,25 @@ impl TranslationRegistry {
                 out.push("data: [DONE]\n\n".to_string());
                 return out;
             }
+        }
+        // A Codex stream that closed without `response.completed` never reached
+        // the transform's terminal branch, so no chunk carried a finish_reason.
+        // Driving the same transform with a null chunk runs its flush arm
+        // (9router openai-responses.js:405-436), which is a no-op once
+        // `finishReasonSent` is set — hence calling it on every EOF is safe.
+        if source == Format::OpenAiResponses && target == Format::OpenAi {
+            return crate::core::translator::response::openai_responses::responses_to_chat_response(
+                &Value::Null,
+                &mut state.responses.state,
+            )
+            .into_iter()
+            .map(|v| {
+                format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&v).unwrap_or_default()
+                )
+            })
+            .collect();
         }
         Vec::new()
     }
@@ -1358,5 +1380,88 @@ mod parity_tests {
             translated.get("_customToolNames").is_none(),
             "translated output must not leak _customToolNames upstream"
         );
+    }
+
+    /// A Codex stream that closes without `response.completed` never reaches
+    /// the transform's terminal branch, so nothing ever carried a
+    /// `finish_reason` and a client waiting for one hung (9router
+    /// openai-responses.js:405-436 drives that flush from a null chunk).
+    fn flush_responses_stream(state: &mut ResponseTransformState, events: &[Value]) -> Value {
+        use crate::core::translator::response::openai_responses::responses_to_chat_response;
+        for event in events {
+            responses_to_chat_response(event, &mut state.responses.state);
+        }
+        let out = global_registry().finish_stream(Format::OpenAiResponses, Format::OpenAi, state);
+        assert_eq!(out.len(), 1, "expected exactly one terminal frame: {out:?}");
+        let payload = out[0]
+            .trim()
+            .strip_prefix("data: ")
+            .expect("a data frame")
+            .to_string();
+        serde_json::from_str(&payload).expect("terminal frame is JSON")
+    }
+
+    #[test]
+    fn finish_stream_flushes_a_truncated_responses_stream() {
+        let mut state = ResponseTransformState::default();
+        let terminal = flush_responses_stream(
+            &mut state,
+            &[
+                json!({"type": "response.created", "response": {"model": "gpt-5-codex"}}),
+                json!({"type": "response.output_text.delta", "delta": "hi"}),
+            ],
+        );
+
+        assert_eq!(terminal["choices"][0]["finish_reason"], "stop");
+        assert_eq!(terminal["model"], "gpt-5-codex");
+    }
+
+    #[test]
+    fn finish_stream_reports_tool_calls_when_the_stream_opened_one() {
+        let mut state = ResponseTransformState::default();
+        let terminal = flush_responses_stream(
+            &mut state,
+            &[
+                json!({"type": "response.created", "response": {"model": "gpt-5-codex"}}),
+                json!({
+                    "type": "response.output_item.added",
+                    "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "search"}
+                }),
+            ],
+        );
+
+        assert_eq!(terminal["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn finish_stream_is_idempotent_for_responses() {
+        let mut state = ResponseTransformState::default();
+        for event in [
+            json!({"type": "response.created", "response": {"model": "gpt-5-codex"}}),
+            json!({"type": "response.output_text.delta", "delta": "hi"}),
+        ] {
+            use crate::core::translator::response::openai_responses::responses_to_chat_response;
+            responses_to_chat_response(&event, &mut state.responses.state);
+        }
+
+        assert_eq!(
+            global_registry()
+                .finish_stream(Format::OpenAiResponses, Format::OpenAi, &mut state)
+                .len(),
+            1
+        );
+        // The flush arm guards on `finishReasonSent`; a second EOF must not
+        // emit a second terminal frame.
+        assert!(global_registry()
+            .finish_stream(Format::OpenAiResponses, Format::OpenAi, &mut state)
+            .is_empty());
+    }
+
+    #[test]
+    fn finish_stream_stays_silent_for_a_stream_that_never_started() {
+        let mut state = ResponseTransformState::default();
+        assert!(global_registry()
+            .finish_stream(Format::OpenAiResponses, Format::OpenAi, &mut state)
+            .is_empty());
     }
 }
