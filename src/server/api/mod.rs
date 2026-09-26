@@ -1815,6 +1815,9 @@ async fn create_key_api(
 }
 
 // API Key CRUD - PUT + DELETE
+// `GET /api/keys/{id}` lives in `admin_items::routes()`, merged into this
+// router a few lines below — registering it here too would be an overlapping
+// method route and panic at startup.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateKeyRequest {
@@ -1839,7 +1842,7 @@ async fn update_key_api(
     if !exists {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": "API key not found" })),
+            Json(json!({ "error": "Key not found" })),
         )
             .into_response();
     }
@@ -1865,11 +1868,10 @@ async fn update_key_api(
         Ok(_) => {
             let snapshot = state.db.snapshot();
             match snapshot.api_keys.iter().find(|k| k.id == id) {
-                Some(key) => {
-                    let mut response_key = key.clone();
-                    response_key.key = "***".to_string();
-                    Json(json!({ "key": response_key })).into_response()
-                }
+                // 9router returns the stored row verbatim (apiKeysRepo.js:59), so the
+                // plaintext key round-trips. Masking only the PUT — while GET /api/keys
+                // hands back real keys — would break clients that re-store the response.
+                Some(key) => Json(json!({ "key": key })).into_response(),
                 None => (
                     StatusCode::NOT_FOUND,
                     Json(json!({ "error": "Key not found after update" })),
@@ -1900,7 +1902,7 @@ async fn delete_key_api(
     if !exists {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": "API key not found" })),
+            Json(json!({ "error": "Key not found" })),
         )
             .into_response();
     }
@@ -1913,7 +1915,9 @@ async fn delete_key_api(
         .await;
 
     match result {
-        Ok(_) => Json(json!({ "success": true, "message": "API key deleted" })).into_response(),
+        // 9router returns only the message (keys/[id]/route.js:53) — no `success`
+        // flag for a client to branch on.
+        Ok(_) => Json(json!({ "message": "Key deleted successfully" })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
