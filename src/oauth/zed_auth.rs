@@ -14,18 +14,51 @@
 //!    to mint a 50-minute LLM bearer used by the executor.
 
 use base64::Engine as _;
+use once_cell::sync::Lazy;
 use rand::rngs::OsRng;
+use reqwest::header::AUTHORIZATION;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
 use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde_json::Value;
 use sha2_rsa_compat::Sha256;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const ZED_WEB_BASE_URL: &str = "https://zed.dev";
 pub const ZED_CLOUD_BASE_URL: &str = "https://cloud.zed.dev";
 /// JS ZED_HOSTED_CONFIG.defaultNativeAppPort.
 pub const ZED_DEFAULT_NATIVE_APP_PORT: u16 = 58443;
+
+/// JS ZED_HEADERS (zedAuth.js:19-28) — one definition so the completions path,
+/// the /models path and the token-expiry check cannot drift apart.
+pub const ZED_HEADER_EXPIRED_TOKEN: &str = "x-zed-expired-token";
+pub const ZED_HEADER_OUTDATED_TOKEN: &str = "x-zed-outdated-token";
+pub const ZED_HEADER_CLIENT_SUPPORTS_STATUS: &str = "x-zed-client-supports-status-messages";
+pub const ZED_HEADER_CLIENT_SUPPORTS_STREAM_ENDED: &str =
+    "x-zed-client-supports-stream-ended-request-completion-status";
+pub const ZED_HEADER_SERVER_SUPPORTS_STATUS: &str = "x-zed-server-supports-status-messages";
+pub const ZED_HEADER_CLIENT_SUPPORTS_XAI: &str = "x-zed-client-supports-x-ai";
+pub const ZED_HEADER_SYSTEM_ID: &str = "x-zed-system-id";
+
 const PRIVATE_KEY_PREFIX: &str = "zed-rsa-pkcs1:";
-const LLM_TOKEN_TTL_SECS: i64 = 50 * 60;
+const LLM_TOKEN_TTL_SECS: u64 = 50 * 60;
+const MODEL_CACHE_TTL_SECS: u64 = 60 * 60;
+
+/// JS llmTokenCache (zedAuth.js:33). Zed bearers are good for 50 minutes, so
+/// re-minting one per request is a wasted round-trip against cloud.zed.dev.
+static LLM_TOKEN_CACHE: Lazy<Mutex<HashMap<String, (String, Instant)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// JS modelCache (zedAuth.js:34) — the live catalog, never hardcoded.
+static MODEL_CACHE: Lazy<Mutex<HashMap<String, (ZedModelCatalog, Instant)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// JS modelInflight (zedAuth.js:35) — collapses a burst of concurrent catalog
+/// fetches for one account into a single upstream request. A waiter that loses
+/// the race re-checks the TTL cache and finds the winner's entry.
+static MODEL_FLIGHT_LOCKS: Lazy<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 pub struct NativeAuthData {
@@ -199,7 +232,7 @@ pub async fn fetch_llm_token(
         .header("Authorization", auth)
         .json(&serde_json::json!({"organization_id": organization_id}));
     if let Some(sid) = system_id.filter(|s| !s.is_empty()) {
-        request = request.header("x-zed-system-id", sid);
+        request = request.header(ZED_HEADER_SYSTEM_ID, sid);
     }
     let response = request
         .send()
@@ -227,9 +260,376 @@ pub async fn fetch_llm_token(
     Ok(token)
 }
 
+/// Cache key for one account's LLM bearer (JS zedUserCacheKey): user id,
+/// organization, and the last 16 characters of the access token so a rotated
+/// token never reads a stale entry.
+pub fn zed_llm_cache_key(user_id: &str, organization_id: &str, access_token: &str) -> String {
+    let org = if organization_id.is_empty() {
+        "default"
+    } else {
+        organization_id
+    };
+    // JS `token.slice(-16)` indexes UTF-16 units; access tokens are ASCII, so a
+    // byte tail is equivalent and cannot split a character.
+    let tail = access_token
+        .get(access_token.len().saturating_sub(16)..)
+        .unwrap_or(access_token);
+    format!("{user_id}:{org}:{tail}")
+}
+
+/// Cached form of `fetch_llm_token` (JS fetchZedLlmToken, which memoises for
+/// `LLM_TOKEN_TTL_MS`). `force_refresh` skips the read *and* replaces the
+/// entry — that is the path the 401 / expired-token retry takes.
+pub async fn fetch_llm_token_cached(
+    client: &reqwest::Client,
+    user_id: &str,
+    access_token: &str,
+    organization_id: &str,
+    system_id: Option<&str>,
+    force_refresh: bool,
+) -> Result<String, String> {
+    let key = zed_llm_cache_key(user_id, organization_id, access_token);
+    if !force_refresh {
+        let fresh = LLM_TOKEN_CACHE
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+            .filter(|(_, minted)| minted.elapsed() < Duration::from_secs(LLM_TOKEN_TTL_SECS))
+            .map(|(token, _)| token);
+        if let Some(token) = fresh {
+            return Ok(token);
+        }
+    }
+    let token = fetch_llm_token(client, user_id, access_token, organization_id, system_id).await?;
+    if let Ok(mut cache) = LLM_TOKEN_CACHE.lock() {
+        cache.insert(key, (token.clone(), Instant::now()));
+    }
+    Ok(token)
+}
+
+/// One resolved Zed model catalog (JS the `resolveZedModels` entry object).
+#[derive(Debug, Clone)]
+pub struct ZedModelCatalog {
+    /// Mapped, non-disabled models only — this is what `/v1/models` lists.
+    pub models: Vec<Value>,
+    /// Every upstream entry keyed by normalized id, disabled ones included:
+    /// resolving a model the user disabled still needs its `provider` field.
+    pub raw_by_id: HashMap<String, Value>,
+    pub default_model: String,
+    pub default_fast_model: String,
+    pub recommended_models: Vec<String>,
+}
+
+/// JS normalizeZedModelId — ids arrive as a string, a one-element array, or a
+/// wrapper object depending on which upstream surface produced them.
+pub fn normalize_zed_model_id(id: Option<&Value>) -> String {
+    let Some(id) = id else { return String::new() };
+    match id {
+        Value::Null => String::new(),
+        Value::String(s) if s.is_empty() => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => match items.first().and_then(Value::as_str) {
+            Some(first) => first.to_string(),
+            None => id.to_string(),
+        },
+        Value::Object(map) => match map.get("id").and_then(Value::as_str) {
+            Some(inner) => inner.to_string(),
+            None => id.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// JS mapZedModel — flatten one catalog entry into the shape the dashboard and
+/// `/v1/models` consume. Returns `None` for an entry with no usable id.
+pub fn map_zed_model(raw: &Value) -> Option<Value> {
+    let id = normalize_zed_model_id(raw.get("id"));
+    if id.is_empty() {
+        return None;
+    }
+    let flag = |snake: &str, camel: &str| -> bool {
+        raw.get(snake)
+            .or_else(|| raw.get(camel))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let field = |snake: &str, camel: &str| -> Value {
+        raw.get(snake)
+            .cloned()
+            .unwrap_or_else(|| raw.get(camel).cloned().unwrap_or(Value::Null))
+    };
+    let name = raw
+        .get("display_name")
+        .or_else(|| raw.get("displayName"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&id)
+        .to_string();
+    Some(serde_json::json!({
+        "id": id,
+        "name": name,
+        "provider": raw.get("provider").cloned().unwrap_or(Value::Null),
+        "isLatest": flag("is_latest", "isLatest"),
+        "contextLength": field("max_token_count", "maxTokenCount"),
+        "contextLengthInMaxMode": field("max_token_count_in_max_mode", "maxTokenCountInMaxMode"),
+        "maxOutputTokens": field("max_output_tokens", "maxOutputTokens"),
+        "supportsTools": flag("supports_tools", "supportsTools"),
+        "supportsImages": flag("supports_images", "supportsImages"),
+        "supportsThinking": flag("supports_thinking", "supportsThinking"),
+        "supportsDisablingThinking": flag("supports_disabling_thinking", "supportsDisablingThinking"),
+        "supportsFastMode": flag("supports_fast_mode", "supportsFastMode"),
+        "supportsServerSideCompaction": flag(
+            "supports_server_side_compaction", "supportsServerSideCompaction"),
+        "supportedEffortLevels": field("supported_effort_levels", "supportedEffortLevels"),
+        "supportsStreamingTools": flag("supports_streaming_tools", "supportsStreamingTools"),
+        "supportsParallelToolCalls": flag("supports_parallel_tool_calls", "supportsParallelToolCalls"),
+        "isDisabled": flag("is_disabled", "isDisabled"),
+        "disabledReason": raw.get("disabled_reason").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// JS zedModelCacheKey — the catalog is per account, not per organization.
+pub fn zed_model_cache_key(user_id: &str, organization_id: &str, access_token: &str) -> String {
+    zed_llm_cache_key(user_id, organization_id, access_token)
+}
+
+/// Fetch the live model catalog (JS the inner `resolveZedModels` promise).
+/// The bearer is minted through the same cache the completions path uses, so a
+/// catalog read never costs an extra token mint.
+async fn fetch_zed_models_catalog(
+    client: &reqwest::Client,
+    user_id: &str,
+    access_token: &str,
+    organization_id: &str,
+    system_id: Option<&str>,
+) -> Result<ZedModelCatalog, String> {
+    if access_token.is_empty() {
+        return Err("Zed credential is missing an access token".to_string());
+    }
+    let token = fetch_llm_token_cached(
+        client,
+        user_id,
+        access_token,
+        organization_id,
+        system_id,
+        false,
+    )
+    .await?;
+    let mut request = client
+        .get(format!("{ZED_CLOUD_BASE_URL}/models"))
+        .header("Accept", "application/json")
+        .header(AUTHORIZATION, format!("Bearer {token}"));
+    if let Some(sid) = system_id.filter(|s| !s.is_empty()) {
+        request = request.header(ZED_HEADER_SYSTEM_ID, sid);
+    }
+    // Zed only advertises the xAI-backed models when the client opts in
+    // (zedAuth.js:369), so this header is required for the catalog to be
+    // complete — unlike /completions, where 9router omits it.
+    request = request.header(ZED_HEADER_CLIENT_SUPPORTS_XAI, "true");
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Zed models request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Zed models failed: {} {text}", status.as_u16()));
+    }
+    let data: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Zed models response was not JSON: {e}"))?;
+
+    let raw_models = data
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let models: Vec<Value> = raw_models
+        .iter()
+        .filter_map(map_zed_model)
+        .filter(|m| !m["isDisabled"].as_bool().unwrap_or(false))
+        .collect();
+    let mut raw_by_id = HashMap::new();
+    for raw in &raw_models {
+        let id = normalize_zed_model_id(raw.get("id"));
+        if !id.is_empty() {
+            raw_by_id.insert(id, raw.clone());
+        }
+    }
+    let recommended = data
+        .get("recommended_models")
+        .or_else(|| data.get("recommendedModels"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| normalize_zed_model_id(Some(item)))
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ZedModelCatalog {
+        models,
+        raw_by_id,
+        default_model: normalize_zed_model_id(
+            data.get("default_model")
+                .or_else(|| data.get("defaultModel")),
+        ),
+        default_fast_model: normalize_zed_model_id(
+            data.get("default_fast_model")
+                .or_else(|| data.get("defaultFastModel")),
+        ),
+        recommended_models: recommended,
+    })
+}
+
+/// Resolve (and cache) the live Zed model catalog (JS resolveZedModels) —
+/// "never hardcoded, always a live fetch". `force_refresh` bypasses both the
+/// TTL cache and the de-duplication, so a caller that just saw a miss upstream
+/// does not read the entry another request is still writing.
+pub async fn resolve_zed_models(
+    client: &reqwest::Client,
+    user_id: &str,
+    access_token: &str,
+    organization_id: &str,
+    system_id: Option<&str>,
+    force_refresh: bool,
+) -> Result<ZedModelCatalog, String> {
+    let key = zed_model_cache_key(user_id, organization_id, access_token);
+    if force_refresh {
+        return fetch_and_cache_zed_models(
+            client,
+            &key,
+            user_id,
+            access_token,
+            organization_id,
+            system_id,
+        )
+        .await;
+    }
+    if let Some(catalog) = read_model_cache(&key) {
+        return Ok(catalog);
+    }
+
+    let flight = {
+        let mut locks = MODEL_FLIGHT_LOCKS
+            .lock()
+            .map_err(|_| "Zed model cache lock was poisoned")?;
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = flight.lock().await;
+    if let Some(catalog) = read_model_cache(&key) {
+        return Ok(catalog);
+    }
+    fetch_and_cache_zed_models(
+        client,
+        &key,
+        user_id,
+        access_token,
+        organization_id,
+        system_id,
+    )
+    .await
+}
+
+fn read_model_cache(key: &str) -> Option<ZedModelCatalog> {
+    MODEL_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+        .filter(|(_, fetched)| fetched.elapsed() < Duration::from_secs(MODEL_CACHE_TTL_SECS))
+        .map(|(catalog, _)| catalog)
+}
+
+async fn fetch_and_cache_zed_models(
+    client: &reqwest::Client,
+    key: &str,
+    user_id: &str,
+    access_token: &str,
+    organization_id: &str,
+    system_id: Option<&str>,
+) -> Result<ZedModelCatalog, String> {
+    let catalog =
+        fetch_zed_models_catalog(client, user_id, access_token, organization_id, system_id).await?;
+    if let Ok(mut cache) = MODEL_CACHE.lock() {
+        cache.insert(key.to_string(), (catalog.clone(), Instant::now()));
+    }
+    Ok(catalog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seed a bearer under `key` with an explicit age, so the TTL boundary can
+    /// be exercised without sleeping.
+    fn seed_llm_token(key: &str, token: &str, age: Duration) {
+        LLM_TOKEN_CACHE
+            .lock()
+            .expect("cache lock")
+            .insert(key.to_string(), (token.to_string(), Instant::now() - age));
+    }
+
+    #[tokio::test]
+    async fn cached_llm_token_is_served_without_a_network_call() {
+        let key = zed_llm_cache_key("cache-user", "org", "abcdefghijklmnopqrstuvwxyz");
+        seed_llm_token(&key, "sentinel-llm-token", Duration::from_secs(0));
+
+        // A real mint would have to reach cloud.zed.dev; returning the sentinel
+        // proves the cache short-circuited the request.
+        assert_eq!(
+            fetch_llm_token_cached(
+                &reqwest::Client::new(),
+                "cache-user",
+                "abcdefghijklmnopqrstuvwxyz",
+                "org",
+                None,
+                false,
+            )
+            .await,
+            Ok("sentinel-llm-token".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_token_past_the_50_minute_ttl_is_not_served() {
+        let key = zed_llm_cache_key("stale-user", "org", "tok");
+        seed_llm_token(&key, "stale-llm-token", Duration::from_secs(51 * 60));
+
+        // Past the TTL the cache must miss. The mint then fails on the empty
+        // organization, which is a different failure from replaying the stale
+        // bearer — that is what distinguishes "missed" from "served".
+        assert_eq!(
+            fetch_llm_token_cached(
+                &reqwest::Client::new(),
+                "stale-user",
+                "tok",
+                "",
+                None,
+                false,
+            )
+            .await,
+            Err("No Zed organization selected".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn force_refresh_bypasses_a_fresh_cache_entry() {
+        let key = zed_llm_cache_key("force-user", "org", "tok");
+        seed_llm_token(&key, "stale-llm-token", Duration::from_secs(0));
+
+        assert_eq!(
+            fetch_llm_token_cached(&reqwest::Client::new(), "force-user", "tok", "", None, true,)
+                .await,
+            Err("No Zed organization selected".to_string())
+        );
+    }
 
     #[test]
     fn keypair_roundtrip_and_decrypt_oaep() {
