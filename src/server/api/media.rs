@@ -2920,12 +2920,85 @@ mod tests {
         assert!(!rotation.contains(&400));
     }
 
-    #[test]
-    fn rotation_statuses_constant_is_present() {
-        // The handler's in-memory rotation set (mirrors CREATE_ROTATION_STATUSES).
-        // Compile-level guard that the handler still carries the set.
-        let handler_uses_rotation = include_str!("media.rs").contains("create_rotation_statuses");
-        assert!(handler_uses_rotation);
+    /// The rotation loop only rotates as far as this list, so the ORDER is the
+    /// behaviour: the pinned account leads, and every other usable account
+    /// follows so a 429/401/403 has somewhere to go. Before finding 19 the raw
+    /// passthrough picked a single connection and had no list to walk.
+    #[tokio::test]
+    async fn raw_video_rotation_lists_the_pinned_account_first_then_the_rest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = std::sync::Arc::new(crate::db::Db::load_from(temp.path()).await.expect("db"));
+        db.update(|state| {
+            state.provider_connections = vec![
+                crate::types::ProviderConnection {
+                    id: "conn-a".into(),
+                    provider: "xai".into(),
+                    auth_type: "apikey".into(),
+                    api_key: Some("sk-a".into()),
+                    is_active: Some(true),
+                    ..Default::default()
+                },
+                crate::types::ProviderConnection {
+                    id: "conn-b".into(),
+                    provider: "xai".into(),
+                    auth_type: "apikey".into(),
+                    api_key: Some("sk-b".into()),
+                    is_active: Some(true),
+                    ..Default::default()
+                },
+            ];
+        })
+        .await
+        .expect("seed db");
+        let state = AppState::new(db);
+
+        // No pin: both accounts are candidates, in priority order.
+        let candidates = video_candidate_connections(&state, "xai", &HeaderMap::new(), None);
+        assert_eq!(
+            candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["conn-a", "conn-b"],
+            "an unpinned call must keep every usable account in the rotation"
+        );
+
+        // A pin puts the named account FIRST so the client keeps the job on the
+        // account that created it (9router videoGeneration.js:102, :127).
+        let mut headers = HeaderMap::new();
+        headers.insert("x-connection-id", HeaderValue::from_static("conn-b"));
+        let pinned = video_candidate_connections(&state, "xai", &headers, None);
+        assert_eq!(
+            pinned.first().map(|c| c.id.as_str()),
+            Some("conn-b"),
+            "the pinned account leads the rotation"
+        );
+        assert_eq!(
+            pinned.len(),
+            2,
+            "pinning reorders the list, it does not truncate it"
+        );
+
+        // An account in cooldown is not a rotation candidate, or a 429 would
+        // hand the same dead account straight back on the next create.
+        let cooled = "conn-a".to_string();
+        state
+            .db
+            .update(|state| {
+                if let Some(conn) = state
+                    .provider_connections
+                    .iter_mut()
+                    .find(|c| c.id == cooled)
+                {
+                    conn.rate_limited_until =
+                        Some((chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339());
+                }
+            })
+            .await
+            .expect("cool down conn-a");
+        let survivors = video_candidate_connections(&state, "xai", &HeaderMap::new(), None);
+        assert_eq!(
+            survivors.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["conn-b"],
+            "a cooling account must not be handed another attempt"
+        );
     }
 
     #[test]
