@@ -7,6 +7,10 @@
 //!
 //! These set the two knobs to opposite values, so a handler that reads the
 //! wrong one gives the wrong answer unambiguously.
+//!
+//! Both requests are aimed at a local mock, never at a provider: `/v1` is not
+//! a dry-run surface, and an `openai` connection here would bill real traffic
+//! and answer with OpenAI's own 401 — indistinguishable from the gate's.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,6 +23,8 @@ use openproxy::types::{ApiKey, ProviderConnection};
 use serde_json::json;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn active_key(key: &str) -> ApiKey {
     ApiKey {
@@ -33,10 +39,10 @@ fn active_key(key: &str) -> ApiKey {
     }
 }
 
-fn connection() -> ProviderConnection {
+fn connection(base_url: &str) -> ProviderConnection {
     ProviderConnection {
         id: "conn".into(),
-        provider: "openai".into(),
+        provider: "custom-embedding-a".into(),
         auth_type: "apikey".into(),
         name: Some("conn".into()),
         priority: Some(1),
@@ -69,19 +75,34 @@ fn connection() -> ProviderConnection {
         proxy_label: None,
         use_connection_proxy: None,
         runtime_transport: None,
-        provider_specific_data: BTreeMap::new(),
+        provider_specific_data: BTreeMap::from([("baseUrl".into(), json!(base_url))]),
         extra: BTreeMap::new(),
     }
 }
 
+/// The upstream the seeded connection points at. `custom-embedding-*` is the
+/// only embedding namespace whose URL comes from the connection's `baseUrl`;
+/// the named providers carry a hardcoded endpoint and would leave the process.
+async fn embeddings_upstream() -> MockServer {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+        })))
+        .mount(&upstream)
+        .await;
+    upstream
+}
+
 /// `require_api_key` set explicitly, so the two knobs disagree and the handler
 /// has no way to pass by accident.
-async fn app_state(require_login: bool, require_api_key: bool) -> AppState {
+async fn app_state(require_login: bool, require_api_key: bool, base_url: &str) -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
     db.update(|state| {
         state.api_keys = vec![active_key("valid-bearer")];
-        state.provider_connections = vec![connection()];
+        state.provider_connections = vec![connection(base_url)];
         state.settings.require_login = require_login;
         state.settings.require_api_key = Some(require_api_key);
     })
@@ -101,7 +122,7 @@ async fn post_embeddings(app: axum::Router, with_key: bool) -> StatusCode {
     app.oneshot(
         builder
             .body(Body::from(
-                json!({"model": "openai/x", "input": "hi"}).to_string(),
+                json!({"model": "custom-embedding-a/some-embed", "input": "hi"}).to_string(),
             ))
             .unwrap(),
     )
@@ -114,12 +135,18 @@ async fn post_embeddings(app: axum::Router, with_key: bool) -> StatusCode {
 /// is true. If the handler reads requireLogin, this 401s.
 #[tokio::test]
 async fn v1_is_open_when_only_the_dashboard_is_locked() {
-    let app = openproxy::build_app(app_state(true, false).await);
+    let upstream = embeddings_upstream().await;
+    let app = openproxy::build_app(app_state(true, false, &upstream.uri()).await);
     let status = post_embeddings(app, false).await;
     assert_ne!(
         status,
         StatusCode::UNAUTHORIZED,
         "requireLogin=true must not gate /v1 when requireApiKey=false"
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        1,
+        "the admitted request must reach the provider, not stop at the gate"
     );
 }
 
@@ -127,7 +154,8 @@ async fn v1_is_open_when_only_the_dashboard_is_locked() {
 /// dashboard is wide open.
 #[tokio::test]
 async fn v1_is_locked_when_only_the_api_key_setting_is_on() {
-    let app = openproxy::build_app(app_state(false, true).await);
+    let upstream = embeddings_upstream().await;
+    let app = openproxy::build_app(app_state(false, true, &upstream.uri()).await);
     let status = post_embeddings(app, false).await;
     assert_eq!(
         status,
@@ -136,7 +164,7 @@ async fn v1_is_locked_when_only_the_api_key_setting_is_on() {
     );
     // And a valid key is still accepted, so this is the auth gate and not a
     // blanket rejection.
-    let app = openproxy::build_app(app_state(false, true).await);
+    let app = openproxy::build_app(app_state(false, true, &upstream.uri()).await);
     let status = post_embeddings(app, true).await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
 }

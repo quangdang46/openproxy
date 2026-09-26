@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
@@ -42,6 +42,164 @@ const VERTEX_VIDEO_BASE_URL: &str = "https://aiplatform.googleapis.com";
 /// Default Vertex location when the connection carries none
 /// (9router `videoProviders/vertex.js` DEFAULT_LOCATION).
 const VERTEX_DEFAULT_LOCATION: &str = "us-central1";
+
+/// `Idempotency-Key` is forwarded on every create attempt, including the
+/// post-refresh retry: the whole point of the key is that a retried create
+/// must not bill twice.
+const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
+
+/// Upstream deadline for one video round-trip (9router
+/// `VIDEO_FETCH_TIMEOUT_MS`, videoCore.js:9). Bounds the HTTP call, not the
+/// async job that runs after it.
+fn video_fetch_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("VIDEO_FETCH_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(120_000),
+    )
+}
+
+/// Why a video send produced no response.
+enum VideoSendError {
+    /// The deadline elapsed — 9router's `AbortError`/`TimeoutError` arm.
+    Timeout,
+    /// A genuine connect/send failure.
+    Transport(reqwest::Error),
+}
+
+/// Send one video request under [`video_fetch_timeout`], keeping the two
+/// failure modes apart: 9router videoCore.js:141-147 answers 408 on an
+/// abort and 502 on anything else, and a hung upstream is not a refused
+/// connection.
+async fn send_video(
+    send: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+) -> Result<reqwest::Response, VideoSendError> {
+    match tokio::time::timeout(video_fetch_timeout(), send).await {
+        Err(_) => Err(VideoSendError::Timeout),
+        Ok(Err(e)) => Err(VideoSendError::Transport(e)),
+        Ok(Ok(r)) => Ok(r),
+    }
+}
+
+fn video_send_error_response(provider: &str, method: &str, error: VideoSendError) -> Response {
+    match error {
+        VideoSendError::Timeout => video_error_response(
+            StatusCode::REQUEST_TIMEOUT,
+            &format!(
+                "[{provider}] video {method} aborted: timeout after {}ms",
+                video_fetch_timeout().as_millis()
+            ),
+        ),
+        VideoSendError::Transport(e) => video_error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("[{provider}] video {method} aborted: {e}"),
+        ),
+    }
+}
+
+/// The client's `Idempotency-Key`, if it sent a non-empty one.
+fn idempotency_key(headers: &HeaderMap) -> Option<HeaderValue> {
+    headers
+        .get("idempotency-key")
+        .cloned()
+        .filter(|v| !v.as_bytes().is_empty())
+}
+
+/// Persist a refreshed OAuth token so the next request doesn't re-auth.
+async fn persist_video_token(state: &AppState, connection_id: &str, access_token: &str) {
+    let conn_id = connection_id.to_string();
+    let token = access_token.to_string();
+    let _ = state
+        .db
+        .update(move |app| {
+            if let Some(idx) = app
+                .provider_connections
+                .iter()
+                .position(|c| c.id == conn_id)
+            {
+                app.provider_connections[idx].access_token = Some(token);
+                app.provider_connections[idx].updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await;
+}
+
+/// Cooldown a video account takes after an upstream failure, by status.
+/// 9router's `markAccountUnavailable` derives the window from the status
+/// class (auth.js:239-296) and ALSO sets a per-model lock, so a rate-limited
+/// video account is excluded from later selection instead of being re-tried on
+/// every request until the operator notices.
+const VIDEO_COOLDOWN_SECONDS: [(u16, i64); 4] = [(401, 900), (403, 900), (429, 120), (503, 120)];
+
+fn video_cooldown_seconds(status: u16) -> Option<i64> {
+    VIDEO_COOLDOWN_SECONDS
+        .iter()
+        .find(|(code, _)| *code == status)
+        .map(|(_, seconds)| *seconds)
+}
+
+/// Write the video request's outcome into the shared account-fallback state:
+/// `markAccountUnavailable` on failure (every status, not just the rotation
+/// set — the rotation decision is a separate, later `if` in 9router), and
+/// `clearAccountError` on success. Without this a video failure never reached
+/// the Providers dashboard, and selection kept handing the dead account back.
+///
+/// The lock is PER MODEL, not an account-wide cooldown: 9router's
+/// `markAccountUnavailable` (auth.js:239-296) writes `modelLock_${model}` plus
+/// `testStatus`/`lastError`/`errorCode`/`backoffLevel` and leaves
+/// `rateLimitedUntil` alone. Cooling the whole account for a bad prompt would
+/// take a healthy credential out of every other model's rotation.
+async fn record_video_outcome(
+    state: &AppState,
+    connection_id: &str,
+    model: Option<&str>,
+    status: u16,
+) {
+    use crate::core::account_fallback::{build_model_lock_update, get_model_lock_key};
+
+    let conn_id = connection_id.to_string();
+    let model = model.map(str::to_string);
+    let _ = state
+        .db
+        .update(move |app| {
+            let Some(connection) = app
+                .provider_connections
+                .iter_mut()
+                .find(|c| c.id == conn_id)
+            else {
+                return;
+            };
+            if (200..300).contains(&status) {
+                crate::core::account_fallback::reset_account_state(connection);
+                if let Some(key) = model.as_deref().map(get_model_lock_key) {
+                    connection.extra.insert(key, Value::Null);
+                }
+                return;
+            }
+            let (lock_key, until) = build_model_lock_update(
+                model.as_deref().unwrap_or_default(),
+                video_cooldown_seconds(status).unwrap_or(300),
+            );
+            connection.extra.insert(lock_key, Value::String(until));
+            connection.last_error = Some(format!("video {status}"));
+            connection.last_error_at = Some(chrono::Utc::now().to_rfc3339());
+            connection.error_code = Some(status.to_string());
+            connection.test_status = Some("unavailable".into());
+            connection.consecutive_errors = connection
+                .consecutive_errors
+                .map(|errors| errors.saturating_add(1))
+                .or(Some(1));
+            // Only a quota rejection ratchets the backoff level (9router
+            // accountFallback.js:211 — `backoff: true` on the rate-limit rule
+            // and on no other).
+            if status == 429 {
+                connection.backoff_level =
+                    Some(connection.backoff_level.unwrap_or(0).saturating_add(1));
+            }
+        })
+        .await;
+}
 
 /// Google OAuth2 token endpoint used to mint Vertex access tokens from
 /// service-account JWTs (9router `tokenRefresh.js` OAUTH_ENDPOINTS.google.token).
@@ -339,8 +497,17 @@ async fn video_edits_extensions_proxy(
     }
 }
 
-/// Forward a non-JSON video creation payload byte-for-byte to the xAI video
-/// endpoint on the highest-priority active connection.
+/// Forward a non-JSON video creation payload byte-for-byte.
+///
+/// 9router `readForwardableBody` (videoGeneration.js:60-76) branches only on
+/// whether the body is JSON, never on the action, and the multipart bytes then
+/// flow through the SAME account loop as the JSON arm (videoGeneration.js:134-189):
+/// the pinned connection first, rotation on 401/403/429, and a single
+/// refresh-and-retry on 401/403. This used to pick one connection by priority
+/// and give up on its first failure, so a quota-limited first account failed a
+/// request a second account would have served. The body is cloned verbatim on
+/// every attempt — re-encoding it to rebuild the request would change the
+/// multipart boundary.
 async fn video_forward_raw(
     state: AppState,
     headers: HeaderMap,
@@ -349,69 +516,152 @@ async fn video_forward_raw(
     action: &'static str,
 ) -> Response {
     let provider = DEFAULT_VIDEO_PROVIDER;
+    let create_rotation_statuses: [u16; 3] = [401, 403, 429];
+
+    let connections = video_candidate_connections(&state, provider, &headers, None);
+    if connections.is_empty() {
+        return video_unavailable_or_missing(&state, provider);
+    }
+
     let snapshot = state.db.snapshot();
-    let Some(connection) = snapshot
-        .provider_connections
-        .iter()
-        .filter(|c| c.provider == provider && c.is_active())
-        .min_by_key(|c| c.priority.unwrap_or(999))
-        .cloned()
-    else {
-        return video_error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("No credentials for provider: {provider}"),
-        );
-    };
+    let idempotency_key = idempotency_key(&headers);
+    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
+    let mut last_error: Option<Response> = None;
 
-    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
-    let client = match state.client_pool.get(provider, proxy.as_ref()) {
-        Ok(c) => c,
-        Err(e) => return video_error_response(StatusCode::BAD_GATEWAY, &format!("{e}")),
-    };
+    for connection in &connections {
+        let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
+        let client = match state.client_pool.get(provider, proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => return video_error_response(StatusCode::BAD_GATEWAY, &format!("{e}")),
+        };
 
+        let post = |conn: &crate::types::ProviderConnection| {
+            client
+                .post(&url)
+                .headers(raw_video_headers(
+                    conn,
+                    content_type,
+                    idempotency_key.as_ref(),
+                ))
+                .body(raw_body.clone())
+                .send()
+        };
+
+        let response = match send_video(post(connection)).await {
+            Ok(r) => r,
+            Err(error) => return video_send_error_response(provider, "POST", error),
+        };
+
+        // 401/403 with a refresh token: refresh, persist, re-POST the identical
+        // bytes exactly once (9router videoCore.js:151-176).
+        let status = response.status().as_u16();
+        if (status == 401 || status == 403)
+            && connection
+                .refresh_token
+                .as_deref()
+                .is_some_and(|r| !r.is_empty())
+        {
+            if let Some(new_access) = refresh_media_connection(provider, connection).await {
+                persist_video_token(&state, &connection.id, &new_access).await;
+                let mut refreshed = connection.clone();
+                refreshed.access_token = Some(new_access);
+                let retry = match send_video(post(&refreshed)).await {
+                    Ok(r) => r,
+                    Err(error) => return video_send_error_response(provider, "POST", error),
+                };
+                let retry_status = retry.status().as_u16();
+                if !create_rotation_statuses.contains(&retry_status)
+                    || !connections.iter().any(|c| c.id != connection.id)
+                {
+                    let mut proxied =
+                        proxy_video_response(retry, HeaderMap::new(), provider, connection).await;
+                    with_connection_header(&mut proxied, &connection.id);
+                    return proxied;
+                }
+                last_error =
+                    Some(proxy_video_response(retry, HeaderMap::new(), provider, connection).await);
+                continue;
+            }
+        }
+
+        // Rotate on auth/quota errors only when another account remains.
+        if create_rotation_statuses.contains(&status)
+            && connections.iter().any(|c| c.id != connection.id)
+        {
+            last_error =
+                Some(proxy_video_response(response, HeaderMap::new(), provider, connection).await);
+            continue;
+        }
+
+        let mut proxied =
+            proxy_video_response(response, HeaderMap::new(), provider, connection).await;
+        with_connection_header(&mut proxied, &connection.id);
+        return proxied;
+    }
+
+    last_error.unwrap_or_else(|| {
+        video_error_response(StatusCode::BAD_GATEWAY, "All video accounts failed")
+    })
+}
+
+/// Headers for the raw multipart passthrough (9router `videoCore.js buildHeaders`):
+/// `Accept` always, `Authorization` from the token, the caller's own
+/// `Content-Type` and `Idempotency-Key` since this is a POST with a body.
+fn raw_video_headers(
+    connection: &crate::types::ProviderConnection,
+    content_type: &str,
+    idempotency_key: Option<&HeaderValue>,
+) -> HeaderMap {
     let token = connection
         .api_key
         .as_deref()
         .or(connection.access_token.as_deref())
         .unwrap_or("");
-    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
-
-    let response = client
-        .post(&url)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::CONTENT_TYPE, content_type)
-        .body(raw_body)
-        .send()
-        .await;
-
-    let mut proxied = match response {
-        Ok(r) => {
-            let status =
-                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let ct = r
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .cloned()
-                .unwrap_or(HeaderValue::from_static("application/json"));
-            let bytes = r.bytes().await.unwrap_or_default();
-            let mut resp = Response::new(axum::body::Body::from(bytes));
-            *resp.status_mut() = status;
-            resp.headers_mut().insert(header::CONTENT_TYPE, ct);
-            resp
-        }
-        Err(e) => {
-            return video_error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("{provider} video POST failed: {e}"),
-            )
-        }
-    };
-    if let Ok(val) = HeaderValue::from_str(&connection.id) {
-        proxied
-            .headers_mut()
-            .insert("x-openproxy-connection-id", val);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
+        headers.insert(header::AUTHORIZATION, value);
     }
-    proxied
+    if let Ok(value) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    if let Some(key) = idempotency_key {
+        headers.insert(IDEMPOTENCY_KEY, key.clone());
+    }
+    headers
+}
+
+/// Candidate accounts for a video create: the client's pinned connection first,
+/// then every eligible account by priority.
+///
+/// `model` is the bare upstream id, and it is what the cooldown is keyed on —
+/// 9router's `getProviderCredentials(provider, excluded, model)` drops
+/// candidates whose `isModelLockActive(c, model)` is true (auth.js:87) and
+/// returns `allRateLimited` when that empties the list. `""` means "this is a
+/// poll with no model", which 9router locks account-wide (`modelLock___all`).
+fn video_candidate_connections(
+    state: &AppState,
+    provider: &str,
+    headers: &HeaderMap,
+    model: Option<&str>,
+) -> Vec<crate::types::ProviderConnection> {
+    use crate::core::account_fallback::is_model_lock_active;
+
+    let now = chrono::Utc::now();
+    let model = model.unwrap_or_default();
+    let mut connections: Vec<crate::types::ProviderConnection> = Vec::new();
+    if let Ok(preferred) = select_video_connection(state, provider, headers) {
+        if !is_model_lock_active(&preferred, model, now) {
+            connections.push(preferred);
+        }
+    }
+    for conn in select_media_connections(&state.db.snapshot(), provider) {
+        if !connections.iter().any(|c| c.id == conn.id) && !is_model_lock_active(&conn, model, now)
+        {
+            connections.push(conn);
+        }
+    }
+    connections
 }
 
 /// GET /v1/videos/{id} — poll async video job status (xAI Grok Imagine).
@@ -487,6 +737,22 @@ async fn generic_media_handler(
         Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
     };
 
+    // 9router embeddings.js:73-76 runs `if (!body.input)` BEFORE getModelInfo,
+    // so a missing input costs no model resolution, no credential lookup and no
+    // network call. The check has to live here rather than in the adapter: the
+    // non-adapter fall-through path validated nothing at all.
+    if route_kind == "embeddings" {
+        match body.get("input") {
+            Some(input) if !crate::core::media::embeddings::handler::is_falsy(input) => {}
+            _ => {
+                return json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Missing required field: input",
+                )
+            }
+        }
+    }
+
     let Some(model_str) = body
         .get("model")
         .and_then(Value::as_str)
@@ -541,6 +807,20 @@ async fn execute_media_provider(
     };
 
     let snapshot = state.db.snapshot();
+
+    // 9router embeddingsCore.js:32-38 refuses a provider with no embedding
+    // adapter up front. Without this the request fell through to the generic
+    // forwarder, which builds `{chat_base}/embeddings` — and for a provider in
+    // neither the adapter list nor the registry, a synthesised
+    // https://api.{provider}.com/v1, so the caller's input text and Bearer key
+    // left the machine for a host nobody configured.
+    if route_kind == "embeddings" && !is_embedding_endpoint(&snapshot, provider) {
+        return media_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Provider '{provider}' does not support embeddings."),
+        );
+    }
+
     let connections = select_media_connections(&snapshot, provider);
     if connections.is_empty() {
         return json_error_response(
@@ -612,6 +892,11 @@ async fn execute_media_provider_on_connection(
                     .await;
             }
         }
+        let result = if route_kind == "embeddings" {
+            tag_embeddings_error(result)
+        } else {
+            result
+        };
         return media_result_to_response(result);
     }
 
@@ -819,10 +1104,16 @@ fn select_media_connection(
 /// All active provider connections for a provider (ordered by priority), for
 /// account rotation on auth/quota errors. 9router videoGeneration.js rotates
 /// to the next account on 401/403/429.
+///
+/// Accounts in an open cooldown or a live model lock are dropped, mirroring the
+/// `isModelLockActive` filter `getProviderCredentials` applies
+/// (9router `src/sse/services/auth.js:87`). Without it a rate-limited video
+/// account was re-tried on every subsequent request and never skipped.
 fn select_media_connections(
     snapshot: &AppDb,
     provider: &str,
 ) -> Vec<crate::types::ProviderConnection> {
+    let now = chrono::Utc::now();
     let mut conns: Vec<_> = snapshot
         .provider_connections
         .iter()
@@ -830,11 +1121,92 @@ fn select_media_connections(
             connection.provider == provider
                 && connection.is_active()
                 && connection_has_credentials(connection)
+                && !crate::core::account_fallback::is_account_unavailable(connection, now)
         })
         .cloned()
         .collect();
     conns.sort_by_key(|c| c.priority.unwrap_or(999));
     conns
+}
+
+/// Earliest moment a filtered-out video account becomes selectable again, so
+/// the caller can tell the client when to retry (9router
+/// `unavailableResponse`'s `Retry-After`, open-sse/utils/error.js:116-129).
+fn video_retry_after(state: &AppState, provider: &str) -> Option<i64> {
+    use crate::core::account_fallback::{
+        account_degraded_until, get_earliest_model_lock_until, is_account_unavailable,
+    };
+    let now = chrono::Utc::now();
+    state
+        .db
+        .snapshot()
+        .provider_connections
+        .iter()
+        .filter(|c| c.provider == provider && c.is_active() && is_account_unavailable(c, now))
+        .filter_map(|connection| {
+            let mut expiries: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
+            if let Some(until) = connection.rate_limited_until.as_deref() {
+                if let Ok(until) = chrono::DateTime::parse_from_rfc3339(until) {
+                    expiries.push(until.with_timezone(&chrono::Utc));
+                }
+            }
+            if let Some(until) = account_degraded_until(connection) {
+                expiries.push(until);
+            }
+            if let Some(until) = get_earliest_model_lock_until(connection) {
+                expiries.push(until);
+            }
+            let soonest = expiries.into_iter().filter(|t| *t > now).min()?;
+            Some((soonest - now).num_seconds().max(1))
+        })
+        .min()
+}
+
+/// 429 with `Retry-After` — every video account is in cooldown.
+fn video_unavailable_response(provider: &str, state: &AppState) -> Response {
+    let retry_after = video_retry_after(state, provider);
+    let mut response = video_error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        &format!("[{provider}] All accounts are rate limited; retry later"),
+    );
+    if let Some(seconds) = retry_after {
+        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+/// No account is selectable. Distinguish "you never configured one" (400) from
+/// "they are all cooling down" (429 + `Retry-After`) — 9router
+/// `getProviderCredentials` returns `allRateLimited` for the second case and the
+/// handler answers `unavailableResponse` (videoGeneration.js:141).
+fn video_unavailable_or_missing(state: &AppState, provider: &str) -> Response {
+    if video_retry_after(state, provider).is_some() {
+        return video_unavailable_response(provider, state);
+    }
+    video_error_response(
+        StatusCode::BAD_REQUEST,
+        &format!("No credentials for provider: {provider}"),
+    )
+}
+
+/// Does this provider serve `/v1/embeddings`?
+///
+/// Two accepted answers: an entry in the embedding-adapter registry, and a
+/// provider node the operator registered as an embeddings endpoint. 9router
+/// only has the first — it namespaces every custom node behind
+/// `custom-embedding-` / `openai-compatible-` (embeddingProviders/index.js:25-31)
+/// — but an OpenProxy node id is caller-supplied and carries no such guarantee,
+/// and a node's base URL is configured, not guessed. A named provider in neither
+/// set is exactly the case the guard exists for.
+fn is_embedding_endpoint(snapshot: &AppDb, provider: &str) -> bool {
+    crate::core::media::embeddings::is_embedding_provider(provider)
+        || snapshot.provider_nodes.iter().any(|node| {
+            node.id == provider
+                && (node.r#type == "custom-embedding"
+                    || node.api_type.as_deref() == Some("embeddings"))
+        })
 }
 
 fn connection_has_credentials(connection: &crate::types::ProviderConnection) -> bool {
@@ -989,28 +1361,33 @@ fn build_media_headers(
 
 /// Proxy an upstream video response, sanitizing error bodies so secrets
 /// (`Bearer <token>`, raw keys) never reach the client. Non-2xx bodies are
-/// read fully, redacted, and re-emitted; 2xx pass through as a stream.
+/// wrapped in the OpenAI error envelope; 2xx pass through as a stream.
+///
+/// 9router `videoCore.js:181-184`:
+/// `createErrorResult(upstream.status, "[${provider}] " + message.slice(0, 2000))`.
+/// Relaying the provider's own body verbatim both dropped the `type`/`code` pair
+/// a client needs to branch on and left no bound on how much upstream text a
+/// client receives.
 async fn proxy_video_response(
     response: reqwest::Response,
     headers: HeaderMap,
+    provider: &str,
     connection: &crate::types::ProviderConnection,
 ) -> Response {
     let status = response.status();
     if status.is_success() {
         return proxy_upstream_response(response, headers).await;
     }
-    let resp_headers = response.headers().clone();
     let body = response.bytes().await.unwrap_or_default();
     let text = String::from_utf8_lossy(&body).to_string();
     let sanitized = sanitize_video_secrets(&text, connection);
-    let mut proxied = Response::new(Body::from(sanitized));
-    *proxied.status_mut() = status;
-    for (name, value) in &resp_headers {
-        if !is_hop_by_hop_header(name.as_str()) {
-            proxied.headers_mut().insert(name.clone(), value.clone());
-        }
-    }
-    proxied
+    let message = if sanitized.trim().is_empty() {
+        format!("HTTP {}", status.as_u16())
+    } else {
+        // Char-wise, so a multi-byte character before the cap cannot panic.
+        sanitized.chars().take(2000).collect::<String>()
+    };
+    video_error_response(status, &format!("[{provider}] {message}"))
 }
 
 /// Port of 9router `videoCore.js sanitizeSecrets` (videoCore.js:21-31):
@@ -1137,29 +1514,22 @@ async fn proxy_upstream_response(response: reqwest::Response, _headers: HeaderMa
 
     let mut proxied = Response::new(body);
     *proxied.status_mut() = status;
-
-    for (name, value) in &resp_headers {
-        if !is_hop_by_hop_header(name.as_str()) {
-            proxied.headers_mut().insert(name.clone(), value.clone());
-        }
-    }
+    copy_upstream_content_type(&resp_headers, proxied.headers_mut());
 
     proxied
 }
 
-fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "content-length"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+/// Forward only `Content-Type` from the upstream.
+///
+/// 9router `videoCore.js:199-208` builds a fresh `Response` carrying exactly
+/// `Content-Type` and `Access-Control-Allow-Origin`. Echoing the whole upstream
+/// set leaked provider internals (`server`, `x-request-id`, tracing headers)
+/// and, for the video path, the upstream's own `Idempotency-Key` back to the
+/// client.
+fn copy_upstream_content_type(upstream: &HeaderMap, into: &mut HeaderMap) {
+    if let Some(value) = upstream.get(header::CONTENT_TYPE) {
+        into.insert(header::CONTENT_TYPE, value.clone());
+    }
 }
 
 /// Try to handle the request through one of the per-provider media
@@ -1197,14 +1567,48 @@ async fn try_provider_adapter(
     Some(result?)
 }
 
+/// Tag an upstream embeddings error with the status it arrived under.
+///
+/// 9router's embeddings core runs every provider error through
+/// `formatProviderError` (open-sse/utils/error.js:143) before handing it to
+/// `createErrorResult`, which renders `` `[${status}]: ${message}` ``. Only the
+/// embeddings route does this; the other media handlers pass the message
+/// straight through, so the tag is applied per route kind rather than in
+/// `MediaError` (which has no status-aware `message()`).
+fn tag_embeddings_error(
+    result: Result<Value, crate::core::media::MediaError>,
+) -> Result<Value, crate::core::media::MediaError> {
+    use crate::core::media::MediaError;
+    result.map_err(|err| match err {
+        MediaError::Http { status, message } if !message.starts_with('[') => MediaError::Http {
+            status,
+            message: format!("[{status}]: {message}"),
+        },
+        other => other,
+    })
+}
+
 fn media_result_to_response(result: Result<Value, crate::core::media::MediaError>) -> Response {
     match result {
         Ok(body) => with_cors_response((StatusCode::OK, Json(body)).into_response()),
         Err(err) => {
             let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-            json_error_response(status, &err.message())
+            // The adapter already resolved the upstream status (`Http(n, msg)`
+            // carries it verbatim, matching 9router's
+            // `createErrorResult(statusCode, errMsg)` at embeddingsCore.js:116).
+            // Re-deriving it from the message text flipped a provider's 400
+            // "Incorrect API key provided" into a 401 and a 500 "quota" into a
+            // 403, which also broke account rotation — it keys off the status.
+            media_error_response(status, &err.message())
         }
     }
+}
+
+/// [`json_error_response`] without the status-inference heuristic, for errors
+/// that already carry the status a remote peer chose.
+fn media_error_response(status: StatusCode, message: &str) -> Response {
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(message));
+    with_cors_response((status, Json(body)).into_response())
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
@@ -1392,25 +1796,13 @@ async fn video_create_handler(
     // creation (401/403/429). 5xx is returned to the caller (not rotated).
     let create_rotation_statuses: [u16; 3] = [401, 403, 429];
 
-    // Candidate accounts (preferred pinned connection first, then by priority).
-    let preferred_conn = select_video_connection(&state, &provider, &headers).ok();
-    let mut connections: Vec<crate::types::ProviderConnection> = Vec::new();
-    if let Some(preferred) = preferred_conn.clone() {
-        connections.push(preferred);
-    }
-    for conn in select_media_connections(&state.db.snapshot(), &provider) {
-        if !connections.iter().any(|c| c.id == conn.id) {
-            connections.push(conn);
-        }
-    }
+    let connections = video_candidate_connections(&state, &provider, &headers, model.as_deref());
     if connections.is_empty() {
-        return video_error_response(
-            StatusCode::BAD_REQUEST,
-            &format!("No credentials for provider: {provider}"),
-        );
+        return video_unavailable_or_missing(&state, &provider);
     }
 
     let snapshot = state.db.snapshot();
+    let idempotency_key = idempotency_key(&headers);
     let mut last_error: Option<Response> = None;
 
     for connection in &connections {
@@ -1429,7 +1821,7 @@ async fn video_create_handler(
         };
 
         let mut upstream_headers =
-            match build_video_headers(&provider, connection, vertex_token.as_deref()) {
+            match build_video_headers(&provider, connection, vertex_token.as_deref(), true) {
                 Ok(h) => h,
                 Err(e) => {
                     last_error = Some(video_error_response(
@@ -1457,18 +1849,12 @@ async fn video_create_handler(
             }
         };
 
-        // Forward Idempotency-Key when present (creation is billable).
-        if let Some(idem) = headers
-            .get("idempotency-key")
-            .and_then(|v| v.to_str().ok())
-            .filter(|v| !v.is_empty())
-        {
-            if let Ok(val) = HeaderValue::from_str(idem) {
-                upstream_headers.insert(
-                    reqwest::header::HeaderName::from_static("idempotency-key"),
-                    val,
-                );
-            }
+        // Forward Idempotency-Key when present (creation is billable). The key
+        // outlives the loop: 9router captures it once (videoGeneration.js:128)
+        // and threads it through every attempt, so the post-refresh retry is
+        // still deduplicated upstream.
+        if let Some(key) = idempotency_key.as_ref() {
+            upstream_headers.insert(IDEMPOTENCY_KEY, key.clone());
         }
 
         let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
@@ -1488,20 +1874,16 @@ async fn video_create_handler(
         // creation is NEVER auto-retried on another account. Return 502
         // immediately (sanitized); rotation happens only on 401/403/429
         // responses.
-        let response = match client
-            .post(&url)
-            .headers(upstream_headers.clone())
-            .body(body_bytes.clone())
-            .send()
-            .await
-        {
+        let post = |headers: &HeaderMap| {
+            client
+                .post(&url)
+                .headers(headers.clone())
+                .body(body_bytes.clone())
+                .send()
+        };
+        let response = match send_video(post(&upstream_headers)).await {
             Ok(r) => r,
-            Err(e) => {
-                return video_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("{provider} video POST aborted: {}", e),
-                );
-            }
+            Err(error) => return video_send_error_response(&provider, "POST", error),
         };
 
         let status = response.status().as_u16();
@@ -1520,76 +1902,73 @@ async fn video_create_handler(
                 .is_some_and(|r| !r.is_empty())
         {
             if let Some(new_access) = refresh_media_connection(&provider, connection).await {
-                // Persist the refreshed token so the next request doesn't 401.
-                let conn_id = connection.id.clone();
-                let db = state.db.clone();
-                let persist_token = new_access.clone();
-                let _ = db
-                    .update(move |app| {
-                        if let Some(idx) = app
-                            .provider_connections
-                            .iter()
-                            .position(|c| c.id == conn_id)
-                        {
-                            app.provider_connections[idx].access_token = Some(persist_token);
-                            app.provider_connections[idx].updated_at =
-                                Some(chrono::Utc::now().to_rfc3339());
-                        }
-                    })
-                    .await;
+                persist_video_token(&state, &connection.id, &new_access).await;
                 // Rebuild headers with the fresh token and retry once.
                 let mut refreshed = connection.clone();
                 refreshed.access_token = Some(new_access);
                 // The refresh path is xAI/OpenRouter only (Vertex mints fresh
                 // tokens per connection above), so no Vertex token applies here.
-                if let Ok(retry_headers) = build_video_headers(&provider, &refreshed, None) {
-                    let retry = client
-                        .post(&url)
-                        .headers(retry_headers.clone())
-                        .body(body_bytes.clone())
-                        .send()
-                        .await;
-                    if let Ok(retry_resp) = retry {
-                        let retry_status = retry_resp.status().as_u16();
-                        if !create_rotation_statuses.contains(&retry_status) {
-                            let mut proxied =
-                                proxy_video_response(retry_resp, retry_headers, connection).await;
-                            if let Ok(val) = HeaderValue::from_str(&connection.id) {
-                                proxied
-                                    .headers_mut()
-                                    .insert("x-openproxy-connection-id", val);
-                            }
-                            return proxied;
-                        }
-                        // Retry also 401/403/429 → fall through to rotation.
-                        last_error =
-                            Some(proxy_video_response(retry_resp, retry_headers, connection).await);
-                        continue;
+                if let Ok(mut retry_headers) =
+                    build_video_headers(&provider, &refreshed, None, true)
+                {
+                    if let Some(key) = idempotency_key.as_ref() {
+                        retry_headers.insert(IDEMPOTENCY_KEY, key.clone());
                     }
+                    let retry = send_video(post(&retry_headers)).await;
+                    let retry_resp = match retry {
+                        Ok(r) => r,
+                        Err(error) => {
+                            return video_send_error_response(&provider, "POST", error);
+                        }
+                    };
+                    let retry_status = retry_resp.status().as_u16();
+                    if !create_rotation_statuses.contains(&retry_status) {
+                        record_video_outcome(
+                            &state,
+                            &connection.id,
+                            model.as_deref(),
+                            retry_status,
+                        )
+                        .await;
+                        let mut proxied =
+                            proxy_video_response(retry_resp, retry_headers, &provider, connection)
+                                .await;
+                        with_connection_header(&mut proxied, &connection.id);
+                        return proxied;
+                    }
+                    // Retry also 401/403/429 → fall through to rotation.
+                    record_video_outcome(&state, &connection.id, model.as_deref(), retry_status)
+                        .await;
+                    last_error = Some(
+                        proxy_video_response(retry_resp, retry_headers, &provider, connection)
+                            .await,
+                    );
+                    continue;
                 }
             }
         }
 
+        record_video_outcome(&state, &connection.id, model.as_deref(), status).await;
+
         // Rotate on auth/quota errors only when another account remains.
         if is_rotation_status && connections.iter().any(|c| c.id != connection.id) {
-            last_error = Some(proxy_video_response(response, upstream_headers, connection).await);
+            last_error =
+                Some(proxy_video_response(response, upstream_headers, &provider, connection).await);
             continue;
         }
 
         // Vertex success bodies carry operations, not async-job JSON — map them
         // onto the client-polled shape (vertex.js transformResponse).
         if is_vertex && response.status().is_success() {
-            return proxy_vertex_response(response, upstream_headers, connection).await;
+            let mut proxied =
+                proxy_vertex_response(response, upstream_headers, &provider, connection).await;
+            with_connection_header(&mut proxied, &connection.id);
+            return proxied;
         }
 
-        let mut proxied = proxy_video_response(response, upstream_headers, connection).await;
-        // Video jobs are account-bound — clients echo this back as `x-connection-id`
-        // on GET polls so the same account is used.
-        if let Ok(val) = HeaderValue::from_str(&connection.id) {
-            proxied
-                .headers_mut()
-                .insert("x-openproxy-connection-id", val);
-        }
+        let mut proxied =
+            proxy_video_response(response, upstream_headers, &provider, connection).await;
+        with_connection_header(&mut proxied, &connection.id);
         return proxied;
     }
 
@@ -1597,6 +1976,24 @@ async fn video_create_handler(
     last_error.unwrap_or_else(|| {
         video_error_response(StatusCode::BAD_GATEWAY, "All video accounts failed")
     })
+}
+
+/// Pin a video job to the account that owns it.
+///
+/// Video jobs are account-bound upstream — the client echoes the id back as
+/// `x-connection-id` on GET polls so the same account serves them. 9router
+/// writes the product-branded `x-9router-connection-id` (videoGeneration.js:97-104)
+/// and reads the generic name back; both spellings go out so a client written
+/// against either build finds the header it looks for.
+fn with_connection_header(response: &mut Response, connection_id: &str) {
+    let Ok(value) = HeaderValue::from_str(connection_id) else {
+        return;
+    };
+    for name in ["x-openproxy-connection-id", "x-9router-connection-id"] {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value.clone());
+    }
 }
 
 /// Poll async video job status. Jobs are account-bound upstream, so no
@@ -1657,7 +2054,7 @@ async fn video_get_handler_with_query(
         ),
     };
 
-    let mut upstream_headers = match build_video_headers(&provider, &connection, None) {
+    let mut upstream_headers = match build_video_headers(&provider, &connection, None, false) {
         Ok(h) => h,
         Err(e) => {
             return video_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
@@ -1676,16 +2073,10 @@ async fn video_get_handler_with_query(
         }
     };
 
-    let response = match client
-        .get(&url)
-        .headers(upstream_headers.clone())
-        .send()
-        .await
-    {
+    let get = |headers: &HeaderMap| client.get(&url).headers(headers.clone()).send();
+    let response = match send_video(get(&upstream_headers)).await {
         Ok(r) => r,
-        Err(e) => {
-            return video_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
-        }
+        Err(error) => return video_send_error_response(&provider, "GET", error),
     };
 
     // 9router parity (videoCore.js:120-146): on 401/403 with a refresh token,
@@ -1698,40 +2089,15 @@ async fn video_get_handler_with_query(
     {
         match refresh_media_connection(&provider, &connection).await {
             Some(new_access) => {
-                // Persist the refreshed token.
-                let conn_id = connection.id.clone();
-                let db = state.db.clone();
-                let persist_token = new_access.clone();
-                let _ = db
-                    .update(move |app| {
-                        if let Some(idx) = app
-                            .provider_connections
-                            .iter()
-                            .position(|c| c.id == conn_id)
-                        {
-                            app.provider_connections[idx].access_token = Some(persist_token);
-                            app.provider_connections[idx].updated_at =
-                                Some(chrono::Utc::now().to_rfc3339());
-                        }
-                    })
-                    .await;
+                persist_video_token(&state, &connection.id, &new_access).await;
                 connection.access_token = Some(new_access);
-                if let Ok(retry_headers) = build_video_headers(&provider, &connection, None) {
+                if let Ok(retry_headers) = build_video_headers(&provider, &connection, None, false)
+                {
                     upstream_headers = retry_headers;
                 }
-                match client
-                    .get(&url)
-                    .headers(upstream_headers.clone())
-                    .send()
-                    .await
-                {
+                match send_video(get(&upstream_headers)).await {
                     Ok(r) => r,
-                    Err(e) => {
-                        return video_error_response(
-                            StatusCode::BAD_GATEWAY,
-                            &format!("Request failed: {}", e),
-                        )
-                    }
+                    Err(error) => return video_send_error_response(&provider, "GET", error),
                 }
             }
             None => response,
@@ -1740,12 +2106,13 @@ async fn video_get_handler_with_query(
         response
     };
 
-    let mut proxied = proxy_video_response(response, upstream_headers, &connection).await;
-    if let Ok(val) = HeaderValue::from_str(&connection.id) {
-        proxied
-            .headers_mut()
-            .insert("x-openproxy-connection-id", val);
-    }
+    // The poll has no model, matching videoGeneration.js:234-236, which records
+    // the failure against the account rather than a model lock.
+    record_video_outcome(&state, &connection.id, None, response.status().as_u16()).await;
+
+    let mut proxied =
+        proxy_video_response(response, upstream_headers, &provider, &connection).await;
+    with_connection_header(&mut proxied, &connection.id);
     proxied
 }
 
@@ -1816,15 +2183,23 @@ fn video_provider_supported(provider: &str) -> bool {
 /// Video request headers: registry `headers` merged over the bearer auth
 /// (9router `videoProviders/openrouter.js headers()` spreads
 /// `config.headers` under the `Authorization` token).
+///
+/// `Accept: application/json` always goes out (9router videoCore.js:40
+/// `buildHeaders`), while `Content-Type` rides only on a POST — a bodyless
+/// `GET /videos/{id}` that announces a JSON content type invites a provider to
+/// wait for a body that never comes (videoCore.js:107-111).
 fn build_video_headers(
     provider: &str,
     connection: &crate::types::ProviderConnection,
     vertex_token: Option<&str>,
+    is_create: bool,
 ) -> Result<HeaderMap, String> {
     use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
     if provider == "vertex" {
         // Vertex speaks Bearer OAuth only — the stored api_key holds Service
-        // Account JSON, never a usable token, so build from scratch.
+        // Account JSON, never a usable token, so build from scratch. Its poll is
+        // itself a POST with a JSON body (vertex.js:128-131), so the vertex
+        // branch always sends Content-Type.
         let token = vertex_token.ok_or_else(|| "Missing Vertex token".to_string())?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -1836,6 +2211,10 @@ fn build_video_headers(
         return Ok(headers);
     }
     let mut headers = build_media_headers(provider, connection)?;
+    if !is_create {
+        headers.remove(header::CONTENT_TYPE);
+    }
+    headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
     if provider == "openrouter" {
         // Registry `openrouter.js` videoConfig headers.
         headers.insert(
@@ -1911,6 +2290,7 @@ fn resolve_video_get_provider(
     let snapshot = state.db.snapshot();
     if let Some(preferred_id) = headers
         .get("x-connection-id")
+        .or_else(|| headers.get("x-9router-connection-id"))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -1976,7 +2356,13 @@ fn validate_vertex_create_body(body: &Value) -> Result<(), Response> {
         .get("prompt")
         .and_then(Value::as_str)
         .is_some_and(|p| !p.trim().is_empty());
-    let has_image = body.get("image").is_some() || body.get("image_url").is_some();
+    // 9router vertex.js:148 `if (!body.prompt && !body.image && !body.image_url)`
+    // — plain truthiness, so `"image": null` or `"image": ""` does not satisfy
+    // the guard. `Value::get` returns Some for an explicit null, which used to
+    // let an empty instance through to a billable predictLongRunning.
+    let has_image = ["image", "image_url"]
+        .iter()
+        .any(|key| body.get(key).is_some_and(is_present));
     if !has_prompt && !has_image {
         return Err(video_error_response(
             StatusCode::BAD_REQUEST,
@@ -2142,6 +2528,18 @@ async fn resolve_vertex_token(
         .map(|(token, _, _)| token)
 }
 
+/// JS truthiness for the Vertex parameter guards: false for `null` and for a
+/// non-null-but-falsy value (empty string, `0`, `false`).
+fn is_present(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
 /// OpenAI-ish video body → Vertex predictLongRunning body
 /// (9router `vertex.js toVertexBody`).
 fn to_vertex_body(body: &Value) -> Value {
@@ -2183,15 +2581,6 @@ fn to_vertex_body(body: &Value) -> Value {
         v.as_f64()
             .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
     };
-    let truthy = |v: &Value| -> bool {
-        match v {
-            Value::Null => false,
-            Value::Bool(b) => *b,
-            Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-            Value::String(s) => !s.is_empty(),
-            _ => true,
-        }
-    };
     let mut parameters = serde_json::Map::new();
     if let Some(n) = body.get("n").and_then(num) {
         parameters.insert("sampleCount".to_string(), json!(n as i64));
@@ -2199,25 +2588,32 @@ fn to_vertex_body(body: &Value) -> Value {
     if let Some(duration) = body.get("duration").and_then(num) {
         parameters.insert("durationSeconds".to_string(), json!(duration));
     }
-    if let Some(aspect) = body.get("aspect_ratio") {
+    // 9router vertex.js:77,78,80,83 gate the string-typed parameters on plain
+    // JS truthiness, so an explicit null or an empty string is not forwarded.
+    if let Some(aspect) = body.get("aspect_ratio").filter(|v| is_present(v)) {
         parameters.insert("aspectRatio".to_string(), aspect.clone());
     }
-    if let Some(resolution) = body.get("resolution") {
+    if let Some(resolution) = body.get("resolution").filter(|v| is_present(v)) {
         parameters.insert("resolution".to_string(), resolution.clone());
     }
-    if let Some(seed) = body.get("seed") {
+    // `seed` is different: vertex.js:79 tests `!= null`, so a numeric 0 — a
+    // legitimate "make this reproducible" request — is forwarded.
+    if let Some(seed) = body.get("seed").filter(|v| !v.is_null()) {
         parameters.insert("seed".to_string(), seed.clone());
     }
-    if let Some(negative) = body.get("negative_prompt") {
+    if let Some(negative) = body.get("negative_prompt").filter(|v| is_present(v)) {
         parameters.insert("negativePrompt".to_string(), negative.clone());
     }
     // Without storageUri Vertex returns inline base64 bytes; a GCS bucket keeps
     // the poll response small and is what production callers want.
-    if let Some(storage_uri) = body.get("storage_uri") {
+    if let Some(storage_uri) = body.get("storage_uri").filter(|v| is_present(v)) {
         parameters.insert("storageUri".to_string(), storage_uri.clone());
     }
-    if let Some(generate_audio) = body.get("generate_audio") {
-        parameters.insert("generateAudio".to_string(), json!(truthy(generate_audio)));
+    if let Some(generate_audio) = body.get("generate_audio").filter(|v| !v.is_null()) {
+        parameters.insert(
+            "generateAudio".to_string(),
+            json!(is_present(generate_audio)),
+        );
     }
 
     let mut out = json!({ "instances": [Value::Object(instance)] });
@@ -2365,10 +2761,11 @@ fn transform_vertex_operation(body: &Value) -> Value {
 async fn proxy_vertex_response(
     response: reqwest::Response,
     headers: HeaderMap,
+    provider: &str,
     connection: &crate::types::ProviderConnection,
 ) -> Response {
     if !response.status().is_success() {
-        return proxy_video_response(response, headers, connection).await;
+        return proxy_video_response(response, headers, provider, connection).await;
     }
     let text = response.text().await.unwrap_or_default();
     let out = serde_json::from_str::<Value>(&text)
@@ -2385,11 +2782,7 @@ async fn proxy_vertex_response(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
         HeaderValue::from_static("*"),
     );
-    if let Ok(val) = HeaderValue::from_str(&connection.id) {
-        proxied
-            .headers_mut()
-            .insert("x-openproxy-connection-id", val);
-    }
+    with_connection_header(&mut proxied, &connection.id);
     proxied
 }
 
@@ -2421,7 +2814,7 @@ async fn video_vertex_poll(
         base.trim_end_matches('/'),
         operation_model_path(&operation_name)
     );
-    let headers = match build_video_headers(&connection.provider, &connection, Some(&token)) {
+    let headers = match build_video_headers(&connection.provider, &connection, Some(&token), true) {
         Ok(h) => h,
         Err(e) => {
             return video_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
@@ -2439,15 +2832,13 @@ async fn video_vertex_poll(
         }
     };
     let body = json!({ "operationName": operation_name }).to_string();
-    match client
-        .post(&url)
-        .headers(headers.clone())
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(response) => proxy_vertex_response(response, headers, &connection).await,
-        Err(e) => video_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e)),
+    let post = client.post(&url).headers(headers.clone()).body(body).send();
+    match send_video(post).await {
+        Ok(response) => {
+            let provider = connection.provider.clone();
+            proxy_vertex_response(response, headers, &provider, &connection).await
+        }
+        Err(error) => video_send_error_response(&connection.provider, "POST", error),
     }
 }
 
@@ -2459,10 +2850,13 @@ fn select_video_connection(
     let snapshot = state.db.snapshot();
 
     // Prefer the account that created the job when the client echoes the
-    // connection id returned on create.
+    // connection id returned on create. All three spellings are accepted: the
+    // generic one 9router reads (videoGeneration.js:127, :203) and both names
+    // this build writes.
     let preferred = headers
         .get("x-connection-id")
         .or_else(|| headers.get("x-openproxy-connection-id"))
+        .or_else(|| headers.get("x-9router-connection-id"))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty());
@@ -2504,6 +2898,15 @@ mod tests {
                     .map(str::to_string)
             })
             .unwrap_or_default()
+    }
+
+    async fn error_body(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
     #[test]
     fn create_rotation_statuses_matches_9router() {
@@ -2734,5 +3137,432 @@ mod tests {
                 "parameters": { "sampleCount": 1, "durationSeconds": 8.0, "aspectRatio": "16:9", "resolution": "720p" },
             })
         );
+    }
+
+    /// 9router vertex.js:75-84 gates `n`/`duration`/`seed`/`generate_audio` on
+    /// `!= null` and the rest on plain truthiness. `Value::get` returns `Some`
+    /// for an explicit null, so the string-typed parameters were forwarding
+    /// `""` and `null` straight into the Vertex request.
+    #[test]
+    fn vertex_body_drops_null_and_empty_parameters() {
+        let out = to_vertex_body(&json!({
+            "prompt": "a cat",
+            "seed": Value::Null,
+            "aspect_ratio": "",
+            "resolution": Value::Null,
+            "negative_prompt": "",
+            "storage_uri": "",
+            "generate_audio": Value::Null,
+        }));
+        assert!(
+            out.get("parameters").is_none(),
+            "nothing survived the guard, yet a parameters object was built: {out}"
+        );
+    }
+
+    /// `seed` keeps `!= null` semantics: 0 is a legitimate request, not an
+    /// absent one (vertex.js:79).
+    #[test]
+    fn vertex_body_keeps_a_zero_seed() {
+        let out = to_vertex_body(&json!({"prompt": "a cat", "seed": 0}));
+        assert_eq!(out["parameters"]["seed"], json!(0));
+    }
+
+    /// vertex.js:148 `if (!body.prompt && !body.image && !body.image_url)` —
+    /// a present-but-null image does not satisfy the guard, so the request is
+    /// rejected before the billable predictLongRunning.
+    #[tokio::test]
+    async fn vertex_null_image_does_not_satisfy_the_prompt_guard() {
+        assert!(validate_vertex_create_body(&json!({
+            "model": "veo-3.1-generate-preview",
+            "image": Value::Null,
+        }))
+        .is_err());
+        assert!(validate_vertex_create_body(&json!({
+            "model": "veo-3.1-generate-preview",
+            "image": "",
+        }))
+        .is_err());
+        assert!(validate_vertex_create_body(&json!({
+            "model": "veo-3.1-generate-preview",
+            "image": "gs://bucket/frame.png",
+        }))
+        .is_ok());
+    }
+
+    /// Both spellings go out, so a client written against either build can pin
+    /// the poll (9router videoGeneration.js:97-104).
+    #[tokio::test]
+    async fn connection_header_is_written_under_both_names() {
+        let mut response = Response::new(Body::empty());
+        with_connection_header(&mut response, "conn-abc");
+        assert_eq!(
+            response
+                .headers()
+                .get("x-openproxy-connection-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("conn-abc")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-9router-connection-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("conn-abc")
+        );
+    }
+
+    // ── Video upstream shaping ─────────────────────────────────────────────
+    //
+    // These drive the real response helpers against a locally-served upstream.
+    // The routes themselves point at `XAI_VIDEO_BASE_URL`, a public constant
+    // with no per-connection override, so an end-to-end create/poll would bill
+    // real traffic against api.x.ai.
+
+    /// One canned HTTP response from a throwaway listener.
+    async fn upstream_reply(
+        status: &'static str,
+        extra_headers: &'static str,
+        body: String,
+    ) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        reqwest::get(format!("http://{addr}/"))
+            .await
+            .expect("upstream")
+    }
+
+    /// A non-2xx video upstream reaches the client as the OpenAI error envelope
+    /// with the provider prefix — videoCore.js:181-184's
+    /// `createErrorResult(status, "[${provider}] " + message.slice(0, 2000))`.
+    /// Relaying the provider's own body verbatim dropped `type`/`code`, the
+    /// only thing a client can branch on.
+    #[tokio::test]
+    async fn a_video_upstream_error_is_wrapped_and_prefixed() {
+        let upstream = upstream_reply(
+            "429 Too Many Requests",
+            "",
+            r#"{"error":"rate limit"}"#.to_string(),
+        )
+        .await;
+        let response =
+            proxy_video_response(upstream, HeaderMap::new(), "xai", &Default::default()).await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let message = error_message(response).await;
+        assert!(
+            message.starts_with("[xai] "),
+            "the provider name must prefix the message, got: {message}"
+        );
+        assert!(message.contains("rate limit"), "got: {message}");
+    }
+
+    /// The `type`/`code` pair follows the upstream status
+    /// (config/errorConfig.js:2-14), not the error text.
+    #[tokio::test]
+    async fn a_wrapped_video_error_carries_the_status_derived_type() {
+        let upstream =
+            upstream_reply("429 Too Many Requests", "", r#"{"error":"x"}"#.to_string()).await;
+        let response =
+            proxy_video_response(upstream, HeaderMap::new(), "xai", &Default::default()).await;
+        let (status, body) = error_body(response).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["type"], json!("rate_limit_error"));
+        assert_eq!(body["error"]["code"], json!("rate_limit_exceeded"));
+    }
+
+    /// videoCore.js:183 caps the message at 2000 CHARACTERS. 9router's
+    /// `slice(0, 2000)` is UTF-16 units, so a byte-index cap in Rust would
+    /// panic on a multi-byte body — `chars().take` is the safe equivalent.
+    #[tokio::test]
+    async fn a_video_error_body_is_capped_at_2000_characters() {
+        let ascii = "x".repeat(5000);
+        let upstream = upstream_reply("500 Internal Server Error", "", ascii).await;
+        let response =
+            proxy_video_response(upstream, HeaderMap::new(), "xai", &Default::default()).await;
+        let message = error_message(response).await;
+        let body = message.strip_prefix("[xai] ").expect("prefixed");
+        assert_eq!(
+            body.chars().count(),
+            2000,
+            "got {} chars",
+            body.chars().count()
+        );
+
+        let multibyte = "é".repeat(5000);
+        let upstream = upstream_reply("500 Internal Server Error", "", multibyte).await;
+        let response =
+            proxy_video_response(upstream, HeaderMap::new(), "xai", &Default::default()).await;
+        let body = error_message(response)
+            .await
+            .strip_prefix("[xai] ")
+            .expect("prefixed")
+            .to_string();
+        assert_eq!(body.chars().count(), 2000, "chars, not bytes");
+    }
+
+    /// An empty upstream body still produces a message, naming the status
+    /// (videoCore.js:182 `bodyText || \`HTTP ${upstream.status}\``).
+    #[tokio::test]
+    async fn an_empty_video_error_body_falls_back_to_the_status() {
+        let upstream = upstream_reply("503 Service Unavailable", "", String::new()).await;
+        let response =
+            proxy_video_response(upstream, HeaderMap::new(), "xai", &Default::default()).await;
+        assert_eq!(error_message(response).await, "[xai] HTTP 503");
+    }
+
+    /// videoCore.js:199-208 builds a fresh Response carrying exactly
+    /// `Content-Type` and CORS. Echoing the whole upstream set leaked provider
+    /// internals and handed the client the upstream's own `Idempotency-Key`.
+    #[tokio::test]
+    async fn only_content_type_is_copied_back_from_the_upstream() {
+        let upstream = upstream_reply(
+            "200 OK",
+            "x-request-id: abc\r\nserver: cloudflare\r\n",
+            r#"{"ok":true}"#.to_string(),
+        )
+        .await;
+        let response = proxy_upstream_response(upstream, HeaderMap::new()).await;
+        let headers = response.headers();
+        assert!(headers.contains_key(header::CONTENT_TYPE));
+        assert!(
+            !headers.contains_key("x-request-id") && !headers.contains_key("server"),
+            "upstream internals must not be echoed: {headers:?}"
+        );
+    }
+
+    /// videoCore.js:40 `buildHeaders` always sets `Accept`, and
+    /// `contentType: method === "POST" ? contentType : null` keeps
+    /// `Content-Type` off a bodyless poll (videoCore.js:107-111).
+    #[test]
+    fn video_headers_pair_content_type_with_the_verb() {
+        let mut conn = crate::types::ProviderConnection::default();
+        conn.api_key = Some("sk-xai".into());
+
+        let create = build_video_headers("xai", &conn, None, true).unwrap();
+        assert_eq!(create.get(header::ACCEPT).unwrap(), "application/json");
+        assert!(create.contains_key(header::CONTENT_TYPE));
+
+        let poll = build_video_headers("xai", &conn, None, false).unwrap();
+        assert_eq!(poll.get(header::ACCEPT).unwrap(), "application/json");
+        assert!(
+            !poll.contains_key(header::CONTENT_TYPE),
+            "a bodyless GET must not announce a JSON content type"
+        );
+    }
+
+    /// Vertex polls with POST + a JSON body (vertex.js:128-131), so its branch
+    /// keeps Content-Type even on a poll.
+    #[test]
+    fn vertex_video_headers_always_carry_content_type() {
+        let conn = crate::types::ProviderConnection::default();
+        let headers = build_video_headers("vertex", &conn, Some("ya29.token"), true).unwrap();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        assert_eq!(headers.get(header::ACCEPT).unwrap(), "application/json");
+    }
+
+    /// A hung upstream must abort at the deadline and be reported as a 408,
+    /// which the pooled client's own (much longer) timeout never produced.
+    /// A refused connection is the other arm and stays a 502.
+    #[tokio::test]
+    async fn a_hung_video_upstream_is_408_and_a_refused_one_is_502() {
+        // Serialized: this test is the only one that touches the env override.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hanging = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        std::env::set_var("VIDEO_FETCH_TIMEOUT_MS", "150");
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/v1/videos/generations");
+        let error = send_video(client.post(&url).send()).await.unwrap_err();
+        assert!(
+            matches!(error, VideoSendError::Timeout),
+            "a hung upstream is the timeout arm"
+        );
+        let response = video_send_error_response("xai", "POST", error);
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            error_message(response)
+                .await
+                .starts_with("[xai] video POST aborted"),
+            "the message mirrors videoCore.js:143"
+        );
+        hanging.abort();
+        std::env::remove_var("VIDEO_FETCH_TIMEOUT_MS");
+
+        // A port nothing listens on: a connect failure, not a deadline.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let url = format!("http://{dead_addr}/v1/videos/generations");
+        let error = send_video(client.post(&url).send()).await.unwrap_err();
+        assert!(
+            matches!(error, VideoSendError::Transport(_)),
+            "a refused connection is the transport arm"
+        );
+        assert_eq!(
+            video_send_error_response("xai", "POST", error).status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    /// The default deadline is 9router's 120 s (videoCore.js:9).
+    #[test]
+    fn default_video_fetch_timeout_is_120_seconds() {
+        if std::env::var("VIDEO_FETCH_TIMEOUT_MS").is_err() {
+            assert_eq!(video_fetch_timeout(), std::time::Duration::from_secs(120));
+        }
+    }
+
+    /// The raw multipart passthrough sends the same header set the JSON create
+    /// path does, so an edits/extensions call is deduplicated upstream the same
+    /// way a generations call is.
+    #[test]
+    fn raw_video_headers_carry_auth_accept_content_type_and_the_key() {
+        let mut conn = crate::types::ProviderConnection::default();
+        conn.api_key = Some("sk-xai".into());
+        let key = HeaderValue::from_static("job-42");
+        let headers = raw_video_headers(&conn, "multipart/form-data; boundary=abc", Some(&key));
+
+        assert_eq!(headers.get(header::ACCEPT).unwrap(), "application/json");
+        assert_eq!(headers.get(header::AUTHORIZATION).unwrap(), "Bearer sk-xai");
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "multipart/form-data; boundary=abc"
+        );
+        assert_eq!(headers.get(&IDEMPOTENCY_KEY).unwrap(), "job-42");
+    }
+
+    /// An empty key is not forwarded (9router's `if (idempotencyKey)`).
+    #[test]
+    fn an_empty_idempotency_key_is_dropped() {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", HeaderValue::from_static(""));
+        assert_eq!(idempotency_key(&headers), None);
+        headers.insert("idempotency-key", HeaderValue::from_static("job-42"));
+        assert_eq!(
+            idempotency_key(&headers).map(|v| v.to_str().unwrap().to_string()),
+            Some("job-42".to_string())
+        );
+    }
+
+    /// 9router captures the key once (videoGeneration.js:128) and threads it
+    /// through every attempt, so the post-refresh retry is still deduplicated
+    /// upstream. Compile-level guard: both attempts insert it.
+    #[test]
+    fn the_create_retry_re_sends_the_idempotency_key() {
+        let inserts = include_str!("media.rs")
+            .matches("insert(IDEMPOTENCY_KEY")
+            .count();
+        assert!(
+            inserts >= 2,
+            "the retry must rebuild the key too; found {inserts} insert site(s)"
+        );
+    }
+
+    /// A video failure has to reach the shared account-fallback state, or the
+    /// Providers dashboard shows a healthy account and selection keeps handing
+    /// it back. 9router's `markAccountUnavailable` (auth.js:239-296) writes a
+    /// PER-MODEL lock plus `testStatus`/`lastError`/`errorCode`/`backoffLevel`
+    /// and leaves `rateLimitedUntil` alone — a bad prompt must not take the
+    /// account out of every other model's rotation.
+    #[tokio::test]
+    async fn a_video_failure_is_recorded_as_a_per_model_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = std::sync::Arc::new(crate::db::Db::load_from(temp.path()).await.expect("db"));
+        db.update(|state| {
+            state.provider_connections = vec![crate::types::ProviderConnection {
+                id: "conn-xai".into(),
+                provider: "xai".into(),
+                auth_type: "apikey".into(),
+                api_key: Some("sk-xai".into()),
+                is_active: Some(true),
+                ..Default::default()
+            }];
+        })
+        .await
+        .expect("seed db");
+        let state = AppState::new(db);
+
+        record_video_outcome(&state, "conn-xai", Some("grok-imagine-video"), 429).await;
+        let stored = state.db.snapshot().provider_connections[0].clone();
+
+        assert!(
+            stored.extra.contains_key("modelLock_grok-imagine-video"),
+            "expected the per-model lock, got {:?}",
+            stored.extra
+        );
+        assert_eq!(stored.error_code.as_deref(), Some("429"));
+        assert_eq!(stored.test_status.as_deref(), Some("unavailable"));
+        assert!(stored.last_error.is_some(), "the dashboard shows no reason");
+        assert_eq!(stored.backoff_level, Some(1), "a 429 is the only ratchet");
+        assert_eq!(
+            stored.rate_limited_until, None,
+            "a per-model lock must not cool the whole account down"
+        );
+
+        // A success clears the lock and the error state (clearAccountError).
+        record_video_outcome(&state, "conn-xai", Some("grok-imagine-video"), 200).await;
+        let stored = state.db.snapshot().provider_connections[0].clone();
+        assert!(stored.extra["modelLock_grok-imagine-video"].is_null());
+        assert_eq!(stored.test_status, None);
+        assert_eq!(stored.last_error, None);
+    }
+
+    /// A client-side 4xx is recorded but must not ratchet the backoff level —
+    /// 9router's rate-limit rule is the only one carrying `backoff: true`
+    /// (accountFallback.js:211).
+    #[tokio::test]
+    async fn a_client_side_video_error_does_not_ratchet_the_backoff_level() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = std::sync::Arc::new(crate::db::Db::load_from(temp.path()).await.expect("db"));
+        db.update(|state| {
+            state.provider_connections = vec![crate::types::ProviderConnection {
+                id: "conn-xai".into(),
+                provider: "xai".into(),
+                auth_type: "apikey".into(),
+                api_key: Some("sk-xai".into()),
+                is_active: Some(true),
+                backoff_level: Some(0),
+                ..Default::default()
+            }];
+        })
+        .await
+        .expect("seed db");
+        let state = AppState::new(db);
+
+        record_video_outcome(&state, "conn-xai", Some("grok-imagine-video"), 400).await;
+        let stored = state.db.snapshot().provider_connections[0].clone();
+
+        assert_eq!(stored.error_code.as_deref(), Some("400"));
+        assert_eq!(
+            stored.backoff_level,
+            Some(0),
+            "a bad prompt must not ratchet towards the rate-limit cap"
+        );
+        assert_eq!(stored.rate_limited_until, None);
     }
 }

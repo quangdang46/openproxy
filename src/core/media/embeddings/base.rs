@@ -6,6 +6,16 @@ use serde_json::{json, Value};
 
 use crate::types::ProviderConnection;
 
+/// `Number()` semantics meet `JSON.stringify`: an integral f64 must serialize
+/// as `256`, not `256.0`, or every strict client sees a type change.
+fn json_number(n: f64) -> Value {
+    if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+        json!(n as i64)
+    } else {
+        json!(n)
+    }
+}
+
 /// One inbound embeddings request.
 #[derive(Debug, Clone)]
 pub struct EmbeddingRequest<'a> {
@@ -29,11 +39,22 @@ impl<'a> EmbeddingRequest<'a> {
             .filter(|s| !s.is_empty())
     }
 
-    pub fn dimensions(&self) -> Option<u64> {
-        self.body
-            .get("dimensions")
-            .and_then(|v| v.as_u64())
-            .filter(|&n| n > 0)
+    /// Coerced `dimensions`, reproducing 9router's
+    /// `const dim = Number(dimensions); if (Number.isFinite(dim) && dim > 0)`
+    /// (`embeddingProviders/openai.js buildBody`).
+    ///
+    /// JS `Number()` accepts a numeric string and any finite number, so
+    /// `"256"` and `256.0` both become `256`. `null`, `""` and anything
+    /// non-numeric are dropped — the same set the JS guard rejects.
+    pub fn dimensions(&self) -> Option<f64> {
+        let raw = self.body.get("dimensions")?;
+        if raw.is_null() {
+            return None;
+        }
+        let n = raw
+            .as_f64()
+            .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<f64>().ok()))?;
+        (n.is_finite() && n > 0.0).then_some(n)
     }
 }
 
@@ -165,7 +186,7 @@ impl EmbeddingAdapter for OpenAiCompatAdapter {
         }
         if let Some(dim) = request.dimensions() {
             if let Some(obj) = body.as_object_mut() {
-                obj.insert("dimensions".into(), json!(dim));
+                obj.insert("dimensions".into(), json_number(dim));
             }
         }
         Ok(body)
@@ -288,7 +309,7 @@ impl EmbeddingAdapter for GeminiAdapter {
             .ok_or_else(|| "Missing required field: input".to_string())?;
         let m = model_path(request.model);
         // Forward dimensions as outputDimensionality for Gemini (Gemini API name).
-        let dim = request.dimensions().map(|d| json!(d));
+        let dim = request.dimensions().map(json_number);
         if let Some(arr) = input.as_array() {
             let requests: Vec<Value> = arr
                 .iter()
@@ -455,6 +476,96 @@ mod tests {
         };
         let v = OPENAI.build_body(&req).unwrap();
         assert_eq!(v["dimensions"], 256);
+    }
+
+    /// 9router coerces with `Number(dimensions)` before the
+    /// `isFinite && > 0` guard, so a numeric string reaches the provider as a
+    /// number. `as_u64` returned None for it and the field was silently lost.
+    #[test]
+    fn dimensions_coerces_numeric_strings() {
+        let creds = ProviderConnection::default();
+        for raw in [json!("256"), json!(" 512 ")] {
+            let body = json!({"input": "hi", "dimensions": raw});
+            let req = EmbeddingRequest {
+                body: &body,
+                model: "x",
+                credentials: &creds,
+            };
+            let v = OPENAI.build_body(&req).unwrap();
+            assert!(
+                v["dimensions"].is_number(),
+                "{raw} must be forwarded as a number, got {}",
+                v["dimensions"]
+            );
+        }
+        let body = json!({"input": "hi", "dimensions": "256"});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "x",
+            credentials: &creds,
+        };
+        assert_eq!(OPENAI.build_body(&req).unwrap()["dimensions"], 256);
+    }
+
+    /// JS `Number` has no integer restriction — a fractional request is a
+    /// client error the provider should see, not one we swallow.
+    #[test]
+    fn dimensions_keeps_non_integers() {
+        let creds = ProviderConnection::default();
+        for (raw, expected) in [(json!(8.5), 8.5_f64), (json!(256.0), 256.0_f64)] {
+            let body = json!({"input": "hi", "dimensions": raw});
+            let req = EmbeddingRequest {
+                body: &body,
+                model: "x",
+                credentials: &creds,
+            };
+            let v = OPENAI.build_body(&req).unwrap();
+            assert_eq!(v["dimensions"].as_f64().unwrap(), expected, "for {raw}");
+        }
+    }
+
+    /// Everything the JS guard rejects stays dropped: `null`, `""` (the
+    /// `dimensions !== ""` early-out), non-numeric strings, and non-positive
+    /// numbers.
+    #[test]
+    fn dimensions_drops_unusable_values() {
+        let creds = ProviderConnection::default();
+        for raw in [
+            json!(null),
+            json!(""),
+            json!("abc"),
+            json!(0),
+            json!(-1),
+            json!(true),
+        ] {
+            let body = json!({"input": "hi", "dimensions": raw});
+            let req = EmbeddingRequest {
+                body: &body,
+                model: "x",
+                credentials: &creds,
+            };
+            let v = OPENAI.build_body(&req).unwrap();
+            assert!(
+                v.get("dimensions").is_none(),
+                "{raw} must be dropped, got {}",
+                v["dimensions"]
+            );
+        }
+    }
+
+    /// Gemini takes the same coerced value under its own key.
+    #[test]
+    fn gemini_forwards_coerced_output_dimensionality() {
+        let mut creds = ProviderConnection::default();
+        creds.api_key = Some("k".into());
+        let body = json!({"input": "hi", "dimensions": "768"});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "embedding-001",
+            credentials: &creds,
+        };
+        let v = GEMINI.build_body(&req).unwrap();
+        assert_eq!(v["outputDimensionality"], 768);
     }
 
     #[test]
