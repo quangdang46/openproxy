@@ -18,9 +18,10 @@ interface SegmentedControlProps {
   onChange: (value: string) => void;
   size?: SegmentedControlSize;
   /**
-   * MiniMax tab variants:
-   *   pill       -> pill-tab (default; black-fill active, hairline inactive)
-   *   segmented  -> grouped segmented control on surface base
+   * Tab variants:
+   *   segmented  -> grouped segmented control (default; the only shape
+   *                 9router has)
+   *   pill       -> pill-tab (black-fill active, hairline inactive)
    *   underline  -> segmented-tab (underline-style; M2.7 page pattern)
    */
   variant?: SegmentedControlVariant;
@@ -32,13 +33,13 @@ export default function SegmentedControl({
   value,
   onChange,
   size = "md",
-  variant = "pill",
+  variant = "segmented",
   className,
 }: SegmentedControlProps) {
   const sizes: Record<SegmentedControlSize, string> = {
-    sm: "h-7 text-[12px] px-3",
-    md: "h-9 text-[13px] px-4",
-    lg: "h-11 text-[14px] px-5",
+    sm: "h-7 text-xs",
+    md: "h-9 text-sm",
+    lg: "h-11 text-base",
   };
 
   if (variant === "underline") {
@@ -86,7 +87,7 @@ export default function SegmentedControl({
               key={option.value}
               onClick={() => onChange(option.value)}
               className={cn(
-                "shrink-0 rounded-full font-semibold transition-colors leading-none",
+                "shrink-0 px-4 rounded-full font-semibold transition-colors leading-none",
                 sizes[size],
                 active
                   // text-canvas inverts with bg-ink so the active pill is
@@ -110,12 +111,12 @@ export default function SegmentedControl({
     );
   }
 
-  // segmented (grouped — legacy default)
+  // segmented (grouped — 9router's only shape, and the default here)
   return (
     <div
       className={cn(
-        "inline-flex items-center p-1 rounded-mini-md overflow-x-auto",
-        "bg-surface-base border border-hairline-soft",
+        "inline-flex items-center p-1 rounded-[10px] overflow-x-auto",
+        "bg-surface-2",
         className
       )}
     >
@@ -126,10 +127,10 @@ export default function SegmentedControl({
             key={option.value}
             onClick={() => onChange(option.value)}
             className={cn(
-              "shrink-0 rounded-mini-sm font-semibold transition-colors leading-none",
+              "shrink-0 px-4 rounded-[8px] font-medium transition-all",
               sizes[size],
               active
-                ? "bg-canvas text-ink shadow-soft"
+                ? "bg-surface text-ink shadow-sm"
                 : "text-steel hover:text-ink"
             )}
           >

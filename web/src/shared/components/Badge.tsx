@@ -49,9 +49,9 @@ const variants: Record<BadgeVariant, string> = {
 };
 
 const sizes: Record<BadgeSize, string> = {
-  sm: "px-2 py-0.5 text-[10px] tracking-wide",
-  md: "px-2.5 py-1 text-[11px] tracking-wide",
-  lg: "px-3 py-1.5 text-[13px]",
+  sm: "px-2 py-0.5 text-[10px]",
+  md: "px-2.5 py-1 text-xs",
+  lg: "px-3 py-1.5 text-sm",
 };
 
 export default function Badge({
@@ -69,7 +69,7 @@ export default function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 font-semibold leading-none",
+        "inline-flex items-center gap-1.5 font-semibold",
         radius,
         variants[variant],
         sizes[size],

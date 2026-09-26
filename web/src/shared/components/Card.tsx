@@ -16,7 +16,7 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   padding?: CardPadding;
   /**
    * Hierarchical radius scale per Claude editorial spec:
-   *   lg    = 12px (content + product cards — default)
+   *   lg    = 14px (content + product cards — default; 9router's card radius)
    *   xl    = 16px (hero illustration container, larger marquee components)
    *   xxl   = 20px (oversized feature panels)
    *   xxxl  = 24px (decorative product tiles)
@@ -66,13 +66,14 @@ const paddings: Record<CardPadding, string> = {
   none: "",
   xs: "p-3",
   sm: "p-4",
-  md: "p-5",
-  lg: "p-6",
-  xl: "p-8",
+  md: "p-6",
+  lg: "p-8",
+  xl: "p-10",
 };
 
 const radii: Record<CardRadius, string> = {
-  lg: "rounded-mini-lg",
+  // 14px is 9router's card radius (Card.js:29); `rounded-mini-lg` is 12px.
+  lg: "rounded-[14px]",
   xl: "rounded-mini-xl",
   xxl: "rounded-mini-xxl",
   xxxl: "rounded-mini-xxxl",
@@ -101,11 +102,20 @@ const toneSubtitle: Record<CardTone, string> = {
 };
 
 const toneHover: Record<CardTone, string> = {
-  canvas: "hover:border-ink/30 hover:shadow-soft",
+  // 9router tints at `brand-500/30` (Card.js:30). `brand-coral` is the same
+  // colour declared in channel format, so the `/30` survives the build — the
+  // plain `brand-500` token is a bare `var()` and Tailwind v3 drops its
+  // alpha modifier entirely.
+  canvas: "hover:border-brand-coral/30 hover:shadow-warm",
   cream: "hover:bg-surface-cream-strong",
   dark: "hover:bg-surface-dark-elevated",
   coral: "hover:bg-brand-coral-active",
 };
+
+// 9router washes list rows with a 50% mix of the card surface (Card.js:82,103).
+// Tailwind silently drops the alpha modifier on a var()-backed colour, so
+// `hover:bg-surface-2/50` compiles to no rule at all — spell the mix out.
+const rowHover = "hover:bg-[color-mix(in_srgb,var(--color-surface-2)_50%,transparent)]";
 
 export default function Card({
   children,
@@ -127,8 +137,10 @@ export default function Card({
       className={cn(
         toneSurfaces[tone],
         radii[radius],
-        elev ? "shadow-card" : "shadow-none",
-        hover && `${toneHover[tone]} transition-colors cursor-pointer`,
+        // 9router keeps a soft shadow on the non-elevated default too, so a
+        // bare <Card> reads as a raised panel rather than a flat box.
+        elev ? "shadow-elev" : "shadow-soft",
+        hover && `${toneHover[tone]} transition-all cursor-pointer`,
         paddings[padding],
         className,
       )}
@@ -149,14 +161,14 @@ export default function Card({
                     "leading-tight",
                     serifTitle
                       ? "font-serif text-[22px] tracking-[-0.01em] font-normal"
-                      : "font-semibold text-[15px]",
+                      : "font-semibold",
                   )}
                 >
                   {title}
                 </h3>
               )}
               {subtitle && (
-                <p className={cn("text-[13px] mt-0.5", toneSubtitle[tone])}>{subtitle}</p>
+                <p className={cn("text-sm mt-0.5", toneSubtitle[tone])}>{subtitle}</p>
               )}
             </div>
           </div>
@@ -189,7 +201,7 @@ Card.Row = function CardRow({ children, className, ...props }: CardRowProps) {
       className={cn(
         "p-3 -mx-3 px-3 transition-colors",
         "border-b border-hairline-soft last:border-b-0",
-        "hover:bg-surface-soft",
+        rowHover,
         className,
       )}
       {...props}
@@ -210,7 +222,7 @@ Card.ListItem = function CardListItem({
       className={cn(
         "group flex items-center justify-between p-3 -mx-3 px-3",
         "border-b border-hairline-soft last:border-b-0",
-        "hover:bg-surface-soft transition-colors",
+        `${rowHover} transition-colors`,
         className,
       )}
       {...props}
