@@ -4061,8 +4061,14 @@ async fn proxy_response_with_pending_tracking(
     let api_key = api_key.map(|s| s.to_string());
     // Extract formats before stream closure to avoid lifetime issues
     let needs_stream_translation = plan.needs_translation();
-    let stream_source_format = plan.source_format;
-    let stream_target_format = plan.target_format;
+    // RequestPlan names these from the REQUEST's point of view
+    // (`source_format` = detected on the client's request, `target_format` =
+    // the provider's), which is the OPPOSITE of `translate_response(source,
+    // target)`, where source is the upstream WIRE format. Passing
+    // `plan.source_format` first therefore looks like an argument swap and is
+    // not one. These locals are named for the wire format they actually hold.
+    let stream_client_format = plan.source_format;
+    let stream_upstream_format = plan.target_format;
     let status = response.status();
     let headers = response.headers().clone();
 
@@ -4170,6 +4176,11 @@ async fn proxy_response_with_pending_tracking(
             let took_passthrough =
                 !qoder_sse_unwrap && transformer.is_none() && !needs_stream_translation;
             let mut saw_done = false;
+            // Set when the TRANSLATION arm's own output carries the OpenAI
+            // `[DONE]` sentinel, so EOF does not append a second one. The
+            // passthrough flag above cannot serve here: it is only ever set on
+            // the passthrough branch, which this request did not take.
+            let mut translate_saw_done = false;
             // Set as soon as a drained passthrough line carries a Responses
             // terminal event, so the termination arms below know whether the
             // synthesized `response.failed` is still owed.
@@ -4177,7 +4188,7 @@ async fn proxy_response_with_pending_tracking(
             let mut passthrough_pending: Vec<u8> = Vec::new();
             let custom_tool_names = custom_tool_names.clone();
             let request_body = request_body;
-            let stream_target = stream_target_format;
+            let stream_target = stream_upstream_format;
             let stream = async_stream::stream! {
                         let mut upstream = response.bytes_stream();
                         // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
@@ -4303,8 +4314,13 @@ async fn proxy_response_with_pending_tracking(
                                         // one the dashboard transformer path already
                                         // used, generalised so all three stream
                                         // branches share it.
+                                        //
+                                        // Frames, not lines: see
+                                        // `drain_complete_sse_frames` — a self-framing
+                                        // transform never sees a boundary when fed
+                                        // bare lines and returns nothing at all.
                                         translate_pending.extend_from_slice(&chunk);
-                                        for line in drain_complete_sse_lines(&mut translate_pending) {
+                                        for upstream_frame in drain_complete_sse_frames(&mut translate_pending) {
                                             // t_state is Some whenever
                                             // needs_stream_translation is true, so the
                                             // None arm is unreachable; it is kept as a
@@ -4312,12 +4328,13 @@ async fn proxy_response_with_pending_tracking(
                                             if let Some(ref mut ts) = t_state {
                                                 let chunks = registry::global_registry()
                                                     .translate_response(
-                                                        stream_target_format,
-                                                        stream_source_format,
-                                                        &Bytes::from(line),
+                                                        stream_upstream_format,
+                                                        stream_client_format,
+                                                        &Bytes::from(upstream_frame),
                                                         ts,
                                                     );
                                                 for out in chunks {
+                                                    translate_saw_done |= out.trim() == "data: [DONE]";
                                                     content_chars += sse_frame_text_len(&out);
                                                     responses_terminal_seen |= responses_line_is_terminal(&out);
                                                     if let Some(frame) = sse_frame_for_dashboard(&out) {
@@ -4374,13 +4391,13 @@ async fn proxy_response_with_pending_tracking(
                     Some(t) => flush_dashboard_sse_chunk(t, &mut pending_bytes),
                     None => Vec::new(),
                 };
-                let translate_lines =
+                let mut translate_lines =
                     if needs_stream_translation && !translate_pending.is_empty() {
                         let last = std::mem::take(&mut translate_pending);
                         match t_state.as_mut() {
                             Some(ts) => registry::global_registry().translate_response(
-                                stream_target_format,
-                                stream_source_format,
+                                stream_upstream_format,
+                                stream_client_format,
                                 &Bytes::from(last),
                                 ts,
                             ),
@@ -4389,6 +4406,9 @@ async fn proxy_response_with_pending_tracking(
                     } else {
                         Vec::new()
                     };
+                if !translate_saw_done && translation_needs_done_sentinel(stream_client_format) {
+                    translate_lines.push("data: [DONE]\n\n".to_string());
+                }
                 let passthrough_terminal =
                     take_terminal_passthrough_frame(&mut passthrough_pending).map(|final_frame| {
                         // The terminal frame runs the SAME pipeline as every
@@ -4408,8 +4428,8 @@ async fn proxy_response_with_pending_tracking(
                 };
                 let finish_lines = match t_state.as_mut() {
                     Some(ts) => registry::global_registry().finish_stream(
-                        stream_source_format,
-                        stream_target_format,
+                        stream_client_format,
+                        stream_upstream_format,
                         ts,
                     ),
                     None => Vec::new(),
@@ -4468,10 +4488,11 @@ async fn proxy_response_with_pending_tracking(
             let took_passthrough2 =
                 !qoder_sse_unwrap && transformer.is_none() && !needs_stream_translation;
             let mut saw_done2 = false;
+            let mut translate_saw_done2 = false;
             let mut responses_terminal_seen = false;
             let custom_tool_names2 = custom_tool_names.clone();
             let request_body2 = request_body;
-            let stream_target2 = stream_target_format;
+            let stream_target2 = stream_upstream_format;
             let stream = async_stream::stream! {
                 // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
                 let mut t_state = if needs_stream_translation {
@@ -4545,16 +4566,17 @@ async fn proxy_response_with_pending_tracking(
                                     }
                                 } else if needs_stream_translation {
                                     translate_pending2.extend_from_slice(&data);
-                                    for line in drain_complete_sse_lines(&mut translate_pending2) {
+                                    for upstream_frame in drain_complete_sse_frames(&mut translate_pending2) {
                                         if let Some(ref mut ts) = t_state {
                                             let chunks = registry::global_registry()
                                                 .translate_response(
-                                                    stream_target_format,
-                                                    stream_source_format,
-                                                    &Bytes::from(line),
+                                                    stream_upstream_format,
+                                                    stream_client_format,
+                                                    &Bytes::from(upstream_frame),
                                                     ts,
                                                 );
                                             for out in chunks {
+                                                translate_saw_done2 |= out.trim() == "data: [DONE]";
                                                 content_chars += sse_frame_text_len(&out);
                                                 responses_terminal_seen |= responses_line_is_terminal(&out);
                                                 if let Some(frame) = sse_frame_for_dashboard(&out) {
@@ -4605,13 +4627,13 @@ async fn proxy_response_with_pending_tracking(
                         Some(t) => flush_dashboard_sse_chunk(t, &mut pending_bytes),
                         None => Vec::new(),
                     };
-                    let translate_lines =
+                    let mut translate_lines =
                         if needs_stream_translation && !translate_pending2.is_empty() {
                             let last = std::mem::take(&mut translate_pending2);
                             match t_state.as_mut() {
                                 Some(ts) => registry::global_registry().translate_response(
-                                    stream_target_format,
-                                    stream_source_format,
+                                    stream_upstream_format,
+                                    stream_client_format,
                                     &Bytes::from(last),
                                     ts,
                                 ),
@@ -4620,6 +4642,9 @@ async fn proxy_response_with_pending_tracking(
                         } else {
                             Vec::new()
                         };
+                    if !translate_saw_done2 && translation_needs_done_sentinel(stream_client_format) {
+                        translate_lines.push("data: [DONE]\n\n".to_string());
+                    }
                     let passthrough_terminal =
                         take_terminal_passthrough_frame(&mut passthrough_pending2).map(|final_frame| {
                             let text = String::from_utf8_lossy(&final_frame).into_owned();
@@ -4641,8 +4666,8 @@ async fn proxy_response_with_pending_tracking(
                     };
                     let finish_lines = match t_state.as_mut() {
                         Some(ts) => registry::global_registry().finish_stream(
-                            stream_source_format,
-                            stream_target_format,
+                            stream_client_format,
+                            stream_upstream_format,
                             ts,
                         ),
                         None => Vec::new(),
@@ -5160,6 +5185,25 @@ pub(crate) fn passthrough_needs_done_sentinel(provider: &str) -> bool {
     !matches!(provider, "antigravity" | "gemini" | "vertex")
 }
 
+/// Whether a TRANSLATED stream owes the client an OpenAI `data: [DONE]`.
+///
+/// The same hang the passthrough rule guards against, and more exposed here: a
+/// Claude or Gemini upstream terminates its stream with a protocol event
+/// (`message_stop`), never with `data: [DONE]`. Passthrough can relay the
+/// upstream's own terminator, but a translation has to synthesize one — and
+/// without it nothing in the byte stream marks the end, so a client that waits
+/// for the sentinel waits until timeout.
+///
+/// Only the OpenAI chat wire format uses this terminator. A Claude target ends
+/// with `message_stop` and a Responses target with `response.completed`, both
+/// of which the transform already emits, and a Gemini target rejects the
+/// sentinel outright.
+pub(crate) fn translation_needs_done_sentinel(
+    target: crate::core::translator::registry::Format,
+) -> bool {
+    matches!(target, crate::core::translator::registry::Format::OpenAi)
+}
+
 /// Build the short, sanitized message for a blocked non-SSE upstream response.
 ///
 /// Ported from 9router `streamingHandler.js:61-67`:
@@ -5590,6 +5634,65 @@ pub(crate) fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
         // An incomplete multi-byte sequence cannot be silently mangled here:
         // the line is complete, so String::from_utf8_lossy only replaces bytes
         // that were never valid UTF-8 to begin with.
+        out.push(String::from_utf8_lossy(&raw).into_owned());
+    }
+    out
+}
+
+/// Byte offset just past the first complete SSE frame in `buf`, if there is
+/// one. A frame ends at a BLANK line, so the terminator is a line ending
+/// immediately followed by another (`\n\n`, `\n\r\n` or `\r\n\r\n`).
+///
+/// Byte-wise scanning is safe here: a literal newline inside a `data:` payload
+/// is JSON-escaped as `\n` (backslash + n), so a raw `\n` byte is always a real
+/// line ending.
+fn sse_frame_end(buf: &[u8]) -> Option<usize> {
+    for (i, b) in buf.iter().enumerate() {
+        if *b != b'\n' {
+            continue;
+        }
+        let next = i + 1;
+        match buf.get(next) {
+            Some(b'\n') => return Some(next + 1),
+            Some(b'\r') if buf.get(next + 1) == Some(&b'\n') => return Some(next + 2),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Drain COMPLETE SSE frames, each returned WITH a normalised `\n\n`
+/// terminator.
+///
+/// This exists because the two stream-transform contracts disagree, and
+/// feeding the translation arm the wrong one silently empties the response:
+///
+/// - Self-framing transforms (`claude_to_openai_streaming`) keep their own
+///   buffer and only act once they can see `\n\n`.
+/// - Line-based transforms (`openai_to_claude_streaming` and the rest) run
+///   `extract_sse_or_json_payload`, which takes the first `data:` line of
+///   whatever it is handed.
+///
+/// A COMPLETE FRAME satisfies both. Draining per LINE — which is what this arm
+/// used to do — satisfies neither: the `\n` that separates an Anthropic
+/// `event:` line from its `data:` line is stripped, and the blank line that
+/// ends the frame is dropped by `drain_complete_sse_lines` before it can reach
+/// the transform, so a self-framing transform never sees a frame boundary and
+/// emits nothing at all. That is the 200-with-an-empty-body failure.
+pub(crate) fn drain_complete_sse_frames(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(end) = sse_frame_end(buffer) {
+        let mut raw: Vec<u8> = buffer.drain(..end).collect();
+        // Drop the blank line that closed the frame, then re-attach a single
+        // canonical terminator so CRLF upstreams and LF upstreams produce the
+        // same bytes.
+        while matches!(raw.last(), Some(b'\n') | Some(b'\r')) {
+            raw.pop();
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        raw.extend_from_slice(b"\n\n");
         out.push(String::from_utf8_lossy(&raw).into_owned());
     }
     out
@@ -7597,7 +7700,7 @@ mod extractor_framing_tests {
 #[cfg(test)]
 #[cfg(test)]
 mod sse_framing_tests {
-    use super::drain_complete_sse_lines;
+    use super::{drain_complete_sse_frames, drain_complete_sse_lines};
 
     fn buf_of(bytes: &[u8]) -> Vec<u8> {
         bytes.to_vec()
@@ -7710,6 +7813,106 @@ mod sse_framing_tests {
         assert_eq!(
             drain_complete_sse_lines(&mut buf),
             vec!["data: {\"a\":1}", "data: {\"a\":2}"]
+        );
+    }
+
+    // ── drain_complete_sse_frames ────────────────────────────────────────
+    //
+    // The wire-level tests in tests/streaming_translation_parity.rs cannot
+    // cover the property below: wiremock hands the whole body to the client in
+    // one write, so no frame is ever split across two transport reads there.
+    // These drive the buffer directly.
+
+    /// The reason this function exists: a frame must arrive WHOLE, terminator
+    /// included. Drained per line it lost the `\n` between an Anthropic
+    /// `event:` line and its `data:` line, and lost the blank line that closes
+    /// the frame, so `claude_to_openai_streaming` never saw a frame boundary
+    /// and the client got a 200 with an empty body.
+    #[test]
+    fn frames_keep_their_event_line_and_terminator() {
+        let mut buf =
+            buf_of(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n");
+        assert_eq!(
+            drain_complete_sse_frames(&mut buf),
+            vec!["event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"]
+        );
+        assert!(buf.is_empty());
+    }
+
+    /// One read carrying several frames yields several frames, each whole.
+    #[test]
+    fn one_chunk_carrying_two_frames_yields_two_frames() {
+        let mut buf = buf_of(b"data: {\"a\":1}\n\ndata: {\"a\":2}\n\n");
+        assert_eq!(
+            drain_complete_sse_frames(&mut buf),
+            vec!["data: {\"a\":1}\n\n", "data: {\"a\":2}\n\n"]
+        );
+        assert!(buf.is_empty());
+    }
+
+    /// The load-bearing case: a frame cut mid-JSON is held, not acted on, and
+    /// is emitted exactly once when its remainder arrives.
+    #[test]
+    fn a_frame_split_across_two_reads_is_emitted_exactly_once_by_frames() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"event: content_block_delta\ndata: {\"type\":\"content_b");
+        assert!(
+            drain_complete_sse_frames(&mut buf).is_empty(),
+            "a partial frame must be buffered, not emitted"
+        );
+        buf.extend_from_slice(b"lock_delta\",\"index\":0}\n\n");
+        assert_eq!(
+            drain_complete_sse_frames(&mut buf),
+            vec!["event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0}\n\n"]
+        );
+        assert!(buf.is_empty());
+    }
+
+    /// A newline INSIDE a payload is JSON-escaped, so it must not be mistaken
+    /// for a frame boundary — the scanner is byte-wise, and this is why that is
+    /// safe.
+    #[test]
+    fn an_escaped_newline_in_a_payload_is_not_a_boundary() {
+        let mut buf = buf_of(b"data: {\"text\":\"a\\nb\"}\n\n");
+        assert_eq!(
+            drain_complete_sse_frames(&mut buf),
+            vec!["data: {\"text\":\"a\\nb\"}\n\n"]
+        );
+    }
+
+    /// A CRLF upstream must still be de-framed, and the frame must leave with
+    /// a canonical `\n\n` terminator — the transform looks for exactly that
+    /// two-byte boundary, so leaving `\r\n\r\n` in place would mean the final
+    /// frame of a CRLF stream is never released. Interior line endings are
+    /// left alone: they are upstream's bytes, and `str::lines()` (which every
+    /// transform's frame parser uses) strips the `\r` anyway.
+    #[test]
+    fn a_crlf_frame_is_released_with_a_canonical_terminator() {
+        let mut buf = buf_of(b"event: ping\r\ndata: {\"a\":1}\r\n\r\n");
+        let frames = drain_complete_sse_frames(&mut buf);
+        assert_eq!(frames.len(), 1, "one CRLF frame per blank-line pair");
+        assert!(
+            frames[0].ends_with("\n\n") && !frames[0].ends_with("\r\n\r\n"),
+            "the terminator the transform scans for must be canonical, got {:?}",
+            frames[0]
+        );
+        // The data: line is recoverable, which is the whole point of the frame.
+        assert!(
+            frames[0].lines().any(|l| l.trim() == "data: {\"a\":1}"),
+            "interior CRLF must not hide the payload, got {:?}",
+            frames[0]
+        );
+        assert!(buf.is_empty());
+    }
+
+    /// Keep-alive comments arrive as their own frames and must pass through
+    /// rather than vanish.
+    #[test]
+    fn a_comment_frame_survives() {
+        let mut buf = buf_of(b": keep-alive\n\n");
+        assert_eq!(
+            drain_complete_sse_frames(&mut buf),
+            vec![": keep-alive\n\n"]
         );
     }
 }
@@ -8156,7 +8359,8 @@ mod passthrough_transform_tests {
 
 #[cfg(test)]
 mod done_sentinel_tests {
-    use super::should_emit_done_sentinel;
+    use super::{should_emit_done_sentinel, translation_needs_done_sentinel};
+    use crate::core::translator::registry::Format;
 
     /// Regression (openproxy-24's review of 3ac819b3): the sentinel was gated
     /// only on the PROVIDER name, with no knowledge of which stream branch the
@@ -8200,6 +8404,30 @@ mod done_sentinel_tests {
         // Even on passthrough: these reject it with a 400 syntax error.
         for p in ["antigravity", "gemini", "vertex"] {
             assert!(!should_emit_done_sentinel(true, p, false), "{p}");
+        }
+    }
+
+    /// The TRANSLATED arm is not covered by `should_emit_done_sentinel`, which
+    /// is gated on `took_passthrough` — a request that translated never took
+    /// it. Without its own rule a Claude→OpenAI stream ends with no terminator
+    /// at all: the upstream's `message_stop` is not one, and the transform does
+    /// not invent one, so an OpenAI client waits for `[DONE]` until timeout.
+    #[test]
+    fn a_translated_openai_stream_is_terminated() {
+        assert!(translation_needs_done_sentinel(Format::OpenAi));
+    }
+
+    /// The other direction, and the wire formats with their own terminators.
+    /// Appending `[DONE]` to a Claude stream would be a protocol violation, and
+    /// `message_delta`/`response.completed` already end those streams — a
+    /// second terminator is a frame the client cannot interpret.
+    #[test]
+    fn a_translated_non_openai_stream_is_not_given_the_sentinel() {
+        for target in [Format::Claude, Format::OpenAiResponses, Format::Codex] {
+            assert!(
+                !translation_needs_done_sentinel(target),
+                "{target:?} must not receive data: [DONE]"
+            );
         }
     }
 }

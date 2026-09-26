@@ -291,6 +291,11 @@ async fn a_frame_split_across_transport_reads_still_translates() {
     let upstream = MockServer::start().await;
     // The second event is deliberately cut mid-JSON. A de-framer that emits on
     // newline alone, or that flushes a partial buffer, drops or corrupts it.
+    //
+    // The four closing braces are load-bearing: this whole body goes through
+    // `format!`, where `}}` collapses to one `}`. With two, the upstream sent
+    // invalid JSON and the transform correctly discarded the frame — a failure
+    // that looks exactly like a translation bug and is not one.
     let split = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"tex";
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -300,7 +305,7 @@ async fn a_frame_split_across_transport_reads_still_translates() {
                     "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"m\",\"role\":\"assistant\"}}}}\n\n",
                     "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
                     "{split}",
-                    "t\":\"split frame\"}}\n\n",
+                    "t\":\"split frame\"}}}}\n\n",
                     "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
                     "event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
                 ),
@@ -429,5 +434,95 @@ async fn the_non_streaming_path_translates_the_same_pair() {
         json.get("choices").is_some() && json.get("content").is_none(),
         "a chat/completions client must receive `choices`, not a bare Anthropic \
          `content` array, got: {body}"
+    );
+}
+
+/// A NATIVE Anthropic upstream behind `/v1/messages` — Claude Code's primary
+/// path, and the one this file's other tests do not cover.
+///
+/// Both other tests pair a client and an upstream whose formats DIFFER, so they
+/// exercise the translator. This one needs no translation at all: the upstream's
+/// wire format already IS the client's, so the chat pipeline passes its SSE
+/// through untouched. That passthrough is exactly what the `/v1/messages`
+/// response shim used to re-convert, and the re-conversion treated each
+/// Anthropic event as an OpenAI chunk, found no `choices`, and dropped it —
+/// so the client received `message_start`, `message_stop`, and no answer, from
+/// a request that never needed translating.
+///
+/// A shim whose output depends on whether the pipeline happened to translate
+/// first is the defect; this test pins the half of it that no other test sees.
+#[tokio::test]
+async fn a_native_anthropic_upstream_reaches_a_messages_client_intact() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello world\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let state = seeded_state(
+        vec![provider_node(
+            "anthropic-compatible-1",
+            "anthropic-compatible",
+            "custom",
+            &format!("{}/v1", upstream.uri()),
+        )],
+        vec![connection(
+            "conn-1",
+            "anthropic-compatible-1",
+            1,
+            "upstream-key",
+        )],
+    )
+    .await;
+
+    let response = openproxy::build_app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/claude-sonnet-4",
+                        "max_tokens": 64,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": true,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+
+    assert_eq!(
+        anthropic_delta_text(&body),
+        "hello world",
+        "a passthrough Anthropic stream must reach the client whole, got: {body}"
+    );
+    // The upstream's own id, not a synthesized one: nothing re-derived it.
+    assert!(
+        body.contains("msg_1"),
+        "an untouched stream must keep the upstream's message id, got: {body}"
+    );
+    assert!(
+        body.contains("message_stop"),
+        "an Anthropic stream terminates with message_stop, got: {body}"
     );
 }

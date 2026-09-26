@@ -1250,6 +1250,30 @@ async fn convert_to_messages_api(response: Response) -> Response {
                             break;
                         }
 
+                        // The frame may ALREADY be an Anthropic Messages event,
+                        // and in the two cases that matter it always is:
+                        //
+                        //  - `forward_compat` calls the chat pipeline with
+                        //    endpoint `/v1/messages`, so the pipeline resolves
+                        //    the CLIENT format as Claude and has already
+                        //    translated the response for us;
+                        //  - a native Anthropic upstream needs no translation at
+                        //    all, so the pipeline passes its SSE straight through.
+                        //
+                        // Re-converting either one treats Claude events as
+                        // OpenAI chunks, finds no `choices`, and drops every
+                        // content block — the client receives message_start,
+                        // message_stop, and no answer. So detect the format and
+                        // relay the frame untouched. (The Responses converter
+                        // above already does exactly this detection.)
+                        if is_anthropic_event_frame(json_str) {
+                            if json_str.contains("\"message_stop\"") {
+                                conv_state.stop_sent = true;
+                            }
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("{frame}\n\n")));
+                            continue;
+                        }
+
                         if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
                             let events = openai_chunk_to_messages(&mut conv_state, &chunk_value);
                             for event_bytes in events {
@@ -1501,6 +1525,29 @@ impl MessagesSseState {
 fn format_messages_sse_event(event: &str, data: &Value) -> Vec<u8> {
     let json_str = serde_json::to_string(data).unwrap_or_default();
     format!("event: {event}\ndata: {json_str}\n\n").into_bytes()
+}
+
+/// Is this SSE `data:` payload already an Anthropic Messages API event?
+///
+/// Same two-part test the Responses converter uses: the payload must carry a
+/// `type` field AND name one of the Messages events. The `type` requirement is
+/// what keeps a chat-completion chunk that merely mentions an event name — in
+/// a tool name, say — from being mistaken for one. Substring matching is safe
+/// against tool payloads because a quote inside a JSON string is escaped, so
+/// `\"message_start\"` cannot match the bare `"message_start"` below.
+fn is_anthropic_event_frame(json_str: &str) -> bool {
+    const ANTHROPIC_EVENT_MARKERS: [&str; 6] = [
+        "\"message_start\"",
+        "\"content_block_start\"",
+        "\"content_block_delta\"",
+        "\"content_block_stop\"",
+        "\"message_delta\"",
+        "\"message_stop\"",
+    ];
+    json_str.contains("\"type\":\"")
+        && ANTHROPIC_EVENT_MARKERS
+            .iter()
+            .any(|marker| json_str.contains(marker))
 }
 
 /// Convert a single chat.completion.chunk to Anthropic Messages API SSE events.
