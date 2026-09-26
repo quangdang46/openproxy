@@ -7,6 +7,9 @@
 
 use serde_json::{json, Map, Value};
 
+use super::usage;
+use crate::core::translator::registry::Format;
+
 /// Tool-name prefix the request side uses when masking proxy-injected
 /// tools to keep them distinct from caller tool names. Stripped on the
 /// way back so the response surfaces the caller's original name.
@@ -127,6 +130,7 @@ pub fn openai_to_claude_streaming(
         Err(_) => return vec![],
     };
     let inner = &mut state.anthropic.claude_state;
+    usage::seed_request_body(inner, state.request_body.as_ref());
     let results = openai_to_claude_response(&val, inner);
     results
         .into_iter()
@@ -295,6 +299,14 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
     }
 
     let delta = choice.get("delta");
+
+    // Emitted text sizes the output half of a terminal usage estimate.
+    // 9router counts these two raw source deltas only (stream.js:293-301).
+    for field in ["content", "reasoning_content"] {
+        if let Some(text) = delta.and_then(|d| d.get(field)).and_then(Value::as_str) {
+            usage::note_content(state, text);
+        }
+    }
 
     // ── reasoning_content/reasoning/reasoning_details → thinking block ──
     let reasoning = delta.map(extract_reasoning_text).unwrap_or_default();
@@ -470,14 +482,16 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
             "finishReason".into(),
             Value::String(finish_reason.to_string()),
         );
-        let usage = state
-            .get("usage")
-            .cloned()
+        // Estimated or padded here rather than in the SSE driver, so the
+        // estimate sees the whole stream (9router openai-to-claude.js:249 defers
+        // to stream.js:356-366 for exactly this).
+        let tracked = state.get("usage").cloned();
+        let client_usage = usage::terminal_usage_block(state, Format::Claude, tracked)
             .unwrap_or_else(|| json!({"input_tokens": 0, "output_tokens": 0}));
         results.push(json!({
             "type": "message_delta",
             "delta": {"stop_reason": convert_finish_reason(finish_reason)},
-            "usage": usage
+            "usage": client_usage
         }));
         results.push(json!({"type": "message_stop"}));
     }
