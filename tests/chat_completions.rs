@@ -737,6 +737,9 @@ async fn chat_completions_returns_retry_after_while_model_is_cooling_down() {
         .await
         .unwrap();
     let (parts, body) = first.into_parts();
+    // First request: the account is not cooling down yet, so this is a plain
+    // upstream 429 echoed back — the `attempt_error_response` path, which
+    // 9router leaves alone (errorResponse passes through the provider status).
     if parts.status != StatusCode::TOO_MANY_REQUESTS {
         let b = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         panic!(
@@ -780,10 +783,24 @@ async fn chat_completions_returns_retry_after_while_model_is_cooling_down() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("cooling down"));
+    let message = json["error"]["message"].as_str().unwrap();
+    // Second request: the account is now locked, so this is the allRateLimited
+    // arm. 9router chat.js:239 hard-codes SERVICE_UNAVAILABLE there rather than
+    // echoing the upstream 429, and the body is `[provider/model] <last error>`
+    // — chat.js:241 — which names the blocked account instead of saying only
+    // that everything is cooling down.
+    assert!(
+        message.contains("[node-openai/gpt-4o-mini]"),
+        "the body must tag which provider/model is blocked, got: {message}"
+    );
+    assert!(
+        message.contains("rate limit exceeded"),
+        "the recorded upstream error must survive into the body, got: {message}"
+    );
+    assert!(
+        message.contains("(reset after "),
+        "the human reset hint must survive, got: {message}"
+    );
 }
 
 #[tokio::test]
