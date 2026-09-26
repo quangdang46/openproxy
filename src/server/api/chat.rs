@@ -4086,6 +4086,7 @@ async fn proxy_response_with_pending_tracking(
                                     );
                                 }
                             }
+                            s.request_body = Some(request_body.clone());
                             Some(s)
                         } else {
                             None
@@ -4375,6 +4376,7 @@ async fn proxy_response_with_pending_tracking(
                             );
                         }
                     }
+                    s.request_body = Some(request_body2.clone());
                     Some(s)
                 } else {
                     None
