@@ -849,11 +849,11 @@ async fn rewrite_qoder_block(block: &Value, ctx: &mut QoderRewriteCtx<'_>) -> Op
     }
 }
 
-/// Replace oversized inlined data-URIs in free text with stubs (9router
-/// `rewriteContent` string path). Small ones stay inline.
-fn strip_qoder_data_uris(text: &str) -> String {
-    // Scan for data: URIs terminated by whitespace/quote; replace those whose
-    // decoded size exceeds the inline fallback budget.
+/// Scan `text` for inlined `data:` URIs, handing each match to `replace`.
+/// Shared by the two stripping passes below, which differ only in whether a
+/// small URI is kept.
+fn map_qoder_data_uris(text: &str, mut replace: impl FnMut(&str) -> String) -> String {
+    // Scan for data: URIs terminated by whitespace/quote.
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("data:") {
@@ -863,22 +863,38 @@ fn strip_qoder_data_uris(text: &str) -> String {
             .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ')')
             .unwrap_or(tail.len());
         let candidate = &tail[..end];
-        let replacement = match parse_qoder_data_uri(candidate) {
-            Some((mime, b64)) if qoder_decoded_bytes(&b64) > QODER_INLINE_FALLBACK_MAX_BYTES => {
-                qoder_stub_text(
-                    "",
-                    &mime,
-                    qoder_decoded_bytes(&b64),
-                    "inlined data URI stripped from Qoder context",
-                )
-            }
-            _ => candidate.to_string(),
-        };
-        out.push_str(&replacement);
+        out.push_str(&replace(candidate));
         rest = &tail[end..];
     }
     out.push_str(rest);
     out
+}
+
+/// Replace oversized inlined data-URIs in free text with stubs (9router
+/// `rewriteContent` string path). Small ones stay inline.
+fn strip_qoder_data_uris(text: &str) -> String {
+    map_qoder_data_uris(text, |candidate| match parse_qoder_data_uri(candidate) {
+        Some((mime, b64)) if qoder_decoded_bytes(&b64) > QODER_INLINE_FALLBACK_MAX_BYTES => {
+            qoder_stub_text(
+                "",
+                &mime,
+                qoder_decoded_bytes(&b64),
+                "inlined data URI stripped from Qoder context",
+            )
+        }
+        _ => candidate.to_string(),
+    })
+}
+
+/// Final over-budget safety net: stub EVERY inlined data-URI, however small
+/// (9router `stripRemainingDataUris`, attachments.js:258-278). Unlike the main
+/// rewrite pass this applies no size threshold — the payload is already over
+/// budget, so even a "small" URI is what pushed it there. The stub reports the
+/// URI's own length, not its decoded size, as 9router does.
+fn strip_all_qoder_data_uris(text: &str) -> String {
+    map_qoder_data_uris(text, |candidate| {
+        qoder_stub_text("", "", candidate.len(), "payload over Qoder size budget")
+    })
 }
 
 struct QoderRewriteCtx<'a> {
@@ -1120,7 +1136,9 @@ pub fn estimate_qoder_prompt_tokens(system: &str, messages: &Value, tools: Optio
     })
     .to_string();
     let cjk = text.chars().filter(|c| is_qoder_cjk(*c)).count() as u64;
-    let rest = text.chars().count() as u64 - cjk;
+    // `text.length` in JS is the UTF-16 code-unit count, so an astral-plane
+    // character (emoji, rare CJK) contributes 2, not 1.
+    let rest = text.encode_utf16().count() as u64 - cjk;
     (cjk * 4 + rest).div_ceil(4)
 }
 
@@ -1255,7 +1273,7 @@ fn strip_qoder_message_data_uris(msg: &mut Value) {
     };
     if let Some(s) = content.as_str() {
         if s.contains("data:") {
-            *content = Value::String(strip_qoder_data_uris(s));
+            *content = Value::String(strip_all_qoder_data_uris(s));
         }
         return;
     }
@@ -1278,7 +1296,10 @@ fn strip_qoder_message_data_uris(msg: &mut Value) {
             if let Some(t) = block.get("text").and_then(Value::as_str).map(String::from) {
                 if t.contains("data:") {
                     if let Some(o) = block.as_object_mut() {
-                        o.insert("text".to_string(), Value::String(strip_qoder_data_uris(&t)));
+                        o.insert(
+                            "text".to_string(),
+                            Value::String(strip_all_qoder_data_uris(&t)),
+                        );
                     }
                 }
             }
@@ -1500,16 +1521,24 @@ impl QoderExecutor {
 
         let sig_path = Self::compute_sig_path(request_url);
 
-        // sigInput = payloadB64 + "\n" + cosyKey + "\n" + timestamp + "\n" + body + "\n" + sigPath
-        let sig_input = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            payload_b64,
-            cosy_key,
-            timestamp,
-            String::from_utf8_lossy(body),
-            sig_path
+        // sigInput = payloadB64 + "\n" + cosyKey + "\n" + timestamp + "\n" + body + "\n" + sigPath.
+        // Built as raw bytes: JS hashes `Buffer.from(sigInput, "latin1")`, and
+        // latin1 round-trips 0x00-0xFF, so a multipart body carrying image bytes
+        // must be hashed verbatim. A lossy UTF-8 rendering would hash U+FFFD
+        // placeholders instead of the bytes the server sees.
+        let mut sig_input: Vec<u8> = Vec::with_capacity(
+            payload_b64.len() + cosy_key.len() + timestamp.len() + body.len() + sig_path.len() + 4,
         );
-        let sig = Self::md5_hex(sig_input.as_bytes());
+        sig_input.extend_from_slice(payload_b64.as_bytes());
+        sig_input.push(b'\n');
+        sig_input.extend_from_slice(cosy_key.as_bytes());
+        sig_input.push(b'\n');
+        sig_input.extend_from_slice(timestamp.as_bytes());
+        sig_input.push(b'\n');
+        sig_input.extend_from_slice(body);
+        sig_input.push(b'\n');
+        sig_input.extend_from_slice(sig_path.as_bytes());
+        let sig = Self::md5_hex(&sig_input);
 
         let machine_id = if creds.machine_id.is_empty() {
             Uuid::new_v4().to_string()
@@ -3579,5 +3608,114 @@ mod tests {
             .transform_request(&body2, "qoder/qmodel_38max", &creds, &entry)
             .unwrap();
         assert_eq!(payload2["parameters"]["max_tokens"], 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // COSY signature must hash the raw multipart bytes (cosy.js:146-149).
+    // -----------------------------------------------------------------------
+
+    fn cosy_test_creds() -> QoderCreds {
+        QoderCreds {
+            user_id: "u1".to_string(),
+            auth_token: "tok".to_string(),
+            name: "N".to_string(),
+            email: "e@example.com".to_string(),
+            machine_id: "m1".to_string(),
+        }
+    }
+
+    /// `Bearer COSY.<payloadB64>.<sig>` — recompute the signature over the same
+    /// byte layout cosy.js builds and compare with what the executor produced.
+    fn assert_cosy_sig_hashes_raw_body(body: &[u8], cosy: &CosyHeaders) {
+        let auth = cosy
+            .authorization
+            .strip_prefix("Bearer COSY.")
+            .expect("authorization must be a COSY bearer");
+        let (payload_b64, sig) = auth.rsplit_once('.').expect("COSY.<payload>.<sig>");
+        let mut expected: Vec<u8> = Vec::new();
+        for part in [
+            payload_b64.to_string(),
+            cosy.cosy_key.clone(),
+            cosy.cosy_date.clone(),
+        ] {
+            expected.extend_from_slice(part.as_bytes());
+            expected.push(b'\n');
+        }
+        expected.extend_from_slice(body);
+        expected.push(b'\n');
+        expected.extend_from_slice(cosy.cosy_sigpath.as_bytes());
+        assert_eq!(*sig, QoderExecutor::md5_hex(&expected));
+    }
+
+    #[test]
+    fn test_cosy_signature_preserves_non_utf8_body_bytes() {
+        let body = b"\xff\xfe\x80binary".as_slice();
+        let cosy = QoderExecutor::build_cosy_headers(
+            body,
+            "https://api3.qoder.sh/api/v2/service/pro/sse/agent_chat_generation",
+            &cosy_test_creds(),
+        )
+        .unwrap();
+        assert_cosy_sig_hashes_raw_body(body, &cosy);
+    }
+
+    #[test]
+    fn test_cosy_signature_unchanged_for_ascii_body() {
+        let body = br#"{"model":"qmodel","messages":[]}"#;
+        let cosy = QoderExecutor::build_cosy_headers(
+            body,
+            "https://api3.qoder.sh/api/v2/service/pro/sse/agent_chat_generation",
+            &cosy_test_creds(),
+        )
+        .unwrap();
+        assert_cosy_sig_hashes_raw_body(body, &cosy);
+        assert_eq!(cosy.cosy_bodyhash, QoderExecutor::md5_hex(body));
+    }
+
+    #[test]
+    fn test_estimate_qoder_prompt_tokens_counts_utf16_code_units() {
+        let messages = serde_json::json!([{"role": "user", "content": "x"}]);
+        // JS `text.length` counts UTF-16 code units, so 100 astral-plane emoji
+        // are 200 — twice what a scalar count would report. A BMP-only string
+        // is the control: same value under either accounting.
+        let bmp = estimate_qoder_prompt_tokens(&"a".repeat(100), &messages, None);
+        let astral = estimate_qoder_prompt_tokens(&"\u{1F600}".repeat(100), &messages, None);
+        assert!(
+            astral > bmp,
+            "surrogate pairs count 2 UTF-16 units: {astral} should exceed {bmp}"
+        );
+        let envelope = serde_json::json!({
+            "system": "a".repeat(100),
+            "messages": messages,
+            "tools": [],
+        })
+        .to_string();
+        assert_eq!(
+            bmp,
+            (envelope.encode_utf16().count() as u64).div_ceil(4),
+            "pure ASCII must keep the plain char count"
+        );
+    }
+
+    #[test]
+    fn test_over_budget_pass_strips_small_data_uris_too() {
+        let mut msg = serde_json::json!({
+            "role": "user",
+            "content": format!("look: data:image/png;base64,{}", "A".repeat(1024))
+        });
+        strip_qoder_message_data_uris(&mut msg);
+        let content = msg["content"].as_str().unwrap();
+        assert!(
+            !content.contains("data:"),
+            "small URI must still be stripped: {content}"
+        );
+        assert!(content.contains("[file omitted: attachment"));
+        assert!(content.contains("payload over Qoder size budget"));
+    }
+
+    #[test]
+    fn test_main_rewrite_pass_still_keeps_small_data_uris() {
+        let text = format!("look: data:image/png;base64,{}", "A".repeat(1024));
+        assert!(strip_qoder_data_uris(&text).contains("data:"));
     }
 }

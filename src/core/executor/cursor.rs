@@ -688,6 +688,7 @@ async fn consume_agent_stream(
     created: u64,
     model: &str,
     stream: bool,
+    request_body: &Value,
 ) -> Result<Vec<u8>, CursorExecutorError> {
     let mut pending = Vec::new();
     let mut finished = false;
@@ -773,11 +774,7 @@ async fn consume_agent_stream(
         chunks.push(SSE_DONE.to_string());
         Ok(chunks.concat().into_bytes())
     } else {
-        let usage = serde_json::json!({
-            "prompt_tokens": 0,
-            "completion_tokens": content.len() / 4,
-            "total_tokens": content.len() / 4,
-        });
+        let usage = cursor_estimate_usage(request_body, content.len());
         Ok(serde_json::to_string(&serde_json::json!({
             "id": response_id,
             "object": "chat.completion",
@@ -1250,28 +1247,67 @@ fn encode_cursor_setting() -> Vec<u8> {
     ])
 }
 
+/// Node's `process.platform` vocabulary (cursorProtobuf.js:419). Rust spells
+/// the same three platforms differently.
+fn node_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// Node's `process.arch` vocabulary (cursorProtobuf.js:420).
+fn node_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    }
+}
+
+/// `Date.prototype.toISOString()` — millisecond precision with a `Z` suffix.
+/// `to_rfc3339` would emit nanoseconds and a `+00:00` offset instead.
+fn node_iso_timestamp() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
 /// Encode metadata
 fn encode_metadata() -> Vec<u8> {
-    let platform = std::env::consts::OS.as_bytes();
-    let arch = std::env::consts::ARCH.as_bytes();
+    // Cargo semver and Node semver agree, so the `v` prefix reproduces
+    // `process.version` without hardcoding a stale "v20.0.0".
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "/".to_string());
 
     concat_arrays(&[
         &encode_field_len(
             proto_fields::FLD_META_PLATFORM,
             proto_fields::WIRE_LEN,
-            platform,
+            node_platform().as_bytes(),
         ),
-        &encode_field_len(proto_fields::FLD_META_ARCH, proto_fields::WIRE_LEN, arch),
+        &encode_field_len(
+            proto_fields::FLD_META_ARCH,
+            proto_fields::WIRE_LEN,
+            node_arch().as_bytes(),
+        ),
         &encode_field_len(
             proto_fields::FLD_META_VERSION,
             proto_fields::WIRE_LEN,
-            b"v20.0.0",
+            version.as_bytes(),
         ),
-        &encode_field_len(proto_fields::FLD_META_CWD, proto_fields::WIRE_LEN, b"/"),
+        &encode_field_len(
+            proto_fields::FLD_META_CWD,
+            proto_fields::WIRE_LEN,
+            cwd.as_bytes(),
+        ),
         &encode_field_len(
             proto_fields::FLD_META_TIMESTAMP,
             proto_fields::WIRE_LEN,
-            chrono::Utc::now().to_rfc3339().as_bytes(),
+            node_iso_timestamp().as_bytes(),
         ),
     ])
 }
@@ -1669,6 +1705,31 @@ fn generate_client_key(token: &str) -> String {
     cursor_checksum::generate_hashed64_hex(token, "")
 }
 
+/// Host IANA time zone for `x-cursor-timezone` (cursorChecksum.js:138 reads
+/// `Intl.DateTimeFormat().resolvedOptions().timeZone`). `TZ` wins — Node honours
+/// it first — otherwise the system zone comes from the `/etc/localtime` symlink
+/// (macOS: `/var/db/timezone/zoneinfo/…`, Linux: `/usr/share/zoneinfo/…`).
+/// Falls back to `"UTC"`, matching the reference's `|| "UTC"`.
+pub fn resolve_system_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let tz = tz.trim().trim_start_matches(':').to_string();
+        if !tz.is_empty() {
+            return tz;
+        }
+    }
+    if let Ok(target) = std::fs::read_link("/etc/localtime") {
+        let text = target.to_string_lossy();
+        if let Some(zone) = text
+            .split_once("zoneinfo/")
+            .map(|(_, zone)| zone.to_string())
+            .filter(|zone| zone.contains('/'))
+        {
+            return zone;
+        }
+    }
+    "UTC".to_string()
+}
+
 /// Build Cursor API headers using cursor_checksum::build_cursor_headers.
 /// Extracts machineId and ghostMode from credentials.provider_specific_data.
 /// Returns an error if machineId is missing (matching 9router behavior).
@@ -1734,7 +1795,11 @@ fn build_cursor_headers(
         HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
             .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    header_map.insert("x-cursor-timezone", HeaderValue::from_static("UTC"));
+    header_map.insert(
+        "x-cursor-timezone",
+        HeaderValue::from_str(&resolve_system_timezone())
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
     header_map.insert(
         "x-ghost-mode",
         HeaderValue::from_str(if ghost_mode { "true" } else { "false" })
@@ -2191,6 +2256,7 @@ impl CursorExecutor {
             created,
             &actual_model,
             request.stream,
+            &request.body,
         )
         .await?;
 
@@ -2734,6 +2800,47 @@ fn format_chat_chunk_sse(
     )
 }
 
+/// Rough token estimate when the provider reports none (JS `estimateUsage`,
+/// usageTracking.js:341-405). Cursor's protobuf carries no usage block, so the
+/// numbers are derived from the request/response sizes: ~4 characters per
+/// token, plus a flat buffer on each side so a client that later subtracts the
+/// billed total does not under-report the real prompt.
+const USAGE_BUFFER_TOKENS: u64 = 2000;
+
+/// `estimateInputTokens` — ceil(len(JSON.stringify(body)) / 4). JS `length`
+/// counts UTF-16 code units, so the string is measured that way.
+fn cursor_estimate_input_tokens(body: &Value) -> u64 {
+    match serde_json::to_string(body) {
+        Ok(serialized) => (serialized.encode_utf16().count() as u64).div_ceil(4),
+        Err(_) => 0,
+    }
+}
+
+/// `estimateOutputTokens` — floor(len / 4), but a non-empty answer is at least
+/// one token.
+fn cursor_estimate_output_tokens(content_length: usize) -> u64 {
+    if content_length == 0 {
+        0
+    } else {
+        ((content_length / 4) as u64).max(1)
+    }
+}
+
+/// `formatUsage` + `addBufferToUsage` for the OpenAI shape. Only the prompt
+/// side is padded (usageTracking.js:34-56): `addBufferToUsage` adds the buffer
+/// to `prompt_tokens` and `total_tokens` and never touches
+/// `completion_tokens`, so `total` ends up as `prompt + completion`.
+fn cursor_estimate_usage(body: &Value, content_length: usize) -> Value {
+    let input = cursor_estimate_input_tokens(body);
+    let output = cursor_estimate_output_tokens(content_length);
+    serde_json::json!({
+        "prompt_tokens": input + USAGE_BUFFER_TOKENS,
+        "completion_tokens": output,
+        "total_tokens": input + output + USAGE_BUFFER_TOKENS,
+        "estimated": true,
+    })
+}
+
 /// Build an OpenAI chat completion response.
 /// Mirrors cursorChatResponse from cursor.js lines 318-368.
 fn build_chat_completion_response(
@@ -2741,15 +2848,13 @@ fn build_chat_completion_response(
     created: u64,
     model: &str,
     text: Option<&str>,
-    thinking: Option<&str>,
+    body: &Value,
     tool_calls: Vec<Value>,
 ) -> Value {
-    let content = match (text, thinking) {
-        (Some(t), Some(th)) => Some(format!("{}\n\n{}", th, t)),
-        (Some(t), None) => Some(t.to_string()),
-        (None, Some(th)) => Some(th.to_string()),
-        (None, None) => None,
-    };
+    // Internal reasoning is upstream-only. Folding it into `content` would
+    // replay the model's scratchpad to the client, and for composer models the
+    // visible tail has already been appended to `text` upstream.
+    let content = text.map(str::to_string);
 
     let mut message = serde_json::json!({
         "role": "assistant",
@@ -2766,11 +2871,7 @@ fn build_chat_completion_response(
         "stop"
     };
 
-    let usage = serde_json::json!({
-        "prompt_tokens": 0,
-        "completion_tokens": content.as_ref().map(|c| c.len() / 4).unwrap_or(0) as u64,
-        "total_tokens": content.as_ref().map(|c| c.len() / 4).unwrap_or(0) as u64,
-    });
+    let usage = cursor_estimate_usage(body, content.as_ref().map_or(0, String::len));
 
     serde_json::json!({
         "id": id,
@@ -2801,7 +2902,7 @@ fn build_chat_completion_response(
 pub fn transform_protobuf_to_sse(
     buffer: &[u8],
     model: &str,
-    _body: &Value,
+    body: &Value,
 ) -> Result<(String, Option<u16>), CursorExecutorError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3033,11 +3134,7 @@ pub fn transform_protobuf_to_sse(
         "stop"
     };
 
-    let usage = serde_json::json!({
-        "prompt_tokens": 0,
-        "completion_tokens": total_content.len() / 4,
-        "total_tokens": total_content.len() / 4,
-    });
+    let usage = cursor_estimate_usage(body, total_content.len());
 
     let final_delta = json!({});
     let final_sse = serde_json::json!({
@@ -3068,7 +3165,7 @@ pub fn transform_protobuf_to_sse(
 pub fn transform_protobuf_to_json(
     buffer: &[u8],
     model: &str,
-    _body: &Value,
+    body: &Value,
 ) -> Result<String, CursorExecutorError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3185,35 +3282,17 @@ pub fn transform_protobuf_to_json(
         tool_calls.push(finalized_tc);
     }
 
-    // Build the response
+    // Build the response. An empty turn is still a well-formed completion —
+    // cursor.js:850-877 always assembles one, and a zero-length body would
+    // break every strict OpenAI client's JSON.parse().
     let text_opt = if total_content.is_empty() {
-        if total_thinking.is_empty() && tool_calls.is_empty() {
-            None
-        } else {
-            None
-        }
+        None
     } else {
         Some(total_content.as_str())
     };
 
-    let thinking_opt = if total_thinking.is_empty() {
-        None
-    } else {
-        Some(total_thinking.as_str())
-    };
-
-    if text_opt.is_none() && thinking_opt.is_none() && tool_calls.is_empty() {
-        return Ok(String::new());
-    }
-
-    let response = build_chat_completion_response(
-        &response_id,
-        created,
-        model,
-        text_opt,
-        thinking_opt,
-        tool_calls,
-    );
+    let response =
+        build_chat_completion_response(&response_id, created, model, text_opt, body, tool_calls);
 
     Ok(serde_json::to_string(&response).unwrap_or_default())
 }
@@ -3876,5 +3955,187 @@ mod tests {
             CursorExecutorError::from(elapsed)
         });
         assert!(matches!(err, CursorExecutorError::Timeout(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Protobuf → OpenAI response shaping (cursor.js:815-877, :1082-1095)
+    // -----------------------------------------------------------------------
+
+    /// Wrap `payload` in a Connect-RPC frame: flags byte + big-endian length.
+    fn connect_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8];
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// A `StreamUnifiedChatResponse` frame carrying only `thinking`.
+    fn thinking_frame(thinking: &str) -> Vec<u8> {
+        let thinking_msg = encode_field_len(
+            proto_fields::FLD_THINKING_TEXT,
+            proto_fields::WIRE_LEN,
+            thinking.as_bytes(),
+        );
+        let response = encode_field_len(
+            proto_fields::FLD_THINKING,
+            proto_fields::WIRE_LEN,
+            &thinking_msg,
+        );
+        connect_frame(&encode_field_len(
+            proto_fields::FLD_RESPONSE,
+            proto_fields::WIRE_LEN,
+            &response,
+        ))
+    }
+
+    /// A `StreamUnifiedChatResponse` frame carrying only `text`.
+    fn text_frame(text: &str) -> Vec<u8> {
+        let response = encode_field_len(
+            proto_fields::FLD_RESPONSE_TEXT,
+            proto_fields::WIRE_LEN,
+            text.as_bytes(),
+        );
+        connect_frame(&encode_field_len(
+            proto_fields::FLD_RESPONSE,
+            proto_fields::WIRE_LEN,
+            &response,
+        ))
+    }
+
+    fn test_body() -> Value {
+        serde_json::json!({
+            "model": "cursor-small",
+            "messages": [{ "role": "user", "content": "hello there" }],
+        })
+    }
+
+    #[test]
+    fn cursor_usage_is_estimated_and_buffered() {
+        let body = test_body();
+        let json = transform_protobuf_to_json(&text_frame("hi"), "cursor-small", &body).unwrap();
+        let usage = &serde_json::from_str::<Value>(&json).unwrap()["usage"];
+
+        assert_eq!(usage["estimated"], true);
+        assert!(
+            usage["prompt_tokens"].as_u64().unwrap() >= USAGE_BUFFER_TOKENS,
+            "prompt must carry the safety buffer, got {usage}"
+        );
+        // addBufferToUsage pads prompt and total only, never completion, so the
+        // two still add up.
+        assert_eq!(
+            usage["total_tokens"].as_u64().unwrap(),
+            usage["prompt_tokens"].as_u64().unwrap() + usage["completion_tokens"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn cursor_estimate_output_tokens_floors_to_zero_but_clamps_to_one() {
+        assert_eq!(cursor_estimate_output_tokens(0), 0);
+        for len in 1..=7 {
+            assert_eq!(
+                cursor_estimate_output_tokens(len),
+                1,
+                "{len} chars must still count as one token"
+            );
+        }
+        assert_eq!(cursor_estimate_output_tokens(8), 2);
+    }
+
+    #[test]
+    fn cursor_reasoning_is_not_folded_into_message_content() {
+        let body = test_body();
+        let json = transform_protobuf_to_json(
+            &thinking_frame("step 1: weigh options"),
+            "cursor-small",
+            &body,
+        )
+        .unwrap();
+        let message = &serde_json::from_str::<Value>(&json).unwrap()["choices"][0]["message"];
+        assert!(
+            message["content"].is_null(),
+            "internal reasoning must not reach the client, got {message}"
+        );
+    }
+
+    #[test]
+    fn cursor_composer_visible_tail_appears_once() {
+        let body = test_body();
+        // The composer tail after </think> is the answer; the reasoning before
+        // it is not. Appending it twice would echo the answer back to the user.
+        let json = transform_protobuf_to_json(
+            &thinking_frame("internal plan</think>The answer is 42"),
+            "cursor/composer-1",
+            &body,
+        )
+        .unwrap();
+        let content = serde_json::from_str::<Value>(&json).unwrap()["choices"][0]["message"]
+            ["content"]
+            .as_str()
+            .expect("composer answer is visible content")
+            .to_string();
+        assert_eq!(content, "The answer is 42");
+        assert_eq!(content.matches("The answer is 42").count(), 1);
+    }
+
+    #[test]
+    fn empty_cursor_turn_still_returns_well_formed_completion() {
+        let body = test_body();
+        let json = transform_protobuf_to_json(&[], "cursor-small", &body).unwrap();
+        let completion: Value = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("empty turn must still be JSON: {e} (got {json:?})"));
+        assert_eq!(completion["object"], "chat.completion");
+        assert!(completion["choices"][0]["message"]["content"].is_null());
+        assert_eq!(completion["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn cursor_metadata_uses_node_platform_and_arch_vocabulary() {
+        assert!(["darwin", "win32", "linux"].contains(&node_platform()));
+        assert!(["arm64", "x64"].contains(&node_arch()));
+        assert!(!node_platform().contains("macos"));
+        assert!(!node_arch().contains("aarch64"));
+        assert!(!node_arch().contains("x86_64"));
+    }
+
+    #[test]
+    fn cursor_metadata_timestamp_is_iso8601_millis_with_z() {
+        let stamp = node_iso_timestamp();
+        assert!(stamp.ends_with('Z'), "toISOString() ends in Z: {stamp}");
+        assert!(stamp.contains('T'), "ISO-8601 date/time separator: {stamp}");
+        let fraction = stamp.split_once('.').expect("millisecond fraction").1;
+        assert_eq!(
+            fraction.trim_end_matches('Z').len(),
+            3,
+            "exactly 3 fractional digits: {stamp}"
+        );
+        chrono::DateTime::parse_from_rfc3339(&stamp)
+            .unwrap_or_else(|e| panic!("{stamp} must be RFC3339-parseable: {e}"));
+    }
+
+    #[test]
+    fn cursor_timezone_header_resolves_iana_zone_or_utc() {
+        // Node honours TZ first, so the env var is the deterministic half.
+        // These env mutations are process-global, so keep them on one thread
+        // and restore the previous value.
+        let previous = std::env::var("TZ").ok();
+        std::env::set_var("TZ", "Asia/Ho_Chi_Minh");
+        assert_eq!(resolve_system_timezone(), "Asia/Ho_Chi_Minh");
+        // A colon-prefixed zoneinfo path is a common TZ spelling.
+        std::env::set_var("TZ", ":Europe/Berlin");
+        assert_eq!(resolve_system_timezone(), "Europe/Berlin");
+        std::env::set_var("TZ", "   ");
+        let resolved = resolve_system_timezone();
+        assert!(
+            !resolved.is_empty(),
+            "an unresolvable zone must fall back, never be empty"
+        );
+        assert!(
+            resolved == "UTC" || resolved.split('/').count() == 2,
+            "expected an IANA identifier or UTC, got {resolved}"
+        );
+        match previous {
+            Some(value) => std::env::set_var("TZ", value),
+            None => std::env::remove_var("TZ"),
+        }
     }
 }

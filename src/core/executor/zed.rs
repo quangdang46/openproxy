@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::{json, Value};
 
 use super::{TransportKind, UpstreamResponse};
@@ -22,6 +22,16 @@ use crate::types::ProviderConnection;
 use hyper::http;
 
 const ZED_LLM_BASE_URL: &str = zed_auth::ZED_CLOUD_BASE_URL;
+
+/// JS `this.config?.appVersion` default (zed.js:257) — sent on every
+/// /completions call as `x-zed-version`.
+const ZED_APP_VERSION: &str = "0.200.0";
+/// Zed streams NDJSON; the streaming body reader below assumes exactly that.
+const ZED_ACCEPT: &str = "application/x-ndjson, text/event-stream, */*";
+const ZED_USER_AGENT: &str = "openproxy/zed";
+/// Zed's capability-negotiation headers take the literal string "true"
+/// (zed.js:255-258), not "1".
+const ZED_BOOL_HEADER_VALUE: &str = "true";
 
 pub struct ZedExecutionRequest {
     pub model: String,
@@ -113,13 +123,59 @@ fn build_provider_request(provider: ZedProvider, model: &str, body: &mut Value) 
 /// catalog is unavailable or the model is unknown (JS resolveModel plus the
 /// EXEC-13 offline fallback).
 ///
-/// The catalog lives in `provider_specific_data.zed_models` when a prior
-/// `/models` sync populated it; each entry is expected to carry `id` and
-/// `provider`. Returns `(raw_entry, provider)`.
-pub fn resolve_model(
+/// The catalog is fetched live from `cloud.zed.dev/models` — never hardcoded
+/// (zedAuth.js:357). A miss in a cached catalog triggers exactly one forced
+/// refresh before giving up, mirroring zed.js:212-229. When the fetch is
+/// unavailable the psd copy written by `write_zed_models_psd` is used instead.
+/// Returns `(raw_entry, provider)`.
+pub async fn resolve_model(
     model: &str,
     credentials: &ProviderConnection,
 ) -> (Option<Value>, ZedProvider) {
+    let (user_id, access_token, organization_id, system_id) = zed_identity(credentials);
+    if !access_token.is_empty() {
+        let client = reqwest::Client::new();
+        let fetched = zed_auth::resolve_zed_models(
+            &client,
+            &user_id,
+            &access_token,
+            &organization_id,
+            system_id.as_deref(),
+            false,
+        )
+        .await;
+        let resolved = match fetched {
+            Ok(catalog) => match catalog.raw_by_id.get(model).cloned() {
+                Some(raw) => Some(raw),
+                // A stale catalog is the common case right after Zed ships a
+                // new model; pay for one forced refresh before giving up.
+                None => zed_auth::resolve_zed_models(
+                    &client,
+                    &user_id,
+                    &access_token,
+                    &organization_id,
+                    system_id.as_deref(),
+                    true,
+                )
+                .await
+                .ok()
+                .and_then(|fresh| fresh.raw_by_id.get(model).cloned()),
+            },
+            Err(err) => {
+                tracing::warn!(
+                    target: "openproxy::executor",
+                    "Zed model catalog unavailable, inferring provider for {model}: {err}"
+                );
+                None
+            }
+        };
+        if let Some(raw) = resolved {
+            let provider =
+                normalize_zed_provider(raw.get("provider").and_then(Value::as_str), model);
+            return (Some(raw), provider);
+        }
+    }
+
     let psd = &credentials.provider_specific_data;
     let entries: Vec<&Value> = psd
         .get("zed_models")
@@ -146,6 +202,52 @@ pub fn resolve_model(
         model,
     );
     (raw, provider)
+}
+
+/// Identity fields the Zed cloud calls need, pulled out of the connection once
+/// so `resolve_model` and the executor do not each re-derive them.
+fn zed_identity(credentials: &ProviderConnection) -> (String, String, String, Option<String>) {
+    let psd = &credentials.provider_specific_data;
+    let user_id = psd
+        .get("userId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let access_token = credentials
+        .access_token
+        .as_deref()
+        .or(credentials.api_key.as_deref())
+        .unwrap_or_default()
+        .to_string();
+    let organization_id = psd
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let system_id = psd
+        .get("systemId")
+        .and_then(Value::as_str)
+        .map(String::from);
+    (user_id, access_token, organization_id, system_id)
+}
+
+/// Persist a resolved catalog into `provider_specific_data.zed_models` so the
+/// offline psd fallback in `resolve_model` still resolves provider names.
+pub fn write_zed_models_psd(
+    psd: &mut std::collections::BTreeMap<String, Value>,
+    catalog: &zed_auth::ZedModelCatalog,
+) {
+    let entries: Vec<Value> = catalog
+        .raw_by_id
+        .values()
+        .map(|raw| {
+            serde_json::json!({
+                "id": zed_auth::normalize_zed_model_id(raw.get("id")),
+                "provider": raw.get("provider").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    psd.insert("zed_models".to_string(), Value::Array(entries));
 }
 
 /// JS parseError — map the upstream error body into a human-readable message,
@@ -207,6 +309,14 @@ fn transformer_for_zed(
     }
 }
 
+/// JS shouldRefreshZedLlmToken — a 401, or an expiry/outdated marker header
+/// even on a 200, means the bearer is stale and worth re-minting once.
+pub fn should_refresh_zed_llm_token(status: reqwest::StatusCode, headers: &HeaderMap) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || headers.contains_key(zed_auth::ZED_HEADER_EXPIRED_TOKEN)
+        || headers.contains_key(zed_auth::ZED_HEADER_OUTDATED_TOKEN)
+}
+
 fn error_chunk(model: &str, message: &str) -> String {
     format!(
         "data: {}\n\n",
@@ -238,37 +348,24 @@ impl ZedExecutor {
 
     /// Exchange the RSA-decrypted access token for a short-lived LLM bearer.
     /// Organization id comes from psd (`organizationId`); when missing we
-    /// probe `/client/users/me` best-effort like the JS flow does.
-    async fn resolve_llm_token(&self, credentials: &ProviderConnection) -> Result<String, String> {
-        let psd = &credentials.provider_specific_data;
-        let user_id = psd
-            .get("userId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let access_token = credentials
-            .access_token
-            .as_deref()
-            .or(credentials.api_key.as_deref())
-            .unwrap_or_default()
-            .to_string();
-        let system_id = psd.get("systemId").and_then(Value::as_str);
-
-        let mut organization_id = psd
-            .get("organizationId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+    /// probe `/client/users/me` best-effort like the JS flow does. The result
+    /// is memoised for the token's 50-minute life unless `force_refresh`.
+    async fn resolve_llm_token(
+        &self,
+        credentials: &ProviderConnection,
+        force_refresh: bool,
+    ) -> Result<String, String> {
+        let (user_id, access_token, mut organization_id, system_id) = zed_identity(credentials);
 
         let client = reqwest::Client::new();
         if organization_id.is_empty() {
             let auth = zed_auth::build_user_auth_header(&user_id, &access_token)?;
             let mut request = client
                 .get(format!("{ZED_LLM_BASE_URL}/client/users/me"))
-                .header("Accept", "application/json")
-                .header("Authorization", auth);
-            if let Some(sid) = system_id.filter(|s| !s.is_empty()) {
-                request = request.header("x-zed-system-id", sid);
+                .header(ACCEPT, "application/json")
+                .header(AUTHORIZATION, auth);
+            if let Some(sid) = system_id.as_deref().filter(|s| !s.is_empty()) {
+                request = request.header(zed_auth::ZED_HEADER_SYSTEM_ID, sid);
             }
             if let Ok(info) = request.send().await {
                 if let Ok(data) = info.json::<Value>().await {
@@ -283,12 +380,13 @@ impl ZedExecutor {
             }
         }
 
-        zed_auth::fetch_llm_token(
+        zed_auth::fetch_llm_token_cached(
             &client,
             &user_id,
             &access_token,
             &organization_id,
-            system_id,
+            system_id.as_deref(),
+            force_refresh,
         )
         .await
     }
@@ -351,28 +449,40 @@ impl ZedExecutor {
 }
 
 impl ZedExecutor {
-    async fn post_completions(
-        &self,
-        url: &str,
-        token: &str,
-        payload: &Value,
-    ) -> Result<reqwest::Response, String> {
+    /// Header set for one /completions call (zed.js:253-259). Zed negotiates
+    /// framing from these: `Accept` advertises the NDJSON body the streaming
+    /// reader below expects, and the two capability headers opt into the
+    /// status / stream-ended frames. `x-zed-client-supports-x-ai` is
+    /// deliberately absent — 9router sends that only on /models.
+    fn completions_headers(token: &str) -> Result<HeaderMap, String> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(ACCEPT, HeaderValue::from_static(ZED_ACCEPT));
+        headers.insert(USER_AGENT, HeaderValue::from_static(ZED_USER_AGENT));
+        headers.insert("x-zed-version", HeaderValue::from_static(ZED_APP_VERSION));
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|e| format!("invalid auth header: {e}"))?,
         );
         headers.insert(
-            "x-zed-client-supports-status-messages",
-            HeaderValue::from_static("1"),
+            zed_auth::ZED_HEADER_CLIENT_SUPPORTS_STATUS,
+            HeaderValue::from_static(ZED_BOOL_HEADER_VALUE),
         );
         headers.insert(
-            "x-zed-client-supports-stream-ended-request-completion-status",
-            HeaderValue::from_static("1"),
+            zed_auth::ZED_HEADER_CLIENT_SUPPORTS_STREAM_ENDED,
+            HeaderValue::from_static(ZED_BOOL_HEADER_VALUE),
         );
-        headers.insert("x-zed-client-supports-x-ai", HeaderValue::from_static("1"));
+        Ok(headers)
+    }
+
+    async fn post_completions(
+        &self,
+        url: &str,
+        token: &str,
+        payload: &Value,
+    ) -> Result<reqwest::Response, String> {
+        let headers = Self::completions_headers(token)?;
         let client = self
             .pool
             .get("zed", None)
@@ -390,11 +500,9 @@ impl ZedExecutor {
         &self,
         request: ZedExecutionRequest,
     ) -> Result<ZedExecutorResponse, String> {
-        let llm_token = self.resolve_llm_token(&request.credentials).await?;
-
-        // Model resolution: catalog lookup first, name heuristics on miss
+        // Model resolution: live catalog first, name heuristics on miss
         // (JS resolveModel; offline fallback when the catalog is unavailable).
-        let (_raw, provider) = resolve_model(&request.model, &request.credentials);
+        let (_raw, provider) = resolve_model(&request.model, &request.credentials).await;
         let mut provider_body = request.body.clone();
         let provider_request = build_provider_request(provider, &request.model, &mut provider_body);
 
@@ -430,7 +538,16 @@ impl ZedExecutor {
         });
 
         let url = format!("{ZED_LLM_BASE_URL}/completions");
-        let response = self.post_completions(&url, &llm_token, &payload).await?;
+        // Zed rejects a stale bearer with a 401, or with an expiry header on an
+        // otherwise-200 response. Re-mint once and replay the identical payload
+        // — the reference retries exactly once, so a second failure is real
+        // (zedAuth.js:314-317).
+        let llm_token = self.resolve_llm_token(&request.credentials, false).await?;
+        let mut response = self.post_completions(&url, &llm_token, &payload).await?;
+        if should_refresh_zed_llm_token(response.status(), response.headers()) {
+            let refreshed = self.resolve_llm_token(&request.credentials, true).await?;
+            response = self.post_completions(&url, &refreshed, &payload).await?;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -502,13 +619,120 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_model_uses_catalog_provider() {
+    #[tokio::test]
+    async fn resolve_model_uses_catalog_provider() {
         let conn = conn_with_models(json!([
             { "id": "claude-sonnet-4", "provider": "anthropic" },
             { "id": "grok-4", "provider": "x_ai" },
         ]));
-        let (raw, provider) = resolve_model("grok-4", &conn);
+        let (raw, provider) = resolve_model("grok-4", &conn).await;
+        assert_eq!(provider, ZedProvider::XAi);
+        assert_eq!(
+            raw.as_ref()
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str),
+            Some("grok-4")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_model_falls_back_to_heuristics() {
+        let conn = conn_with_models(json!([]));
+        let (raw, provider) = resolve_model("claude-opus-4-1", &conn).await;
+        assert!(raw.is_none());
+        assert_eq!(provider, ZedProvider::Anthropic);
+    }
+
+    #[test]
+    fn zed_llm_cache_key_uses_user_org_and_token_tail() {
+        assert_eq!(
+            zed_auth::zed_llm_cache_key("u1", "o1", "abcdefghijklmnopqrstuvwxyz"),
+            "u1:o1:klmnopqrstuvwxyz"
+        );
+        assert_eq!(
+            zed_auth::zed_llm_cache_key("u1", "", "abcdefghijklmnopqrstuvwxyz"),
+            "u1:default:klmnopqrstuvwxyz"
+        );
+        // Short tokens keep every byte — no slicing panic, no borrow-boundary bug.
+        assert_eq!(zed_auth::zed_llm_cache_key("u1", "o1", "abc"), "u1:o1:abc");
+    }
+
+    #[test]
+    fn should_refresh_zed_llm_token_fires_on_401_and_expiry_headers() {
+        let header = |name: &'static str| {
+            let mut h = HeaderMap::new();
+            h.insert(name, HeaderValue::from_static("1"));
+            h
+        };
+        assert!(should_refresh_zed_llm_token(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &HeaderMap::new()
+        ));
+        assert!(should_refresh_zed_llm_token(
+            reqwest::StatusCode::OK,
+            &header(zed_auth::ZED_HEADER_EXPIRED_TOKEN)
+        ));
+        assert!(should_refresh_zed_llm_token(
+            reqwest::StatusCode::OK,
+            &header(zed_auth::ZED_HEADER_OUTDATED_TOKEN)
+        ));
+        assert!(!should_refresh_zed_llm_token(
+            reqwest::StatusCode::OK,
+            &HeaderMap::new()
+        ));
+    }
+
+    #[test]
+    fn zed_completions_headers_match_9router() {
+        let headers = ZedExecutor::completions_headers("tok").unwrap();
+        assert_eq!(headers[ACCEPT], ZED_ACCEPT);
+        assert!(!headers[USER_AGENT].is_empty());
+        assert_eq!(headers["x-zed-version"], ZED_APP_VERSION);
+        // Sent on /models only, never on /completions.
+        assert!(!headers.contains_key(zed_auth::ZED_HEADER_CLIENT_SUPPORTS_XAI));
+    }
+
+    #[test]
+    fn zed_capability_headers_use_true_not_one() {
+        let headers = ZedExecutor::completions_headers("tok").unwrap();
+        for name in [
+            zed_auth::ZED_HEADER_CLIENT_SUPPORTS_STATUS,
+            zed_auth::ZED_HEADER_CLIENT_SUPPORTS_STREAM_ENDED,
+        ] {
+            assert_eq!(headers[name], "true", "{name} must negotiate with \"true\"");
+            assert_ne!(headers[name], "1");
+        }
+        assert_eq!(ZED_BOOL_HEADER_VALUE, "true");
+    }
+
+    #[tokio::test]
+    async fn write_zed_models_psd_round_trips_through_the_offline_resolver() {
+        let mut catalog = zed_auth::ZedModelCatalog {
+            models: vec![],
+            raw_by_id: std::collections::HashMap::new(),
+            default_model: String::new(),
+            default_fast_model: String::new(),
+            recommended_models: vec![],
+        };
+        catalog.raw_by_id.insert(
+            "grok-4".to_string(),
+            json!({ "id": "grok-4", "provider": "x_ai" }),
+        );
+        catalog.raw_by_id.insert(
+            "claude-sonnet-4".to_string(),
+            json!({ "id": "claude-sonnet-4", "provider": "anthropic" }),
+        );
+
+        let mut psd = std::collections::BTreeMap::new();
+        write_zed_models_psd(&mut psd, &catalog);
+
+        let mut conn = ProviderConnection {
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        // A default ProviderConnection carries no access token, so resolve_model
+        // skips the live fetch and must resolve from what we just wrote.
+        let (raw, provider) = resolve_model("grok-4", &conn).await;
         assert_eq!(provider, ZedProvider::XAi);
         assert_eq!(
             raw.as_ref()
@@ -519,11 +743,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_falls_back_to_heuristics() {
-        let conn = conn_with_models(json!([]));
-        let (raw, provider) = resolve_model("claude-opus-4-1", &conn);
-        assert!(raw.is_none());
-        assert_eq!(provider, ZedProvider::Anthropic);
+    fn map_zed_model_normalizes_ids_and_falls_back_to_id() {
+        let mapped = zed_auth::map_zed_model(&json!({ "id": ["arr-id"], "provider": "anthropic" }))
+            .expect("array id normalises");
+        assert_eq!(mapped["id"], "arr-id");
+        assert_eq!(mapped["name"], "arr-id", "name falls back to the id");
+        assert_eq!(mapped["supportsTools"], json!(false));
+
+        let wrapped = zed_auth::map_zed_model(&json!({ "id": { "id": "wrapped" } })).unwrap();
+        assert_eq!(wrapped["id"], "wrapped");
+
+        assert!(zed_auth::map_zed_model(&json!({ "display_name": "nameless" })).is_none());
     }
 
     #[test]
