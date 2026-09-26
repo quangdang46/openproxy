@@ -470,6 +470,70 @@ amp --model "{{model}}"
       },
     ],
   },
+  devin: {
+    id: "devin",
+    name: "Devin CLI",
+    image: "/providers/devin-cli.png",
+    color: "#6366F1",
+    description: "Cognition Devin CLI — local binary called by the Devin CLI provider via ACP/stdio",
+    configType: "guide",
+    notes: [
+      { type: "info", text: "This is a local dependency, not a routed CLI. The Devin CLI provider spawns `devin acp --agent-type summarizer` and relays its output." },
+      { type: "warning", text: "Install the Devin CLI from https://cli.devin.ai and run `devin auth login` — without it, the provider returns a spawn error on first request." },
+    ],
+    guideSteps: [
+      { step: 1, title: "Install Devin CLI", desc: "Install via the official installer at https://cli.devin.ai." },
+      { step: 2, title: "Authenticate", desc: "Log in once so the binary stores its own credentials." },
+      { step: 3, title: "Use the provider", desc: "Pick any Devin CLI model under the Providers tab — no API key field needed." },
+    ],
+    codeBlock: {
+      language: "bash",
+      code: `# Install Devin CLI (see https://cli.devin.ai for options)
+devin auth login
+
+# Verify detection (optional)
+devin --version`,
+    },
+  },
+  opendesign: {
+    id: "opendesign",
+    name: "OpenDesign",
+    image: "/providers/opendesign.png",
+    color: "#7C3AED",
+    description: "OpenDesign — claude.ai/design open-sourced! Agent-native design skills pack",
+    docsUrl: "https://github.com/manalkaff/opendesign",
+    configType: "guide",
+    notes: [
+      { type: "info", text: "OpenDesign ships as a plugin/skills pack installed into Claude Code, Cursor, OpenAI Codex, Gemini CLI, or OpenCode. It inherits the host agent's model config, so once your host points at OpenProxy, /opendesign design sessions route through OpenProxy automatically — no extra env vars needed." },
+      { type: "info", text: "Invoke with /opendesign <brief>. Covers decks, wireframes, interactive prototypes, design-system extraction, and brand systems, with a verifier subagent that checks output against the brief." },
+    ],
+    guideSteps: [
+      { step: 1, title: "Install the plugin", desc: "Pick your host below and run the matching install command from the matrix." },
+      { step: 2, title: "No config needed", desc: "OpenDesign runs inside your host agent and uses its model config. If the host already routes through OpenProxy, /opendesign traffic does too." },
+      { step: 3, title: "Start designing", desc: "Invoke OpenDesign from your agent:", value: "/opendesign make a pitch deck for a seed-stage AI company, 10 slides", copyable: true },
+    ],
+    codeBlock: {
+      language: "bash",
+      code: `# Claude Code
+/plugin marketplace add manalkaff/opendesign
+/plugin install opendesign@opendesign
+
+# Cursor
+/add-plugin opendesign
+
+# OpenAI Codex CLI
+/plugins   # search "opendesign" -> Install Plugin
+
+# OpenAI Codex App
+# Plugins sidebar -> OpenDesign (Design section) -> +
+
+# Gemini CLI
+gemini extensions install https://github.com/manalkaff/opendesign
+
+# OpenCode
+# Fetch and follow .opencode/INSTALL.md from the repo`,
+    },
+  },
 };
 
 interface ProviderConnection {

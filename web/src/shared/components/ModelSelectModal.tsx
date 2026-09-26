@@ -714,8 +714,6 @@ export default function ModelSelectModal({
             </div>
 
             <div
-              role="listbox"
-              aria-multiselectable={selectionMode === "multi"}
               aria-label="Available models"
               className="flex flex-wrap gap-1.5">
               {group.models.map((model) => {
@@ -733,51 +731,16 @@ export default function ModelSelectModal({
                   else handleSelect(model);
                 };
                 return (
-                  <div
-                    key={model.value}
-                    onClick={rowClick}
-                    // Release-readiness blocker B7: this row was a bare
-                    // <div onClick>, with no tabIndex, no role and no key
-                    // handler, so a keyboard-only user could not focus or
-                    // select a model at all. In single-select mode no checkbox
-                    // renders, so the div was the ONLY selection affordance —
-                    // WCAG 2.1.1 failed outright on the judge-model picker,
-                    // the media combo picker and the opencode subagent picker.
-                    // A div carrying role="option" is the standard listbox
-                    // pattern; converting the wrapper to <button> was rejected
-                    // because the star button and the multi-select checkbox are
-                    // nested inside it, and interactive content inside a
-                    // button is invalid HTML.
-                    role="option"
-                    aria-selected={isMultiSelected || isSingleSelected}
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        rowClick();
-                      }
-                    }}
-                    title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
-                    className={`
-                      inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
-                      ${isPlaceholder
-                        ? "border-dashed border-border text-text-muted hover:border-primary/50 hover:text-primary bg-surface italic"
-                        : isMultiSelected
-                          ? "border-primary bg-primary/10 text-text-main"
-                          : isSingleSelected
-                            ? "bg-primary text-white border-primary"
-                            : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
-                      }
-                    `}
-                  >
+                  // A native button is the whole affordance: Enter and Space
+                  // come free, it announces as a button, and it is one tab stop
+                  // per model. The star and the multi-select checkbox are
+                  // siblings — interactive content may not nest inside a button.
+                  <div className="inline-flex items-center gap-0.5" key={model.value}>
                     {isLlm && (
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleFavorite(favAlias, model.id);
-                        }}
-                        className="shrink-0 rounded p-0.5 -ml-1 hover:bg-black/5 dark:hover:bg-white/5"
+                        onClick={() => toggleFavorite(favAlias, model.id)}
+                        className="shrink-0 rounded p-0.5 hover:bg-black/5 dark:hover:bg-white/5"
                         title={fav ? "Remove from favorites" : "Add to favorites"}
                         aria-label={fav ? "Remove from favorites" : "Add to favorites"}
                       >
@@ -791,11 +754,27 @@ export default function ModelSelectModal({
                         type="checkbox"
                         checked={isMultiSelected}
                         onChange={() => toggleSelect(model.value)}
-                        onClick={(e) => e.stopPropagation()}
                         className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary shrink-0"
                         aria-label={`Select ${model.name}`}
                       />
                     )}
+                    <button
+                      type="button"
+                      onClick={rowClick}
+                      aria-pressed={isMultiSelected || isSingleSelected}
+                      title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
+                      className={`
+                        inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
+                        ${isPlaceholder
+                          ? "border-dashed border-border text-text-muted hover:border-primary/50 hover:text-primary bg-surface italic"
+                          : isMultiSelected
+                            ? "border-primary bg-primary/10 text-text-main"
+                            : isSingleSelected
+                              ? "bg-primary text-white border-primary"
+                              : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
+                        }
+                      `}
+                    >
                     {isPlaceholder ? (
                       <span className="flex items-center gap-1">
                         <span className="material-symbols-outlined text-[11px]">edit</span>
@@ -813,6 +792,7 @@ export default function ModelSelectModal({
                         <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isMultiSelected || isSingleSelected ? "text-white/80" : undefined} />
                       </span>
                     )}
+                    </button>
                   </div>
                 );
               })}

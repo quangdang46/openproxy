@@ -4,6 +4,9 @@ import { useState } from "react";
 import type { ChangeEvent } from "react";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 import { planBulkAdd } from "@/shared/utils/bulkAdd";
+import { AI_PROVIDERS } from "@/shared/constants/providers";
+import type { ProviderRegionConfig } from "@/shared/constants/providers";
+import type { Provider } from "@/types";
 
 interface ProxyPool {
   id: string;
@@ -35,7 +38,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const isCookie = authType === "cookie";
   const isAzure = provider === "azure";
   const isCloudflareAi = provider === "cloudflare-ai";
-  const isXiaomiTokenplan = provider === "xiaomi-tokenplan";
+  const providerCfg = (provider ? AI_PROVIDERS[provider] : undefined) as (Provider & ProviderRegionConfig) | undefined;
+  const providerRegions = providerCfg?.regions || null;
+  const defaultRegion = providerCfg?.defaultRegion || providerRegions?.[0]?.id || "";
   const isXaiApiKey = provider === "xai" && !isCookie;
   const credentialLabel = isCookie ? "Cookie Value" : "API Key";
   const credentialPlaceholder = isCookie
@@ -57,7 +62,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
-  const [xiaomiRegion, setXiaomiRegion] = useState<string>("sgp");
+  const [region, setRegion] = useState<string>(defaultRegion);
   const [validating, setValidating] = useState<boolean>(false);
   const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
@@ -142,8 +147,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     if (isCloudflareAi) {
       return { accountId: cloudflareData.accountId };
     }
-    if (isXiaomiTokenplan) {
-      return { region: xiaomiRegion };
+    if (providerRegions && region) {
+      return { region };
     }
     return undefined;
   };
@@ -373,23 +378,13 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             </p>
           </div>
         )}
-        {isXiaomiTokenplan && (
-          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
-            <h3 className="font-semibold mb-3 text-sm">Xiaomi MiMo Token Plan Region</h3>
-            <Select
-              label="Region"
-              value={xiaomiRegion}
-              onChange={(e: ChangeEvent<HTMLSelectElement>) => setXiaomiRegion(e.target.value)}
-              options={[
-                { value: "sgp", label: "Singapore" },
-                { value: "cn", label: "China" },
-                { value: "ams", label: "Europe" },
-              ]}
-            />
-            <p className="text-xs text-text-muted mt-2">
-              Token Plan keys are cluster-specific. Select the region matching your subscription.
-            </p>
-          </div>
+        {providerRegions && (
+          <Select
+            label="Region"
+            value={region}
+            onChange={(e: ChangeEvent<HTMLSelectElement>) => setRegion(e.target.value)}
+            options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
+          />
         )}
         {isAzure && (
           <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
