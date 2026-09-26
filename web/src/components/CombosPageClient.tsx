@@ -182,6 +182,34 @@ export default function CombosPage() {
     setDeleteTarget(combo);
   };
 
+  // Member order IS the fallback priority, so the card reorders in place the
+  // same way the capacity-adapter pools do.
+  const handleReorderModels = async (combo: Combo, from: number, to: number) => {
+    if (to < 0 || to >= combo.models.length || from === to) return;
+    const models = [...combo.models];
+    [models[from], models[to]] = [models[to], models[from]];
+    try {
+      const res = await fetch(`/api/combos/${combo.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: combo.name,
+          models,
+          disabledModels: combo.disabledModels || [],
+        }),
+      });
+      if (res.ok) {
+        await fetchData();
+      } else {
+        const err = await res.json();
+        notify.error(err.error || "Failed to reorder combo");
+      }
+    } catch (error) {
+      notify.error("Failed to reorder combo");
+      console.log("Error reordering combo:", error);
+    }
+  };
+
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -300,6 +328,7 @@ export default function CombosPage() {
               onCopy={copy}
               onEdit={() => setEditingCombo(combo)}
               onDelete={() => handleDelete(combo)}
+              onReorder={(from, to) => handleReorderModels(combo, from, to)}
               strategy={normalizeStrategy(comboStrategies[combo.name])}
               onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
               getCaps={getCaps}
@@ -360,6 +389,7 @@ interface ComboCardProps {
   onCopy: (name: string, id: string) => void;
   onEdit: () => void;
   onDelete: () => void;
+  onReorder: (from: number, to: number) => void;
   strategy: ComboStrategyConfig;
   onSetStrategy: (patch: Partial<ComboStrategyConfig>) => void;
   getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
@@ -372,6 +402,7 @@ function ComboCard({
   onCopy,
   onEdit,
   onDelete,
+  onReorder,
   strategy,
   onSetStrategy,
   getCaps,
@@ -422,13 +453,15 @@ function ComboCard({
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                combo.models.slice(0, 3).map((model, index) => {
+                combo.models.map((model, index) => {
                   const isDisabled = disabled.includes(model);
                   const isQuarantined = quarantined.some((q) => q.model === model);
+                  const isFirst = index === 0;
+                  const isLast = index === combo.models.length - 1;
                   return (
                     <code
-                      key={index}
-                      className={`inline-flex max-w-full items-center gap-1 truncate rounded px-1.5 py-0.5 font-mono text-[10px] sm:max-w-[220px] ${
+                      key={`${model}-${index}`}
+                      className={`inline-flex max-w-full items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] sm:max-w-[220px] ${
                         isDisabled
                           ? "bg-red-500/10 text-red-500 line-through"
                           : isQuarantined
@@ -440,17 +473,20 @@ function ComboCard({
                           ? "Disabled — never dispatched"
                           : isQuarantined
                             ? "Cooling down after recent failure"
-                            : undefined
+                            : "Fallback priority — higher is tried first"
                       }
                     >
                       <span className="truncate">{model}</span>
                       {getCaps && <CapacityBadges caps={getCaps(model)} size={11} colorOverride="text-text-muted/70" />}
+                      <button onClick={() => onReorder(index, index - 1)} disabled={isFirst} className={`leading-none ${isFirst ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`} title="Move up">
+                        <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
+                      </button>
+                      <button onClick={() => onReorder(index, index + 1)} disabled={isLast} className={`leading-none ${isLast ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`} title="Move down">
+                        <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
+                      </button>
                     </code>
                   );
                 })
-              )}
-              {combo.models.length > 3 && (
-                <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>
               )}
               {(disabled.length > 0 || quarantined.length > 0) && (
                 <div className="ml-1 flex items-center gap-1">

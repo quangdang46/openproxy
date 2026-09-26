@@ -59,11 +59,14 @@ Decision logs: `target: openproxy::chat|translator|combo|fusion|github`.
 | SSRF checks on image prefetch | Security |
 | Fail-loud missing credentials | Avoid `Bearer undefined` |
 | Refresh dedup does not cache null failures | 9router bug |
-| Combo quarantine + RR capacity pre-skip | Reliability (CLI hang) |
+| Combo quarantine (operator mute + auto-quarantine) | Reliability (CLI hang) |
 | Encrypted SQLite secrets | Security |
 | **PXPIPE token-saver** | Optional JS image-context compressor; requires external `pxpipe-proxy`. Not ported — use RTK + Headroom + Caveman/Ponytail. |
 | **Hedging / Shadow / Auto-combo** | Modules scaffolded under `src/core/combo/{hedging,shadow,auto_combo}.rs`; chat dispatcher maps unknown names to **fallback** until product demand. |
-| Combo capacity precheck | OpenProxy skips saturated members; optional future gate `capacity_precheck=false` for 9router try-anyway. |
+| **ModelSelectModal multi-select extras** | The provider-outline jump row and the `n selected / Close / Apply N` footer render only when `selectionMode="multi"` (the OpenCode CLI-tools config). 9router's modal is `footer={null}` with no outline row; the single-select render now matches it exactly. |
+| **ModelSelectModal hint bar text** | Restored verbatim from 9router ("Click to add, click again to remove. Changes are saved automatically."). |
+| **Embeddings combo rejection message** | 9router returns `Invalid model format`; OpenProxy returns `Combos not supported for embeddings` (400 either way, identical body shape). OpenProxy's wording names the route, and its text is strictly more actionable in the dashboard's Example card. The shared media resolver rejects combos for image/tts/stt too, where 9router expands them instead — so the shared text is left alone rather than narrowed to embeddings. |
+| **Combo Retry-After on the final error** | 9router sources `earliestRetryAfter` from the member's JSON body (combo.js:319), and its own `unavailableResponse` puts the value in the `Retry-After` *header* with no body field — so in practice 9router never emits the header on a combo failure. OpenProxy sources it the same way now, which means the header appears only when a member body genuinely carries `retryAfter`. |
 | Bare-name prefix routing | `infer_provider_from_model_name` mirrors 9router's `MODEL_PREFIX_PROVIDERS` exactly, so a bare `grok-4` / `command-r-plus` / `mistral-large` / `jamba-*` goes to `openai` — 9router's fallback — not to the native vendor. Sending a bare name to the vendor that serves it is tempting, but 9router is canonical, and the `jamba-*` arm in particular could only dead-end: `ai21` is configurable as an API-key provider but has no entry in the merged catalog, so no `jamba-*` name could resolve through it. `grok-build` still reaches `gcli` through the built-in alias. |
 
 ## Key pipeline (current)

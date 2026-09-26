@@ -319,7 +319,7 @@ async fn combo_test_model_reports_unconfigured_provider_as_failure() {
         settings.require_login = false;
         state.settings = settings;
         // No provider node and no connection for `unconfigured/*`, so the
-        // chat dispatcher rejects the request in-process with a 400.
+        // chat dispatcher rejects the request in-process with a 404.
     })
     .await
     .expect("seed db");
@@ -348,11 +348,11 @@ async fn combo_test_model_reports_unconfigured_provider_as_failure() {
 
     assert_eq!(
         json["ok"], false,
-        "an in-process 400 rejection is not a model answer: {json}"
+        "an in-process 404 rejection is not a model answer: {json}"
     );
     let error = json["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("No credentials for provider"),
+        error.contains("No active credentials for provider"),
         "the operator must see why the probe failed: {json}"
     );
 }

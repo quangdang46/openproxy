@@ -362,6 +362,20 @@ impl ComboStrategyEntry {
         }
     }
 
+    /// The entry's strategy *value*, or `None` when it carries none.
+    ///
+    /// 9router resolves the override with a value test
+    /// (`comboStrategies[model]?.fallbackStrategy || settings.comboStrategy`,
+    /// chat.js:100-101), so an entry holding only `judgeModel` / `fusionTuning`
+    /// must fall through to the global default rather than pin "fallback".
+    /// Mirrors [`ProviderStrategyEntry::fallback_strategy`].
+    pub fn strategy_value(&self) -> Option<&str> {
+        match self {
+            Self::Name(s) => Some(s.as_str()),
+            Self::Config(c) => c.fallback_strategy.as_deref().filter(|s| !s.is_empty()),
+        }
+    }
+
     pub fn judge_model(&self) -> Option<&str> {
         match self {
             Self::Config(c) => c.judge_model.as_deref().filter(|s| !s.is_empty()),
@@ -804,7 +818,11 @@ impl Default for Settings {
             saml_attribute_name: String::new(),
             client_ping_url: String::new(),
             client_ping_any: false,
-            capacity_adapter: json!({}),
+            // 9router settingsRepo.js:20-25 seeds all four pools; vision and
+            // audioInput start enabled. An empty object read as "every pool
+            // absent", which `get_capacity_adapter_config` resolves to
+            // disabled — so a fresh install had no adapter at all.
+            capacity_adapter: default_capacity_adapter(),
             extra: BTreeMap::new(),
         }
     }
@@ -1074,6 +1092,19 @@ fn default_sticky_round_robin_limit() -> u32 {
 
 fn default_combo_strategy() -> String {
     "fallback".into()
+}
+
+/// The four capability pools 9router seeds on a fresh install
+/// (`settingsRepo.js:20-25`), in `CAPABILITY_KEYS` order. Only vision and
+/// audioInput start enabled; each pool falls back to
+/// `capacity_adapter::DEFAULT_FALLBACK_MODEL` until the operator picks models.
+fn default_capacity_adapter() -> Value {
+    json!({
+        "vision": { "enabled": true, "roundRobin": false, "models": [] },
+        "pdf": { "enabled": false, "roundRobin": false, "models": [] },
+        "audioInput": { "enabled": true, "roundRobin": false, "models": [] },
+        "videoInput": { "enabled": false, "roundRobin": false, "models": [] },
+    })
 }
 
 fn default_fallback_strategy() -> String {
@@ -1508,5 +1539,61 @@ mod provider_strategy_tests {
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["fallbackStrategy"], "sticky");
         assert_eq!(v["stickyRoundRobinLimit"], 7);
+    }
+}
+
+#[cfg(test)]
+mod combo_capacity_adapter_tests {
+    use super::*;
+
+    /// 9router `settingsRepo.js:20-25` seeds all four capability pools.
+    /// Seeding `{}` made `get_capacity_adapter_config` resolve every pool as
+    /// disabled, so a fresh install had no vision/audio adapter at all.
+    #[test]
+    fn default_settings_seeds_capacity_adapter_pools() {
+        let adapter = Settings::default().capacity_adapter;
+        let pools = adapter.as_object().expect("capacityAdapter is an object");
+        let mut keys: Vec<&String> = pools.keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["audioInput", "pdf", "videoInput", "vision"],
+            "9router seeds exactly these four pools"
+        );
+        assert_eq!(adapter["vision"]["enabled"], json!(true));
+        assert_eq!(adapter["audioInput"]["enabled"], json!(true));
+        assert_eq!(adapter["pdf"]["enabled"], json!(false));
+        assert_eq!(adapter["videoInput"]["enabled"], json!(false));
+        for cap in crate::core::combo::capacity_adapter::CAPABILITY_KEYS {
+            assert_eq!(adapter[cap]["roundRobin"], json!(false), "{cap}");
+            assert_eq!(adapter[cap]["models"], json!([]), "{cap}");
+        }
+    }
+
+    /// A `comboStrategies` entry carrying no `fallbackStrategy` reports `None`
+    /// so the dispatcher falls through to the global `comboStrategy` — 9router
+    /// tests the VALUE, not the entry (chat.js:100-101).
+    #[test]
+    fn combo_strategy_entry_strategy_value_is_value_tested() {
+        let judge_only = ComboStrategyEntry::Config(ComboStrategyConfig {
+            judge_model: Some("gpt-4o-mini".into()),
+            ..Default::default()
+        });
+        assert_eq!(judge_only.strategy_value(), None);
+        assert_eq!(
+            judge_only.strategy_name(),
+            "fallback",
+            "strategy_name still defaults where a bare name is the right answer"
+        );
+
+        let explicit = ComboStrategyEntry::Config(ComboStrategyConfig {
+            fallback_strategy: Some("fallback".into()),
+            ..Default::default()
+        });
+        assert_eq!(explicit.strategy_value(), Some("fallback"));
+        assert_eq!(
+            ComboStrategyEntry::Name("fusion".into()).strategy_value(),
+            Some("fusion")
+        );
     }
 }

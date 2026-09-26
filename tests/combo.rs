@@ -186,7 +186,18 @@ async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
                     status: 401,
                     message: "no credentials".into(),
                     retry_after: Some(retry_after),
-                    upstream_body: None,
+                    // 9router combo.js:319 reads `retryAfter` out of the
+                    // member's JSON body, not off a Retry-After header.
+                    upstream_body: Some(
+                        serde_json::json!({
+                            "error": {
+                                "message": "no credentials",
+                                "retryAfter": retry_after.to_rfc3339(),
+                            }
+                        })
+                        .to_string()
+                        .into_bytes(),
+                    ),
                 })
             }
         },
@@ -200,10 +211,10 @@ async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
 }
 
 #[tokio::test]
-async fn round_robin_skips_busy_models_when_any_available() {
-    // RR rotation starts at "a"; "a" reports Busy, so we expect the handler
-    // to be invoked only with "b" (the first Available in rotation order)
-    // and never touch "a" or "c" (even though "c" is also Available).
+async fn round_robin_prefers_available_members_over_busy_ones() {
+    // RR rotation starts at "a"; "a" reports Busy, so it is ordered last and
+    // the handler is invoked with "b" (the first Available in rotation order)
+    // first. "c" is also Available but is never reached because "b" succeeds.
     let combo_name = "writer-skip-busy";
     reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -236,16 +247,18 @@ async fn round_robin_skips_busy_models_when_any_available() {
 }
 
 #[tokio::test]
-async fn round_robin_fails_fast_when_all_busy() {
-    // Every member reports Busy: the strategy must short-circuit with 503
-    // rather than burning latency on per-account fallback inside each
-    // saturated provider. This is the multi-repo "stuck agent" guard.
+async fn round_robin_attempts_every_member_when_all_are_busy() {
+    // 9router combo.js:298-305 awaits every rotated member unconditionally —
+    // capacity is never a filter, only an ordering preference. A saturated
+    // member still gets its inner per-account fallback a chance to land a free
+    // slot, and the caller's answer is the member's own 503 rather than a
+    // synthetic "all at capacity" that never dispatched anything.
     let combo_name = "writer-all-busy";
     reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string()];
 
-    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
-    let counter = attempts.clone();
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
 
     let error = execute_combo_strategy_with_capacity(
         &models,
@@ -253,20 +266,30 @@ async fn round_robin_fails_fast_when_all_busy() {
         ComboStrategy::RoundRobin,
         &[],
         |_| ModelCapacity::Busy,
-        move |_model| {
-            let counter = counter.clone();
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
             async move {
-                *counter.lock() += 1;
-                Ok::<_, ComboAttemptError>("should-not-run")
+                seen.lock().push(model.clone());
+                Err::<String, _>(ComboAttemptError {
+                    status: 503,
+                    message: "All accounts are cooling down".into(),
+                    retry_after: None,
+                    upstream_body: None,
+                })
             }
         },
     )
     .await
-    .expect_err("expected 503 when every combo member is busy");
+    .expect_err("a busy member still answers with its own 503");
 
     assert_eq!(error.status, 503);
-    assert!(error.message.to_lowercase().contains("capacity"));
-    assert_eq!(*attempts.lock(), 0);
+    assert_eq!(error.message, "All accounts are cooling down");
+    assert_eq!(
+        attempts.lock().clone(),
+        vec!["a".to_string(), "b".to_string()],
+        "every member must get its turn even when capacity says all are busy"
+    );
 }
 
 #[tokio::test]

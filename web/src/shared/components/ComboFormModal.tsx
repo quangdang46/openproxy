@@ -53,9 +53,13 @@ interface ModelItemProps {
   disabled: boolean;
   testResult: ModelTestResult;
   quarantineSeconds?: number;
+  isFirst: boolean;
+  isLast: boolean;
   onEdit: (newVal: string) => void;
   onToggleDisabled: () => void;
   onTest: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   onDragStart: (index: number) => void;
   onDragEnter: (index: number) => void;
   onDragEnd: () => void;
@@ -71,9 +75,13 @@ function ModelItem({
   disabled,
   testResult,
   quarantineSeconds,
+  isFirst,
+  isLast,
   onEdit,
   onToggleDisabled,
   onTest,
+  onMoveUp,
+  onMoveDown,
   onDragStart,
   onDragEnter,
   onDragEnd,
@@ -128,9 +136,22 @@ function ModelItem({
           : ""
       }`}
     >
-      {/* Drag handle */}
+      {/* Drag handle. Focusable and arrow-keyable so reordering is reachable
+          without a mouse — model order IS the fallback priority. */}
       <span
-        className="material-symbols-outlined text-text-muted/70 cursor-grab active:cursor-grabbing text-[14px] shrink-0 hover:text-primary"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            onMoveUp();
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            onMoveDown();
+          }
+        }}
+        aria-label={`Reorder ${model}. Use arrow keys to move.`}
+        className="material-symbols-outlined text-text-muted/70 cursor-grab active:cursor-grabbing text-[14px] shrink-0 hover:text-primary focus:outline-none focus:text-primary"
         title="Drag to reorder"
       >
         drag_indicator
@@ -191,6 +212,26 @@ function ModelItem({
           {quarantineSeconds}s
         </span>
       )}
+
+      {/* Reorder */}
+      <div className="flex shrink-0 items-center gap-0.5">
+        <button
+          onClick={onMoveUp}
+          disabled={isFirst}
+          className={`p-0.5 rounded ${isFirst ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
+          title="Move up"
+        >
+          <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
+        </button>
+        <button
+          onClick={onMoveDown}
+          disabled={isLast}
+          className={`p-0.5 rounded ${isLast ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
+          title="Move down"
+        >
+          <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
+        </button>
+      </div>
 
       {/* Test */}
       <button
@@ -408,6 +449,10 @@ export function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders
     setModels(next);
   };
 
+  const handleMoveUp = (index: number) => handleReorder(index, index - 1);
+
+  const handleMoveDown = (index: number) => handleReorder(index, index + 1);
+
   const handleSave = async () => {
     if (!validateName(name)) return;
     setSaving(true);
@@ -504,6 +549,8 @@ export function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders
                     disabled={disabledModels.includes(model)}
                     testResult={testResults[model] || { status: "idle" }}
                     quarantineSeconds={quarantine[model]}
+                    isFirst={index === 0}
+                    isLast={index === models.length - 1}
                     onEdit={(newVal) => {
                       const updated = [...models];
                       updated[index] = newVal;
@@ -516,6 +563,8 @@ export function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders
                     }}
                     onToggleDisabled={() => toggleDisabled(model)}
                     onTest={() => runTest(model)}
+                    onMoveUp={() => handleMoveUp(index)}
+                    onMoveDown={() => handleMoveDown(index)}
                     onDragStart={setDragIndex}
                     onDragEnter={setDragOverIndex}
                     onDragEnd={() => {
@@ -567,6 +616,7 @@ export function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders
         onClose={() => setShowModelSelect(false)}
         onSelect={handleAddModel}
         selectedModel={models}
+        addedModelValues={models}
         closeOnSelect={false}
         activeProviders={activeProviders}
         modelAliases={modelAliases}

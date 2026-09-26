@@ -574,17 +574,15 @@ async fn chat_completions_impl(
                 // operator muted, and members already parked in the
                 // auto-quarantine map, even though the Combos page renders
                 // them as "Disabled — never dispatched" / "cooling down".
+                // Health is deliberately NOT a gate here either: 9router
+                // discovers a degraded provider inside the per-panel attempt
+                // (combo.js:298-305), so the panel still gets its turn once
+                // the provider has recovered.
                 let mut skip: HashSet<String> = disabled_members.iter().cloned().collect();
                 skip.extend(
                     combo_quarantine_for(&combo_name)
                         .into_iter()
                         .map(|(model, _)| model),
-                );
-                skip.extend(
-                    combo_models
-                        .iter()
-                        .filter(|model| crate::core::health::is_model_degraded(model))
-                        .cloned(),
                 );
                 let fusion_panels: Vec<String> = combo_models
                     .iter()
@@ -601,7 +599,7 @@ async fn chat_completions_impl(
                     return combo_error_response(ComboExecutionError {
                         status: if only_quarantine { 503 } else { 400 },
                         message: if only_quarantine {
-                            "All combo members are currently quarantined or degraded after recent failures"
+                            "All combo members are currently quarantined after recent failures"
                                 .into()
                         } else {
                             "All combo members are disabled".into()
@@ -1770,14 +1768,34 @@ async fn forward_with_provider_fallback(
                 }
             }
 
+            // 9router chat.js:237-249 splits these on what the credential
+            // lookup actually reported, not on `retry_after` alone:
+            //   * every account rate-limited → 503 + Retry-After
+            //   * nothing excluded → no account was ever attempted, so the
+            //     provider has no usable credential at all → 404
+            //   * otherwise the accounts were tried and ran out → 503
+            if retry_after.is_some() {
+                return Err(ComboAttemptError {
+                    status: 503,
+                    message: format!("All accounts for {provider}/{model} are cooling down"),
+                    retry_after,
+                    upstream_body: None,
+                });
+            }
+
+            if excluded.is_empty() {
+                return Err(ComboAttemptError {
+                    status: 404,
+                    message: format!("No active credentials for provider: {provider}"),
+                    retry_after: None,
+                    upstream_body: None,
+                });
+            }
+
             return Err(ComboAttemptError {
-                status: if retry_after.is_some() { 503 } else { 400 },
-                message: if retry_after.is_some() {
-                    format!("All accounts for {provider}/{model} are cooling down")
-                } else {
-                    format!("No credentials for provider: {provider}")
-                },
-                retry_after,
+                status: 503,
+                message: format!("All accounts for {provider}/{model} are unavailable"),
+                retry_after: None,
                 upstream_body: None,
             });
         };
@@ -5830,6 +5848,7 @@ fn bypass_response(model: &str, text: &str, stream: bool) -> Response {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashSet};
+    use std::sync::Arc;
 
     use axum::http::StatusCode;
     use bytes::Bytes;
@@ -6247,6 +6266,76 @@ mod tests {
 
         let rate_limited = check_fallback_error(429, "boom", 2);
         assert_eq!(super::next_backoff_level(&rate_limited, 2), 3);
+    }
+
+    async fn dispatch_without_credentials(
+        state: &crate::server::state::AppState,
+    ) -> super::ComboAttemptError {
+        let body = json!({"model": "gpt-4.1", "messages": []});
+        let plan = crate::core::chat::RequestPlan::new(
+            Some("/v1/chat/completions"),
+            &body,
+            "openai",
+            "gpt-4.1",
+        );
+        super::forward_with_provider_fallback(
+            state,
+            "openai",
+            "gpt-4.1",
+            body,
+            axum::http::HeaderMap::new(),
+            None,
+            None,
+            &plan,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a provider with no connection cannot dispatch")
+    }
+
+    // 9router chat.js:244-247: a provider with no usable credential and
+    // nothing excluded is a 404 `No active credentials for provider: X`. The
+    // dispatcher branched on `retry_after` instead, collapsing "never tried"
+    // into the same 400 as "exhausted" and reporting the wrong text.
+    #[tokio::test]
+    async fn no_usable_credentials_returns_404_not_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let state = crate::server::state::AppState::new(Arc::new(db));
+
+        let error = dispatch_without_credentials(&state).await;
+
+        assert_eq!(error.status, 404);
+        assert_eq!(error.message, "No active credentials for provider: openai");
+        assert!(error.retry_after.is_none());
+    }
+
+    /// A provider whose only account is locked out is *not* the 404 case: the
+    /// account was attempted, so the caller gets a 503 plus the retry window.
+    #[tokio::test]
+    async fn exhausted_accounts_still_return_503() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let state = crate::server::state::AppState::new(Arc::new(db));
+        state
+            .db
+            .update(|app| {
+                let mut locked = connection("locked", 1);
+                locked.rate_limited_until =
+                    Some((Utc::now() + ChronoDuration::seconds(120)).to_rfc3339());
+                app.provider_connections.push(locked);
+            })
+            .await
+            .unwrap();
+
+        let error = dispatch_without_credentials(&state).await;
+
+        assert_eq!(error.status, 503, "an exhausted account is not a 404");
+        assert!(
+            error.retry_after.is_some(),
+            "the cooling-down window must reach the caller"
+        );
     }
 
     #[tokio::test]

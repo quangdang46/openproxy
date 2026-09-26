@@ -102,6 +102,10 @@ static COMBO_ROTATION_STATE: Lazy<Mutex<HashMap<String, usize>>> =
 static COMBO_ROTATION_STICKY_COUNT: Lazy<Mutex<HashMap<String, u32>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Rotation slot for a round-robin dispatch that carries no combo name
+/// (9router combo.js:213 `comboName || "__default__"`).
+const DEFAULT_ROTATION_KEY: &str = "__default__";
+
 /// In-memory quarantine map keyed by `(combo_name, model)`. Members get
 /// added when [`mark_combo_member_quarantined`] is called and removed
 /// either when the TTL expires or via [`clear_combo_member_quarantine`] /
@@ -166,17 +170,26 @@ pub fn parse_combo_strategy(value: &str) -> ComboStrategy {
 ///
 /// Single source of truth for the chat, web-fetch, and CLI dispatch paths.
 pub fn strategy_for_combo(snapshot: &AppDb, combo_name: &str) -> ComboStrategy {
-    let value: String = if let Some(entry) = snapshot.settings.combo_strategies.get(combo_name) {
-        entry.strategy_name().to_string()
-    } else if let Some(combo) = snapshot.combos.iter().find(|c| c.name == combo_name) {
-        combo
-            .extra
-            .get("strategy")
+    // 9router resolves the override with a value test
+    // (`comboStrategies[model]?.fallbackStrategy || settings.comboStrategy`,
+    // chat.js:100-101), so an entry that exists but names no strategy — a
+    // judgeModel-only fusion config, say — must fall through rather than
+    // pin "fallback" and shadow the global setting.
+    let specific = snapshot
+        .settings
+        .combo_strategies
+        .get(combo_name)
+        .and_then(|entry| entry.strategy_value());
+    let value: String = match specific {
+        Some(name) => name.to_string(),
+        None => snapshot
+            .combos
+            .iter()
+            .find(|c| c.name == combo_name)
+            .and_then(|combo| combo.extra.get("strategy"))
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(|| snapshot.settings.combo_strategy.clone())
-    } else {
-        snapshot.settings.combo_strategy.clone()
+            .unwrap_or_else(|| snapshot.settings.combo_strategy.clone()),
     };
 
     parse_combo_strategy(&value)
@@ -609,12 +622,13 @@ pub fn get_rotated_models(
         return models.to_vec();
     }
 
-    let Some(combo_name) = combo_name else {
-        return models.to_vec();
-    };
+    // 9router combo.js:213 keys on `comboName || "__default__"`, so a
+    // round-robin dispatch that carries no combo name still rotates against one
+    // shared process-wide slot instead of silently running in declared order.
+    let key = combo_name.unwrap_or(DEFAULT_ROTATION_KEY);
 
     let mut state = COMBO_ROTATION_STATE.lock();
-    let current_index = *state.get(combo_name).unwrap_or(&0);
+    let current_index = *state.get(key).unwrap_or(&0);
     let mut rotated = models.to_vec();
 
     for _ in 0..current_index {
@@ -626,14 +640,14 @@ pub fn get_rotated_models(
 
     if sticky_limit > 1 {
         let mut sticky_counts = COMBO_ROTATION_STICKY_COUNT.lock();
-        let count = sticky_counts.entry(combo_name.to_string()).or_insert(0);
+        let count = sticky_counts.entry(key.to_string()).or_insert(0);
         *count += 1;
         if *count >= sticky_limit {
             *count = 0;
-            state.insert(combo_name.to_string(), (current_index + 1) % models.len());
+            state.insert(key.to_string(), (current_index + 1) % models.len());
         }
     } else {
-        state.insert(combo_name.to_string(), (current_index + 1) % models.len());
+        state.insert(key.to_string(), (current_index + 1) % models.len());
     }
 
     rotated
@@ -837,14 +851,12 @@ where
 ///    the next request doesn't immediately retry a known-broken model
 ///    and make the CLI agent appear to hang.
 ///
-/// When at least one rotated member reports `ModelCapacity::Available`, only
-/// those members are tried (in rotation order). Busy members are skipped
-/// entirely — otherwise a slow request against a saturated provider would
-/// pin the caller while it spins through the per-account inner fallback,
-/// which is the failure mode that makes multi-repo coding agents appear to
-/// hang. If every member is `Busy`, we fail fast with a 503 and surface
-/// the earliest known retry-after so the caller can back off instead of
-/// piling more load onto already-saturated providers.
+/// `RoundRobin` uses the capacity callback to put members with a free slot
+/// first, but every non-disabled, non-quarantined member is still attempted:
+/// 9router's `handleComboChat` awaits each member unconditionally
+/// (combo.js:298-305), and the per-account inner fallback inside a member can
+/// still land a slot that `capacity_check` wrote off. Members reporting
+/// `ModelCapacity::Busy` are tried last, in rotation order.
 ///
 /// `Fallback` strategy keeps its declared priority order for capacity —
 /// capacity is advisory only and we still attempt every non-disabled,
@@ -903,19 +915,17 @@ where
     // Manual disable + auto-quarantine pre-gate. Applied to the raw
     // member list *before* rotation so the round-robin index doesn't
     // burn turns on members that will never be dispatched to.
+    //
+    // No health pre-gate: 9router's handleComboChat has none (combo.js:298-305
+    // awaits every member unconditionally) and discovers a degraded provider
+    // INSIDE the per-member attempt, where `filter_available_accounts` already
+    // consults each connection's `degradedUntil`. Gating here dropped a
+    // configured member from a Fallback combo for the whole 5-minute degrade
+    // window even after the provider had recovered.
     let mut skip: HashSet<String> = disabled_members.iter().cloned().collect();
     if let Some(name) = combo_name {
         skip.extend(quarantined_members(name));
     }
-    // Health gate: skip members whose provider has *every* connection inside a
-    // degrade window (health daemon saw 429/503/5xx). Providers with no health
-    // record, or with at least one healthy account, are never skipped.
-    skip.extend(
-        models
-            .iter()
-            .filter(|model| crate::core::health::is_model_degraded(model))
-            .cloned(),
-    );
 
     let active: Vec<String> = models
         .iter()
@@ -933,8 +943,7 @@ where
         return Err(ComboExecutionError {
             status: if only_quarantine { 503 } else { 400 },
             message: if only_quarantine {
-                "All combo members are currently quarantined or degraded after recent failures"
-                    .into()
+                "All combo members are currently quarantined after recent failures".into()
             } else {
                 "All combo members are disabled".into()
             },
@@ -981,20 +990,21 @@ where
     }
 
     if strategy == ComboStrategy::RoundRobin && order.len() > 1 {
-        let available: Vec<String> = order
-            .iter()
-            .filter(|model| capacity_check(model.as_str()) == ModelCapacity::Available)
-            .cloned()
-            .collect();
-
-        if available.is_empty() {
-            return Err(ComboExecutionError {
-                status: 503,
-                message: "All combo providers are at max in-flight capacity".into(),
-                earliest_retry_after: None,
-                upstream_body: None,
-            });
+        // Capacity is an ORDERING preference, never a filter. 9router awaits
+        // every member unconditionally (combo.js:298-305); a saturated member
+        // that was dropped here never got its inner per-account fallback a
+        // chance to land a free slot, and an all-Busy rotation 503'd without
+        // attempting anything — losing the provider's own 503 + Retry-After.
+        let mut available: Vec<String> = Vec::with_capacity(order.len());
+        let mut busy: Vec<String> = Vec::with_capacity(order.len());
+        for model in order {
+            if capacity_check(model.as_str()) == ModelCapacity::Available {
+                available.push(model);
+            } else {
+                busy.push(model);
+            }
         }
+        available.extend(busy);
 
         return iterate_combo_models(&available, &mut handle_single_model).await;
     }
@@ -1028,7 +1038,16 @@ where
                         upstream_body: error.upstream_body.clone(),
                     });
                 }
-                if let Some(retry_after) = error.retry_after {
+                // 9router combo.js:319 reads `retryAfter` out of the member's
+                // JSON BODY — not off a Retry-After header, which its own
+                // `unavailableResponse` never puts in the body. Source the
+                // combo's retry signal the same way, so a member that only
+                // carries the header does not synthesise one here.
+                if let Some(retry_after) = error
+                    .upstream_body
+                    .as_deref()
+                    .and_then(parse_retry_after_from_body)
+                {
                     earliest_retry_after = match earliest_retry_after {
                         Some(current) if current <= retry_after => Some(current),
                         _ => Some(retry_after),
@@ -1527,5 +1546,324 @@ mod tests {
             check_fallback_error(400, "request not allowed", 0).cooldown,
             SHORT_COOLDOWN
         );
+    }
+
+    /// Dispatch every member through `handle` and record the order they were
+    /// attempted in.
+    async fn recorded_attempts(
+        models: &[String],
+        combo_name: Option<&str>,
+        strategy: ComboStrategy,
+        capacity: impl Fn(&str) -> ModelCapacity + Copy,
+        succeed: Option<&'static str>,
+    ) -> (Vec<String>, Result<(), ComboExecutionError>) {
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let recorder = attempted.clone();
+        let result = execute_combo_strategy_full(
+            models,
+            combo_name,
+            strategy,
+            &[],
+            1,
+            None,
+            &PricingTable::new(),
+            capacity,
+            move |model: &str| {
+                let recorder = recorder.clone();
+                let owned = model.to_string();
+                async move {
+                    recorder.lock().push(owned.clone());
+                    match succeed {
+                        Some(_) => Ok::<_, ComboAttemptError>(owned),
+                        None => Err(ComboAttemptError::new(503, "rate limited")),
+                    }
+                }
+            },
+        )
+        .await
+        .map(|_: String| ());
+        let order = attempted.lock().clone();
+        (order, result)
+    }
+
+    fn rotation_fixture() -> Vec<String> {
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    }
+
+    /// The rotation maps and the health registry are both process-global, and
+    /// these tests drive their clear-all forms, so they must not overlap.
+    fn global_state_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // 9router chat.js:100-101 resolves the per-combo override with
+    // `comboSpecificStrategy || settings.comboStrategy || "fallback"` — a
+    // value test. Testing the map ENTRY made a judgeModel-only fusion config
+    // pin "fallback" and shadow the global round-robin setting.
+    #[test]
+    fn strategy_less_combo_entry_falls_through_to_global() {
+        let mut snapshot = AppDb::default();
+        snapshot.settings.combo_strategy = "round-robin".into();
+        snapshot.settings.combo_strategies.insert(
+            "judged".into(),
+            crate::types::ComboStrategyEntry::Config(crate::types::ComboStrategyConfig {
+                judge_model: Some("openai/gpt-4o-mini".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            strategy_for_combo(&snapshot, "judged"),
+            ComboStrategy::RoundRobin,
+            "an entry with no fallbackStrategy must not mask the global default"
+        );
+    }
+
+    #[test]
+    fn combo_entry_with_fallback_strategy_wins() {
+        let mut snapshot = AppDb::default();
+        snapshot.settings.combo_strategy = "round-robin".into();
+        snapshot.settings.combo_strategies.insert(
+            "judged".into(),
+            crate::types::ComboStrategyEntry::Config(crate::types::ComboStrategyConfig {
+                fallback_strategy: Some("fallback".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            strategy_for_combo(&snapshot, "judged"),
+            ComboStrategy::Fallback
+        );
+    }
+
+    #[test]
+    fn combo_extra_strategy_still_second() {
+        let mut snapshot = AppDb::default();
+        snapshot.settings.combo_strategy = "round-robin".into();
+        snapshot
+            .combos
+            .push(combo_with_strategy("cheap", "cheapest"));
+
+        assert_eq!(
+            strategy_for_combo(&snapshot, "cheap"),
+            ComboStrategy::Cheapest
+        );
+    }
+
+    fn combo_with_strategy(name: &str, strategy: &str) -> crate::types::Combo {
+        let mut c = combo(name, &["openai/gpt-4o"]);
+        c.extra.insert("strategy".to_string(), json!(strategy));
+        c
+    }
+
+    // 9router combo.js:213 keys the rotation on `comboName || "__default__"`.
+    // The nameless early-return turned round-robin off entirely for callers
+    // that dispatch a rotation without a combo to attribute it to.
+    #[test]
+    fn nameless_round_robin_uses_default_slot() {
+        let _guard = global_state_guard();
+        reset_combo_rotation(None);
+        let models = rotation_fixture();
+
+        let first = get_rotated_models(&models, None, ComboStrategy::RoundRobin, 1);
+        let second = get_rotated_models(&models, None, ComboStrategy::RoundRobin, 1);
+
+        assert_eq!(first, models, "the first pass starts at the declared head");
+        assert_eq!(second, vec!["b", "c", "a"], "and then it rotates");
+        assert_eq!(rotation_index(DEFAULT_ROTATION_KEY), Some(2));
+    }
+
+    #[test]
+    fn nameless_rotation_resets_with_clear_all() {
+        let _guard = global_state_guard();
+        reset_combo_rotation(None);
+        let models = rotation_fixture();
+        get_rotated_models(&models, None, ComboStrategy::RoundRobin, 1);
+
+        reset_combo_rotation(None);
+
+        assert_eq!(rotation_index(DEFAULT_ROTATION_KEY), None);
+        assert_eq!(
+            get_rotated_models(&models, None, ComboStrategy::RoundRobin, 1),
+            models
+        );
+    }
+
+    // A `comboStrategies[name]` rotation entry must be cleared by
+    // `reset_combo_rotation(None)` — the form the settings PATCH uses.
+    #[test]
+    fn reset_combo_rotation_none_clears_all_keys() {
+        let _guard = global_state_guard();
+        reset_combo_rotation(None);
+        let models = rotation_fixture();
+        get_rotated_models(&models, Some("c1"), ComboStrategy::RoundRobin, 1);
+        get_rotated_models(&models, Some("c1"), ComboStrategy::RoundRobin, 1);
+        assert!(rotation_index("c1").is_some());
+
+        reset_combo_rotation(None);
+
+        assert!(rotation_index("c1").is_none());
+    }
+
+    // 9router's handleComboChat awaits every member (combo.js:298-305); a
+    // health pre-gate removed a degraded-but-recoverable member from the
+    // dispatch order for the whole degrade window, under Fallback too.
+    #[tokio::test]
+    async fn fallback_combo_still_attempts_health_degraded_member() {
+        use crate::core::health::health_registry;
+
+        let _guard = global_state_guard();
+
+        let registry = health_registry();
+        registry.clear_all();
+        registry.record_probe("conn-1", "openai", Some(503), None);
+        assert!(
+            crate::core::health::is_model_degraded("openai/gpt-4o"),
+            "fixture must actually be degraded"
+        );
+
+        let models = vec![
+            "openai/gpt-4o".to_string(),
+            "anthropic/claude-sonnet".to_string(),
+        ];
+        let (attempted, result) = recorded_attempts(
+            &models,
+            Some("degraded-combo"),
+            ComboStrategy::Fallback,
+            |_| ModelCapacity::Available,
+            None,
+        )
+        .await;
+        registry.clear_all();
+
+        assert_eq!(attempted, models, "both members are attempted in order");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn degraded_member_succeeds_when_provider_recovered() {
+        use crate::core::health::health_registry;
+
+        let _guard = global_state_guard();
+
+        let registry = health_registry();
+        registry.clear_all();
+        registry.record_probe("conn-1", "openai", Some(503), None);
+
+        let models = vec![
+            "openai/gpt-4o".to_string(),
+            "anthropic/claude-sonnet".to_string(),
+        ];
+        let (attempted, result) = recorded_attempts(
+            &models,
+            Some("recovered-combo"),
+            ComboStrategy::Fallback,
+            |_| ModelCapacity::Available,
+            Some("openai/gpt-4o"),
+        )
+        .await;
+        registry.clear_all();
+
+        assert_eq!(result, Ok(()), "the degraded member still gets its turn");
+        assert_eq!(attempted, vec!["openai/gpt-4o".to_string()]);
+    }
+
+    // P65-001: the RoundRobin capacity check used to be a filter, so an
+    // all-Busy rotation returned 503 without attempting a single member and
+    // with no Retry-After, and a partly-Busy one silently dropped the Busy
+    // members. 9router tries every member regardless.
+    #[tokio::test]
+    async fn roundrobin_attempts_saturated_members() {
+        let _guard = global_state_guard();
+        reset_combo_rotation(None);
+        let models = rotation_fixture();
+
+        let (attempted, result) = recorded_attempts(
+            &models,
+            Some("busy-combo"),
+            ComboStrategy::RoundRobin,
+            |_| ModelCapacity::Busy,
+            None,
+        )
+        .await;
+        reset_combo_rotation(None);
+
+        assert_eq!(
+            attempted, models,
+            "a saturated member is still attempted — the inner per-account \
+             fallback may land a free slot"
+        );
+        let error = result.expect_err("every member fails in this fixture");
+        assert_eq!(error.status, 503);
+    }
+
+    #[tokio::test]
+    async fn roundrobin_prefers_available_members_first() {
+        let _guard = global_state_guard();
+        reset_combo_rotation(None);
+        let models = rotation_fixture();
+
+        let (attempted, result) = recorded_attempts(
+            &models,
+            Some("mixed-combo"),
+            ComboStrategy::RoundRobin,
+            |m| {
+                if m == "a" {
+                    ModelCapacity::Available
+                } else {
+                    ModelCapacity::Busy
+                }
+            },
+            None,
+        )
+        .await;
+        reset_combo_rotation(None);
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempted,
+            vec!["a", "b", "c"],
+            "capacity reorders but never removes"
+        );
+    }
+
+    // P204-001: 9router reads `retryAfter` out of the member's JSON body
+    // (combo.js:319). `ComboAttemptError.retry_after` is the per-account
+    // Retry-After HEADER, which 9router's own `unavailableResponse` never puts
+    // in a body — so accumulating from it invented a retry signal.
+    #[tokio::test]
+    async fn combo_error_omits_header_only_retry_after() {
+        let models = vec!["a".to_string(), "b".to_string()];
+        let header_only = ComboAttemptError {
+            status: 503,
+            message: "rate limited".into(),
+            retry_after: Some(Utc::now() + chrono::Duration::seconds(90)),
+            upstream_body: Some(br#"{"error":{"message":"rate limited"}}"#.to_vec()),
+        };
+        let with_body = ComboAttemptError {
+            status: 503,
+            message: "rate limited".into(),
+            retry_after: None,
+            upstream_body: Some(
+                br#"{"error":{"message":"rate limited","retryAfter":"2030-01-01T00:00:00Z"}}"#
+                    .to_vec(),
+            ),
+        };
+
+        for (error, expect_retry) in [(header_only, false), (with_body, true)] {
+            let result = iterate_combo_models(&models, &mut |_: &str| {
+                let error = error.clone();
+                async move { Err::<String, _>(error) }
+            })
+            .await;
+            let failure = result.expect_err("both members fail in this fixture");
+            assert_eq!(
+                failure.earliest_retry_after.is_some(),
+                expect_retry,
+                "a header-only retry signal must not become the combo's"
+            );
+        }
     }
 }
