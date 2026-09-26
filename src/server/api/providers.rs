@@ -32,6 +32,12 @@ fn value_as_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
+/// 9router `KNOWN_FREE_OPENCODE_MODELS` (filters.js:1).
+const KNOWN_FREE_OPENCODE_MODELS: [&str; 1] = ["big-pickle"];
+/// 9router `DEAD_FREE_OPENCODE_MODELS` (filters.js:3) — upstream answers
+/// "Model is unavailable" for these, so offering them is offering a dead id.
+const DEAD_FREE_OPENCODE_MODELS: [&str; 1] = ["deepseek-v4-flash-free"];
+
 fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, String> {
     match kind {
         "openrouter-free" => {
@@ -59,11 +65,18 @@ fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, S
             });
             Ok(filtered)
         }
+        // 9router filters.js:1-6 keeps this as a named list, not a suffix test.
+        // "big-pickle" is free but has no -free suffix, and
+        // "deepseek-v4-flash-free" HAS the suffix but the upstream answers
+        // "Model is unavailable" for it, so a bare ends_with keeps offering a
+        // model that cannot be called. Confirmed live on this machine:
+        // oc/deepseek-v4-flash-free returns that error.
         "opencode-free" => Ok(values
             .iter()
             .filter_map(|value| {
                 let id = value.get("id").and_then(Value::as_str)?;
-                id.ends_with("-free").then(|| {
+                let is_free = id.ends_with("-free") || KNOWN_FREE_OPENCODE_MODELS.contains(&id);
+                (is_free && !DEAD_FREE_OPENCODE_MODELS.contains(&id)).then(|| {
                     json!({
                         "id": id,
                         "name": id,
@@ -71,6 +84,48 @@ fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, S
                 })
             })
             .collect()),
+        // models.dev returns a large catalog; keep only mimo models.
+        "mimo-free" => Ok(values
+            .iter()
+            .filter_map(|value| {
+                let id = value.get("id").and_then(Value::as_str)?;
+                let name = value.get("name").and_then(Value::as_str);
+                let hit = id.starts_with("mimo")
+                    || name.is_some_and(|n| n.to_ascii_lowercase().contains("mimo"));
+                hit.then(|| json!({"id": id, "name": name.unwrap_or(id)}))
+            })
+            .collect()),
+        "airforce-free" => {
+            let mut out: Vec<Value> = values
+                .iter()
+                .filter_map(|value| {
+                    let id = value.get("id").and_then(Value::as_str)?;
+                    let tier = value.get("tier").and_then(Value::as_str);
+                    let free = tier == Some("free") || id.ends_with(":free");
+                    let chat_ok = value.get("supports_chat").and_then(Value::as_bool) == Some(true);
+                    // No media_type, or a chat/text one — the upstream also
+                    // serves image and audio models that this route cannot use.
+                    let media_ok = value
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .is_none_or(|m| m == "chat" || m == "text");
+                    (free && chat_ok && media_ok).then(|| {
+                        json!({
+                            "id": id,
+                            "name": value.get("name").and_then(Value::as_str).unwrap_or(id),
+                            "contextLength": value.get("context_length").cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                })
+                .collect();
+            out.sort_by(|a, b| {
+                a.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .cmp(b.get("id").and_then(Value::as_str).unwrap_or_default())
+            });
+            Ok(out)
+        }
         _ => Err("Unknown filter type".to_string()),
     }
 }
@@ -1511,5 +1566,99 @@ mod tests {
         assert_eq!(reasoning_only_note(Some(&stopped)), None);
 
         assert_eq!(reasoning_only_note(None), None);
+    }
+}
+
+#[cfg(test)]
+mod suggested_model_filter_tests {
+    use super::*;
+
+    fn m(id: &str) -> Value {
+        json!({"id": id, "name": id})
+    }
+
+    /// "big-pickle" is free and has NO -free suffix, so a bare
+    /// `id.ends_with("-free")` dropped it. 9router keeps it in a named list
+    /// precisely because the suffix test is not the rule.
+    #[test]
+    fn big_pickle_is_offered_despite_having_no_free_suffix() {
+        let out = filter_suggested_models("opencode-free", &[m("big-pickle"), m("sonnet-free")])
+            .expect("filter");
+        assert_eq!(out.len(), 2, "big-pickle must survive: {out:?}");
+    }
+
+    /// The inverse, and the reason the list is named rather than derived:
+    /// `deepseek-v4-flash-free` HAS the suffix but the upstream answers
+    /// "Model is unavailable", so offering it means offering a dead id. This
+    /// was reproduced live against oc/deepseek-v4-flash-free.
+    #[test]
+    fn a_dead_free_model_is_withheld() {
+        let out = filter_suggested_models(
+            "opencode-free",
+            &[m("deepseek-v4-flash-free"), m("deepseek-v5-flash-free")],
+        )
+        .expect("filter");
+        let ids: Vec<&str> = out.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["deepseek-v5-flash-free"],
+            "dead id leaked: {ids:?}"
+        );
+    }
+
+    /// `mimo-free` was missing entirely, so web/src/shared/constants/providers.ts
+    /// declared a modelsFetcher of that type and every such provider answered
+    /// "Unknown filter type" — a 400 for the user.
+    #[test]
+    fn mimo_free_keeps_only_mimo_models() {
+        let values = vec![
+            json!({"id": "mimo-v2.5", "name": "MiMo V2.5"}),
+            json!({"id": "gpt-4o", "name": "GPT-4o"}),
+            json!({"id": "other-1", "name": "contains MiMo in the name"}),
+        ];
+        let out = filter_suggested_models("mimo-free", &values).expect("filter");
+        let ids: Vec<&str> = out.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["mimo-v2.5", "other-1"],
+            "name match must count: {ids:?}"
+        );
+    }
+
+    /// airforce-free: free tier AND chat-capable AND not a media model. The
+    /// upstream serves image and audio models too, and this route cannot use
+    /// them.
+    #[test]
+    fn airforce_free_excludes_media_models() {
+        let values = vec![
+            json!({"id": "chat:free", "tier": "free", "supports_chat": true, "context_length": 100}),
+            json!({"id": "img:free", "tier": "free", "supports_chat": true, "media_type": "image"}),
+            json!({"id": "paid", "tier": "paid", "supports_chat": true}),
+            json!({"id": "nochat:free", "tier": "free", "supports_chat": false}),
+        ];
+        let out = filter_suggested_models("airforce-free", &values).expect("filter");
+        let ids: Vec<&str> = out.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert_eq!(ids, vec!["chat:free"], "{ids:?}");
+        assert_eq!(out[0]["contextLength"], json!(100));
+    }
+
+    /// And the sort is by id, per filters.js — a provider whose catalog
+    /// arrives unordered should still render deterministically.
+    #[test]
+    fn airforce_free_sorts_by_id() {
+        let values = vec![
+            json!({"id": "z:free", "tier": "free", "supports_chat": true}),
+            json!({"id": "a:free", "tier": "free", "supports_chat": true}),
+        ];
+        let out = filter_suggested_models("airforce-free", &values).expect("filter");
+        let ids: Vec<&str> = out.iter().filter_map(|v| v["id"].as_str()).collect();
+        assert_eq!(ids, vec!["a:free", "z:free"]);
+    }
+
+    /// A filter openproxy does not implement must still refuse cleanly rather
+    /// than silently returning everything.
+    #[test]
+    fn an_unknown_filter_still_refuses() {
+        assert!(filter_suggested_models("nope", &[]).is_err());
     }
 }
