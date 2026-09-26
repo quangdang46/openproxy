@@ -26,7 +26,7 @@ use crate::core::combo::{
     check_fallback_error, combo_quarantine_for, detect_required_capabilities,
     execute_combo_strategy_full, get_combo_models_from_data, get_disabled_members_for_combo,
     mark_combo_member_quarantined, strategy_for_combo, ComboAttemptError, ComboExecutionError,
-    ComboStrategy, FusionConfig, ModelCapacity,
+    ComboStrategy, FallbackDecision, FusionConfig, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -2848,23 +2848,6 @@ async fn forward_with_provider_fallback(
                     upstream_body: raw_body,
                 });
 
-                // 404 (model not found) should set a model-specific lock without
-                // excluding the connection — other models on the same connection
-                // should still be routable.
-                if status.as_u16() == 404 {
-                    let model_cooldown = std::time::Duration::from_secs(300);
-                    mark_connection_unavailable(
-                        state,
-                        &connection.id,
-                        model,
-                        status.as_u16(),
-                        &message,
-                        model_cooldown,
-                        current_backoff,
-                    )
-                    .await;
-                }
-
                 // Token refresh: on 401/403, try to refresh the access token
                 // before giving up on this connection (9router parity).
                 // On success, merge credentials (expires_at, refresh, PSD) and
@@ -2919,8 +2902,15 @@ async fn forward_with_provider_fallback(
                                         );
                                         conn.last_error = None;
                                         conn.last_error_at = None;
-                                        conn.error_code = None;
-                                        conn.backoff_level = Some(0);
+                                        // A refresh that produced a working
+                                        // credential is a re-enable: 9router
+                                        // expands any write landing on "active"
+                                        // into a full health reset
+                                        // (connectionsRepo.js:15-33), so the
+                                        // model locks and the rate-limit window
+                                        // go too.
+                                        conn.test_status = Some("active".to_string());
+                                        crate::core::account_fallback::reset_health_state_on_activation(conn);
                                     }
                                 })
                                 .await;
@@ -2961,7 +2951,7 @@ async fn forward_with_provider_fallback(
                         status.as_u16(),
                         &message,
                         cooldown,
-                        decision.new_backoff_level.unwrap_or(current_backoff + 1),
+                        next_backoff_level(&decision, current_backoff),
                     )
                     .await;
                     excluded.insert(connection.id.clone());
@@ -2991,7 +2981,7 @@ async fn forward_with_provider_fallback(
                         502,
                         &message,
                         decision.cooldown,
-                        decision.new_backoff_level.unwrap_or(current_backoff + 1),
+                        next_backoff_level(&decision, current_backoff),
                     )
                     .await;
                     excluded.insert(connection.id.clone());
@@ -3407,6 +3397,19 @@ fn fusion_config_for(snapshot: &AppDb, combo_name: &str, panel_count: usize) -> 
     }
 
     FusionConfig::from_extra(&extra, panel_count)
+}
+
+/// The backoff level to persist alongside a failed request.
+///
+/// 9router writes `backoffLevel: newBackoffLevel ?? backoffLevel` (auth.js:275,
+/// accountFallback.js:211) — only a rule that carries `backoff: true` returns a
+/// `newBackoffLevel`, so every other failure leaves the level where it was. A
+/// `+ 1` on the fallback arm made a 400, 404 or 502 escalate the level just like
+/// a 429, so a client-side model error ratcheted a connection towards the
+/// 5-minute cap without ever hitting the rate-limit path that the level exists
+/// to model.
+fn next_backoff_level(decision: &FallbackDecision, current_backoff: u32) -> u32 {
+    decision.new_backoff_level.unwrap_or(current_backoff)
 }
 
 async fn mark_connection_unavailable(
@@ -5835,8 +5838,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_dashboard_sse_response, build_proxied_response, earliest_retry_after,
-        is_no_auth_provider, is_tts_request, select_connection,
+        build_dashboard_sse_response, build_proxied_response, check_fallback_error,
+        earliest_retry_after, is_no_auth_provider, is_tts_request, select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -6207,6 +6210,43 @@ mod tests {
             !super::is_model_locked(&conn, "gpt-4.1", Utc::now()),
             "expired model lock should not block"
         );
+    }
+
+    // 9router auth.js:275 / accountFallback.js:211 write
+    // `backoffLevel: newBackoffLevel ?? backoffLevel`. The dispatcher used
+    // `unwrap_or(current_backoff + 1)` instead, so every non-backoff failure —
+    // a 400 from a malformed tool schema, the 404 model-not-found, a 502 from a
+    // dead upstream — ratcheted the level towards the 5-minute cap without ever
+    // taking the rate-limit path the level exists to model.
+    #[test]
+    fn only_a_backoff_decision_advances_the_persisted_level() {
+        let decision = check_fallback_error(404, "The model `gpt-9` does not exist", 3);
+        assert_eq!(
+            super::next_backoff_level(&decision, 3),
+            3,
+            "a client-side model error must not escalate backoff"
+        );
+        assert_eq!(decision.cooldown, std::time::Duration::from_secs(120));
+        assert!(decision.should_fallback);
+
+        for (status, text) in [
+            (400u16, "unsupported parameter: max_tokens"),
+            (401, "bad token"),
+            (402, "payment required"),
+            (403, "denied"),
+            (404, "no such model"),
+            (502, "connection refused"),
+        ] {
+            let decision = check_fallback_error(status, text, 7);
+            assert_eq!(
+                super::next_backoff_level(&decision, 7),
+                7,
+                "status {status} must leave the level alone"
+            );
+        }
+
+        let rate_limited = check_fallback_error(429, "boom", 2);
+        assert_eq!(super::next_backoff_level(&rate_limited, 2), 3);
     }
 
     #[tokio::test]

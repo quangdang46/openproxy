@@ -187,6 +187,12 @@ pub const ERROR_RULES: &[ErrorRule] = &[
     },
     ErrorRule {
         text: None,
+        status: Some(402),
+        cooldown: Some(Duration::from_millis(cooldown_consts::LONG_MS)),
+        backoff: false,
+    },
+    ErrorRule {
+        text: None,
         status: Some(403),
         cooldown: Some(Duration::from_millis(cooldown_consts::LONG_MS)),
         backoff: false,
@@ -214,16 +220,17 @@ pub enum ErrorClassification {
     Cooldown(Duration),
     /// No rule matched; caller should apply their own default.
     NoMatch,
-    /// Permanent error (400, 401, 403) — do not fall back to next combo member.
-    Permanent,
 }
 
 /// Run an upstream error through [`ERROR_RULES`] and return the matching
 /// classification. Text rules fire first; status rules are the fallback.
 ///
-/// After all rules are checked, permanent HTTP status codes (400, 401, 403)
-/// that did *not* match any earlier rule are classified as [`Permanent`] so
-/// the caller does not burn through combo members on client errors.
+/// An error that matches nothing — a bare 400, a 418, a 500 — is
+/// [`NoMatch`], and the caller gives it the 30 s transient cooldown
+/// (`TRANSIENT_COOLDOWN_MS`, errorConfig.js:39). 9router has no "permanent"
+/// tier: `checkFallbackError` always returns `shouldFallback: true` and picks
+/// a duration purely from this table (accountFallback.js:23-50), so a 400 is
+/// worth exactly as much as a 500.
 pub fn classify_error(message: Option<&str>, status: Option<u16>) -> ErrorClassification {
     let lowered = message.map(|m| m.to_lowercase());
     for rule in ERROR_RULES {
@@ -244,12 +251,6 @@ pub fn classify_error(message: Option<&str>, status: Option<u16>) -> ErrorClassi
         if let Some(d) = rule.cooldown {
             return ErrorClassification::Cooldown(d);
         }
-    }
-    // Permanent errors (400, 401, 403) that matched no rule at all
-    // should not trigger fallback — the error is client-side, not
-    // a transient provider issue.
-    if matches!(status, Some(400) | Some(401) | Some(402) | Some(403)) {
-        return ErrorClassification::Permanent;
     }
     ErrorClassification::NoMatch
 }
@@ -287,6 +288,47 @@ mod tests {
     fn classify_no_match_returns_unmatched() {
         assert_eq!(
             classify_error(Some("teapot"), Some(418)),
+            ErrorClassification::NoMatch
+        );
+    }
+
+    // 9router errorConfig.js:59-76 declares 401/402/403/404 as long cooldowns
+    // and 429 as backoff. 400 is deliberately absent — a malformed request is
+    // the single most common recoverable 4xx on these upstreams (a bad tool
+    // schema, an over-long field), and it clears on the next well-formed
+    // request, so it belongs on the 30 s transient default.
+    #[test]
+    fn the_status_table_matches_the_js_rule_list() {
+        for status in [401u16, 402, 403, 404] {
+            assert_eq!(
+                classify_error(Some("boom"), Some(status)),
+                ErrorClassification::Cooldown(Duration::from_millis(COOLDOWN_LONG_MS)),
+                "status {status} takes the long cooldown"
+            );
+        }
+        assert_eq!(
+            classify_error(Some("boom"), Some(429)),
+            ErrorClassification::Backoff
+        );
+    }
+
+    #[test]
+    fn the_402_status_rule_is_present() {
+        assert!(
+            ERROR_RULES.iter().any(|r| r.status == Some(402)
+                && !r.backoff
+                && r.cooldown == Some(Duration::from_millis(COOLDOWN_LONG_MS))),
+            "9router errorConfig.js:72 has a 402 status rule; without it a \
+             payment-required response has no fixed cooldown"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_400_is_transient_not_permanent() {
+        // It is resolved by NO rule, so the caller applies the transient
+        // default — there is no "permanent" tier to resolve it into.
+        assert_eq!(
+            classify_error(Some("unsupported parameter: max_tokens"), Some(400)),
             ErrorClassification::NoMatch
         );
     }

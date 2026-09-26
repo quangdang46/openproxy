@@ -202,6 +202,12 @@ async fn persist_test_result(
             connection.test_status = Some(test_status.to_string());
             connection.last_error = last_error.clone();
             connection.last_error_at = last_error_at.clone();
+            // A green Test is a re-enable: 9router expands any write landing on
+            // "active" into a full health reset (connectionsRepo.js:15-33), so a
+            // connection that had been locked by a 429 becomes routable again
+            // instead of waiting the cooldown out. `last_error` above is the
+            // patch's own value and survives the reset untouched.
+            crate::core::account_fallback::reset_health_state_on_activation(connection);
             connection.updated_at = Some(Utc::now().to_rfc3339());
 
             if let Some(tokens) = &new_tokens {
@@ -293,7 +299,7 @@ async fn test_oauth_connection(
         };
     }
 
-    if connection.provider == "cursor" || connection.provider == "codebuddy" {
+    if uses_token_exists_shortcut(&connection.provider) {
         return ConnectionTestResult {
             valid: true,
             error: None,
@@ -355,38 +361,20 @@ async fn test_oauth_connection(
                     Err(error) => return invalid(&error),
                 };
 
-                // Capture status before consuming the response body
-                let status = accepted.status();
-                let body_text = accepted.text().await.unwrap_or_else(|_| String::new());
-
-                if status.is_success()
-                    || matches!(
-                        connection.provider.as_str(),
-                        "codex" if status.as_u16() == 400
-                            && (body_text.contains("input") || body_text.contains("validation") || body_text.contains("must"))
-                    )
-                {
-                    return ConnectionTestResult {
-                        valid: true,
-                        error: None,
-                        refreshed,
-                        new_tokens,
-                        soft_error: None,
-                    };
-                }
-
-                let error = match status {
-                    StatusCode::UNAUTHORIZED => "Token invalid or revoked".to_string(),
-                    StatusCode::FORBIDDEN => "Access denied".to_string(),
-                    s => format!("API returned {}", s.as_u16()),
-                };
+                // 9router classifies on the status alone (testUtils.js:137-159).
+                // The body-text gate this replaced was narrower than
+                // `acceptStatuses`, so a grok-cli account out of credits (402)
+                // was stored as a hard "error" and a codex 400 that did not
+                // echo the probe body was misread as a revoked token.
+                let (valid, soft_error, error) =
+                    classify_oauth_probe(&connection.provider, accepted.status().as_u16());
 
                 ConnectionTestResult {
-                    valid: false,
-                    error: Some(error),
+                    valid,
+                    error,
                     refreshed,
                     new_tokens,
-                    soft_error: None,
+                    soft_error,
                 }
             }
             None => invalid("Provider test not supported"),
@@ -1406,6 +1394,40 @@ pub fn probe_soft_fail_message(provider: &str, status: u16) -> Option<&'static s
     }
 }
 
+/// Providers 9router configures as `tokenExists: true`
+/// (`OAUTH_TEST_CONFIG`, testUtils.js:79, :94). Their API is protobuf or
+/// otherwise has no cheap unauthenticated endpoint, so the test can only
+/// assert that a token is present.
+fn uses_token_exists_shortcut(provider: &str) -> bool {
+    matches!(provider, "cursor" | "codebuddy-cn")
+}
+
+/// 9router `classifyOAuthProbeResult` (testUtils.js:137-159), reduced to the
+/// status since the body is not consulted.
+///
+/// Returns `(valid, warning, error)`. `warning` is 9router's `soft` flag: the
+/// credential proved good but the account cannot be used, so the connection
+/// stays active and the message is surfaced instead of the connection being
+/// marked broken.
+fn classify_oauth_probe(provider: &str, status: u16) -> (bool, Option<String>, Option<String>) {
+    let accepted =
+        (200..300).contains(&status) || probe_accept_statuses(provider).contains(&status);
+    if !accepted {
+        let error = match status {
+            401 => "Token invalid or revoked".to_string(),
+            403 => "Access denied".to_string(),
+            other => format!("API returned {other}"),
+        };
+        return (false, None, Some(error));
+    }
+
+    // Soft only when the provider declared a message for this status. Codex
+    // accepts a 400 too, but there the 400 just proves auth — there is nothing
+    // for the operator to act on, so it stays a silent success.
+    let warning = probe_soft_fail_message(provider, status).map(str::to_string);
+    (true, warning, None)
+}
+
 async fn status_test_excluding(
     state: &AppState,
     connection: &ProviderConnection,
@@ -2326,7 +2348,69 @@ mod tests {
 /// positive arm was missing.
 #[cfg(test)]
 mod oauth_probe_coverage {
-    use super::oauth_probe_request;
+    use super::{classify_oauth_probe, oauth_probe_request, uses_token_exists_shortcut};
+
+    /// The gate compared against the bare id `"codebuddy"`, which matches no
+    /// provider in the registry (`codebuddy-cn` / `codebuddy-intl`). Both
+    /// CodeBuddy variants therefore fell through to
+    /// `invalid("Provider test not supported")` and persisted
+    /// `testStatus: "error"` no matter what the token held.
+    #[test]
+    fn codebuddy_uses_the_token_exists_shortcut() {
+        assert!(uses_token_exists_shortcut("codebuddy-cn"));
+        assert!(uses_token_exists_shortcut("cursor"));
+        assert!(!uses_token_exists_shortcut("codebuddy"));
+        assert!(!uses_token_exists_shortcut("openai"));
+    }
+
+    /// 9router `classifyOAuthProbeResult` (testUtils.js:137-159): an
+    /// out-of-credits Grok account has a working token, so it must stay active
+    /// with a warning rather than being marked broken.
+    #[test]
+    fn grok_cli_402_is_a_soft_success_with_a_warning() {
+        let (valid, warning, error) = classify_oauth_probe("grok-cli", 402);
+        assert!(valid, "an out-of-credits Grok account must stay active");
+        assert!(
+            warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spending limit"),
+            "the operator needs the reason, got {warning:?}"
+        );
+        assert!(error.is_none());
+
+        let (valid, warning, error) = classify_oauth_probe("grok-cli", 200);
+        assert!(valid && warning.is_none() && error.is_none());
+
+        let (valid, _, error) = classify_oauth_probe("grok-cli", 401);
+        assert!(!valid);
+        assert_eq!(error.as_deref(), Some("Token invalid or revoked"));
+
+        let (valid, _, error) = classify_oauth_probe("grok-cli", 403);
+        assert!(!valid);
+        assert_eq!(error.as_deref(), Some("Access denied"));
+
+        // 402 is a soft success only where the provider declares it.
+        let (valid, _, error) = classify_oauth_probe("openai", 402);
+        assert!(!valid);
+        assert_eq!(error.as_deref(), Some("API returned 402"));
+
+        // A 500 from an upstream outage is never a pass.
+        let (valid, _, error) = classify_oauth_probe("grok-cli", 500);
+        assert!(!valid);
+        assert_eq!(error.as_deref(), Some("API returned 500"));
+    }
+
+    /// Codex accepts a 400 unconditionally (`acceptStatuses: [400]`) and has no
+    /// `softFailMessage` for it — the 400 proves auth and nothing more, so it
+    /// is a silent success rather than a warning.
+    #[test]
+    fn codex_400_is_a_silent_success() {
+        let (valid, warning, error) = classify_oauth_probe("codex", 400);
+        assert!(valid);
+        assert!(warning.is_none());
+        assert!(error.is_none());
+    }
 
     #[test]
     fn the_three_missing_providers_now_have_a_probe() {

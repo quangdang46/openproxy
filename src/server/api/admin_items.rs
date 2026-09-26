@@ -278,6 +278,12 @@ async fn update_provider(
                     }
                     if let Some(test_status) = req.test_status.clone() {
                         connection.test_status = Some(test_status);
+                        // 9router expands any write that lands on "active"
+                        // into a full health reset (connectionsRepo.js:15-33),
+                        // so re-enabling from this form also drops the model
+                        // locks and the rate-limit window that were keeping the
+                        // connection out of rotation.
+                        crate::core::account_fallback::reset_health_state_on_activation(connection);
                     }
                     if let Some(last_error) = req.last_error.clone() {
                         connection.last_error = Some(last_error);
