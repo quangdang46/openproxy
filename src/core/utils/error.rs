@@ -470,4 +470,16 @@ mod tests {
             parse_upstream_message(r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#);
         assert!(message.contains("RESOURCE_EXHAUSTED"), "got: {message}");
     }
+
+    /// 9router `buildErrorBody` (error.js:9-21) types and codes the envelope
+    /// from the status it is given and nothing else — the message never feeds
+    /// back into it. Locks that boundary so a status rewriter cannot be
+    /// reintroduced behind this function.
+    #[test]
+    fn build_error_body_does_not_re_derive_status_from_text() {
+        let body = build_error_body(400, Some("Model x is not supported"));
+        assert_eq!(body["error"]["message"], "Model x is not supported");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
 }

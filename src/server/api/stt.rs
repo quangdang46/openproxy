@@ -1175,10 +1175,14 @@ async fn transcribe_gemini(
 // CORS + error helpers.
 // ---------------------------------------------------------------------------
 
+/// 9router's `errorResponse` (open-sse/utils/error.js:30-38) answers with the
+/// status it is handed and the message it is handed — the status is an input,
+/// never re-derived from the text. Re-deriving it here turned a 400 "Combos
+/// not supported for audio/transcriptions" into a 406 and a 400 "insufficient
+/// balance" into a 403, so a client could not tell a malformed request from a
+/// rejected one. The message still goes through `friendly_error_message`,
+/// which only sanitises (HTML strip, whitespace collapse, length clamp).
 fn json_error(status: StatusCode, message: &str) -> Response {
-    let status_code =
-        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
-    let status = StatusCode::from_u16(status_code).unwrap_or(status);
     let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
     let body = Json(json!({
         "error": {
@@ -1499,5 +1503,46 @@ mod tests {
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some());
+    }
+
+    /// The status is an input, never re-derived from the text
+    /// (open-sse/utils/error.js:30-38). `infer_status_from_message` matched
+    /// `"insufficient"` here and answered 403, so a client that sent a
+    /// well-formed request could not tell a bad request from a rejected one.
+    #[test]
+    fn stt_error_keeps_the_upstream_status() {
+        for (status, message) in [
+            (StatusCode::BAD_REQUEST, "insufficient balance"),
+            (
+                StatusCode::BAD_REQUEST,
+                "Combos not supported for audio/transcriptions",
+            ),
+            (StatusCode::BAD_REQUEST, "Model x is not supported"),
+        ] {
+            let response = json_error(status, message);
+            assert_eq!(
+                response.status(),
+                status,
+                "errorResponse answers with the status it is given, so {message:?} stays {status}"
+            );
+        }
+    }
+
+    /// …and the sanitiser still runs, so the message a client reads is the
+    /// clean one. `status_to_type` reads the same unrewritten status, so the
+    /// envelope's `type` can no longer report a 400 family as something else.
+    #[tokio::test]
+    async fn stt_error_keeps_the_sanitized_message_and_the_matching_type() {
+        let response = json_error(
+            StatusCode::BAD_REQUEST,
+            "Error from provider (Console): Combos not supported",
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body: Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["error"]["message"], "Combos not supported");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
     }
 }
