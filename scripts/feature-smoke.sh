@@ -268,6 +268,83 @@ except Exception:
   fi
 fi
 
+# ── The frozen envelope contract ──────────────────────────────────────
+#
+# AGENTS.md calls `openproxy.v1.*` a "frozen, additive-only contract" with 13
+# resources, each of which must have both a schema and an example. The Rust
+# tests enforce that, but the tests exercise the TYPES — not the SHIPPED BINARY.
+# If a build shipped without the CLI wiring, or `schema list` drifted, every
+# cargo test would still pass. This checks the binary an agent is told to use.
+echo "== schema contract (openproxy.v1) =="
+if "$BIN" --robot schema stability 2>/dev/null | grep -q '"stability":"stable"'; then
+  pass "namespace reports stable"
+else
+  fail "schema stability envelope did not report stable — the frozen promise is broken"
+fi
+listed=$("$BIN" schema list 2>/dev/null | grep -cE '^  [a-z-]+$')
+if [ "$listed" -eq 13 ]; then
+  pass "all 13 resources are listed"
+else
+  fail "schema list has $listed resources, expected 13"
+fi
+# Every resource must produce BOTH a schema and an example. A resource that
+# answers "unknown" is a hole in the contract an agent is told to rely on.
+holes=0
+for r in provider provider-node combo key pool settings custom-model model-alias \
+         usage-event log-event chat-event quota oauth-status; do
+  "$BIN" schema show "$r" 2>/dev/null | grep -q '"type"' || holes=$((holes+1))
+  "$BIN" schema example "$r" 2>/dev/null | grep -qE '"|\{' || holes=$((holes+1))
+done
+if [ "$holes" -eq 0 ]; then
+  pass "every resource has both a schema and an example"
+else
+  fail "$holes schema/example lookups returned nothing"
+fi
+
+# ── Auth must REJECT, not just accept ────────────────────────────────
+#
+# Every check above is an authenticated happy path. A proxy that answers 200 to
+# anyone is not a proxy, it is a public relay, and no positive check would ever
+# notice. This is the one negative assertion in the file.
+echo "== auth =="
+# /v1/models is deliberately NOT the probe: it carries no auth gate in
+# openproxy and none in 9router either (no requireApiKey in its route), so
+# asserting it is gated would be inventing a requirement the reference does
+# not have. It is reported below instead.
+# Auth enforcement is CONFIGURATION, not a fixed property: openproxy gates the
+# API on `requireApiKey` and the dashboard on `requireLogin`, and an operator is
+# entitled to turn both off. Asserting rejection unconditionally would report
+# a deliberate choice as a security defect — I wrote exactly that check first
+# and it fired on this machine, which has requireLogin=false set on purpose.
+#
+# So the assertion is conditional on the setting being ON. When it is off, the
+# open state is SURFACED (an operator should know their proxy is unauthenticated)
+# but not failed.
+login_req=$(python3 -c "
+import sqlite3, json, glob, sys
+f=glob.glob('$HOME/.openproxy/*.sqlite')
+if not f: print('?'); sys.exit()
+try:
+    d=json.loads(sqlite3.connect(f[0]).execute('select data from settings limit 1').fetchone()[0])
+except Exception:
+    print('?'); sys.exit()
+print(str(d.get('requireLogin', False)).lower())" 2>/dev/null)
+
+if [ "$login_req" = "false" ]; then
+  printf '  note requireLogin=false — the dashboard and /api/* are unauthenticated BY SETTING\n'
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$BASE/api/combos" 2>/dev/null)
+  [ "$code" = "200" ] && printf '  note /api/combos answered 200 unauthenticated, as configured\n'
+else
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$BASE/api/combos" 2>/dev/null)
+  case "$code" in
+    401|403) pass "unauthenticated /api/combos is rejected ($code)" ;;
+    200)     fail "unauthenticated /api/combos returned 200 while requireLogin is on" ;;
+    *)       fail "/api/combos returned an unexpected $code" ;;
+  esac
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$BASE/v1/models" 2>/dev/null)
+[ "$code" = "200" ] && printf '  note /v1/models is ungated here and in 9router — surface, not a failure\n' 
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "SMOKE OK"
