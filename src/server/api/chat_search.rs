@@ -206,8 +206,14 @@ pub async fn handle_search_completions(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     // -- Authentication --
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return auth_error_response(e);
+    // 9router `search.js:48-60` gates on `settings.requireApiKey`, so a
+    // deployment that turns the key requirement off accepts anonymous search
+    // callers. Keying this on anything else — or requiring a key outright —
+    // would make this the one /v1 surface that setting cannot open.
+    if state.db.snapshot().settings.require_api_key() {
+        if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
+            return auth_error_response(e);
+        }
     }
 
     // -- Parse request body --
