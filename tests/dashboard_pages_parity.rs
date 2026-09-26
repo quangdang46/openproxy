@@ -660,11 +660,24 @@ fn model_chip_controls_are_siblings_not_descendants() {
         MODEL_SELECT,
         "the favourite toggle sits outside the chip button",
     );
-    assert_contains(
+    // The multi-select checkbox used to be asserted here as a sibling of the
+    // chip. It is gone: 9router ModelSelectModal.js:583-624 has no checkbox at
+    // all — selection is a 'check' icon rendered INSIDE the single button
+    // (:594-596) — so asserting its presence pinned a control the reference
+    // does not have. Its ABSENCE is now the assertion, which is what keeps a
+    // future re-add from silently reintroducing a third tab stop per row.
+    assert_absent(
         before_chip,
         "type=\"checkbox\"",
         MODEL_SELECT,
-        "so does the multi-select checkbox — a button may not contain either",
+        "the multi-select checkbox is gone: 9router shows selection as a check \
+         icon inside the chip, not as a sibling control",
+    );
+    assert_contains(
+        &src,
+        "check",
+        MODEL_SELECT,
+        "the check icon stands in for the removed checkbox",
     );
 }
 
@@ -877,4 +890,16 @@ fn login_shell_uses_uniform_padding() {
          centre at every viewport height",
     );
     assert_not_contains(&src, "px-4 py-12", LOGIN, "the asymmetric padding is gone");
+}
+
+/// Assert a snippet does NOT appear — for controls the reference does not have.
+/// Asserting absence is the only way to stop a removed control creeping back.
+fn assert_absent(haystack: &str, needle: &str, file: &str, msg: &str) {
+    assert!(
+        !haystack.contains(needle),
+        "{} must not contain {:?} — {}",
+        file,
+        needle,
+        msg
+    );
 }
