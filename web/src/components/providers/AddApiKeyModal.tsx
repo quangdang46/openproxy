@@ -272,8 +272,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
                   bulkResult.failed > 0 ? "text-yellow-400" : "text-green-400"
                 }`}
               >
-                Added {bulkResult.success}
-                {bulkResult.failed > 0 ? `, ${bulkResult.failed} failed` : ""}
+                ✓ {bulkResult.success} added
+                {bulkResult.failed > 0 ? `, ✗ ${bulkResult.failed} failed` : ""}
               </div>
             )}
             <div className="flex gap-2">
