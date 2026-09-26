@@ -163,6 +163,55 @@ pub struct ProviderExecutorConfig {
     pub chat_path: String,
 }
 
+/// 9router `CLAUDE_CLI_VERSION` (open-sse/providers/shared.js:25). Pinned
+/// exactly: a moving version would itself be a fingerprint.
+const CLAUDE_CLI_VERSION: &str = "2.1.258";
+
+/// The static Claude-CLI identity 9router sends to `api.anthropic.com`.
+///
+/// Port of `open-sse/providers/registry/claude.js:22-37`. These are
+/// unconditional in 9router and were previously ABSENT here: a cold proxy with
+/// no Claude Code client traffic forwarded a generic HTTP User-Agent, which is
+/// precisely the fingerprint this provider exists to avoid.
+///
+/// The `anthropic-beta` half of 9router's claude.js header set is NOT here —
+/// it is per-model and already lives in `default::select_anthropic_beta`.
+///
+/// Arch/Os are `arm64`/`MacOS` verbatim. 9router hardcodes them the same way;
+/// substituting the host's real values would make openproxy's fingerprint
+/// differ from the reference's.
+fn claude_identity_headers() -> Vec<(String, String)> {
+    vec![
+        (
+            "anthropic-dangerous-direct-browser-access".to_string(),
+            "true".to_string(),
+        ),
+        (
+            "user-agent".to_string(),
+            format!("claude-cli/{CLAUDE_CLI_VERSION} (external, sdk-cli)"),
+        ),
+        ("x-app".to_string(), "cli".to_string()),
+        (
+            "x-stainless-helper-method".to_string(),
+            "stream".to_string(),
+        ),
+        ("x-stainless-retry-count".to_string(), "0".to_string()),
+        (
+            "x-stainless-runtime-version".to_string(),
+            "v24.14.0".to_string(),
+        ),
+        (
+            "x-stainless-package-version".to_string(),
+            "0.80.0".to_string(),
+        ),
+        ("x-stainless-runtime".to_string(), "node".to_string()),
+        ("x-stainless-lang".to_string(), "js".to_string()),
+        ("x-stainless-arch".to_string(), "arm64".to_string()),
+        ("x-stainless-os".to_string(), "MacOS".to_string()),
+        ("x-stainless-timeout".to_string(), "600".to_string()),
+    ]
+}
+
 impl ProviderExecutorConfig {
     pub fn openai(base_url: &'static str) -> Self {
         Self {
@@ -180,13 +229,15 @@ impl ProviderExecutorConfig {
             base_url: base_url.to_string(),
             format: ProviderFormat::Anthropic,
             api_key_header: "x-api-key",
-            default_headers: vec![
-                ("anthropic-version".to_string(), "2023-06-01".to_string()),
-                (
-                    "anthropic-beta".to_string(),
-                    "claude-code-20250219,interleaved-thinking-2025-05-14".to_string(),
-                ),
-            ],
+            // anthropic-beta is deliberately NOT here: it is per-model and is
+            // set at request time by `select_anthropic_beta`. A static value
+            // sends heavy-agent flags to haiku, which 9router stopped doing in
+            // 13ed1456.
+            default_headers: {
+                let mut headers = vec![("anthropic-version".to_string(), "2023-06-01".to_string())];
+                headers.extend(claude_identity_headers());
+                headers
+            },
             stream_path: "/v1/messages".to_string(),
             chat_path: "/v1/messages".to_string(),
         }
@@ -670,5 +721,87 @@ impl ProviderExecutor for UnifiedExecutor {
 
     fn needs_refresh(&self, credentials: &ProviderConnection) -> bool {
         UnifiedExecutor::needs_refresh(self, credentials)
+    }
+}
+
+#[cfg(test)]
+mod claude_identity_tests {
+    use super::*;
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// THE GAP. A cold proxy with no Claude Code client traffic forwarded a
+    /// generic HTTP User-Agent to api.anthropic.com — the exact fingerprint
+    /// this provider exists to avoid. 9router sends these unconditionally from
+    /// its provider registry (registry/claude.js:22-37).
+    #[test]
+    fn the_claude_provider_sends_a_static_cli_identity() {
+        let headers = ProviderExecutorConfig::anthropic("https://api.anthropic.com/v1/messages")
+            .default_headers;
+        assert_eq!(
+            header(&headers, "user-agent"),
+            Some("claude-cli/2.1.258 (external, sdk-cli)"),
+            "a generic UA is the fingerprint this fixes"
+        );
+        assert_eq!(header(&headers, "x-app"), Some("cli"));
+        assert_eq!(
+            header(&headers, "anthropic-dangerous-direct-browser-access"),
+            Some("true")
+        );
+    }
+
+    /// The x-stainless-* family is what actually distinguishes the official SDK
+    /// from a hand-rolled HTTP client, so a partial set is no better than none.
+    #[test]
+    fn the_full_stainless_family_is_present() {
+        let headers = ProviderExecutorConfig::anthropic("https://api.anthropic.com/v1/messages")
+            .default_headers;
+        for (name, expected) in [
+            ("x-stainless-helper-method", "stream"),
+            ("x-stainless-retry-count", "0"),
+            ("x-stainless-runtime-version", "v24.14.0"),
+            ("x-stainless-package-version", "0.80.0"),
+            ("x-stainless-runtime", "node"),
+            ("x-stainless-lang", "js"),
+            ("x-stainless-arch", "arm64"),
+            ("x-stainless-os", "MacOS"),
+            ("x-stainless-timeout", "600"),
+        ] {
+            assert_eq!(
+                header(&headers, name),
+                Some(expected),
+                "{name} missing or wrong"
+            );
+        }
+    }
+
+    /// anthropic-beta is per-MODEL in 9router since 13ed1456, so a static copy
+    /// here would send heavy-agent flags to haiku. It is applied at request
+    /// time by `default::select_anthropic_beta` instead.
+    #[test]
+    fn anthropic_beta_is_not_baked_into_the_static_set() {
+        let headers = ProviderExecutorConfig::anthropic("https://api.anthropic.com/v1/messages")
+            .default_headers;
+        assert!(
+            header(&headers, "anthropic-beta").is_none(),
+            "a static beta sends opus-only flags to cheaper models"
+        );
+        assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+    }
+
+    /// Arch/Os are hardcoded in 9router too. Substituting the host's real
+    /// values would make openproxy's fingerprint differ from the reference's,
+    /// which is the opposite of the point — so this pins the quirk.
+    #[test]
+    fn arch_and_os_are_the_reference_values_not_the_hosts() {
+        let headers = ProviderExecutorConfig::anthropic("https://api.anthropic.com/v1/messages")
+            .default_headers;
+        assert_eq!(header(&headers, "x-stainless-arch"), Some("arm64"));
+        assert_eq!(header(&headers, "x-stainless-os"), Some("MacOS"));
     }
 }
