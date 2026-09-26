@@ -577,6 +577,12 @@ fn anthropic_compatible_messages_url(base_url: &str) -> String {
     if normalized.ends_with("/messages") {
         normalized.truncate(normalized.len() - "/messages".len());
     }
+    // Operators paste the base either way, and `https://host/v1` is the more
+    // common of the two. Appending unconditionally yields `/v1/v1/messages`,
+    // which no Anthropic-compatible endpoint routes.
+    if normalized.ends_with("/v1") {
+        return format!("{normalized}/messages");
+    }
     format!("{normalized}/v1/messages")
 }
 
@@ -1349,6 +1355,16 @@ mod tests {
         );
         assert_eq!(
             anthropic_compatible_messages_url("https://api.example.com/messages"),
+            "https://api.example.com/v1/messages"
+        );
+        // A base that already ends in /v1 must not gain a second one — this is
+        // the shape operators actually paste, and /v1/v1/messages routes nowhere.
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/v1"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/v1/"),
             "https://api.example.com/v1/messages"
         );
     }

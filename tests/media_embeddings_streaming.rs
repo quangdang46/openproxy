@@ -440,7 +440,7 @@ fn video_request(uri: &str) -> Request<Body> {
 ///
 /// No upstream mock is needed: the request must never leave the process.
 #[tokio::test]
-async fn a_fully_cooled_down_video_account_set_answers_429_with_retry_after() {
+async fn a_fully_cooled_down_video_account_set_answers_503_with_retry_after() {
     let mut cooled = connection("conn-xai", "xai", "sk-xai");
     cooled.rate_limited_until =
         Some((chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339());
@@ -451,7 +451,11 @@ async fn a_fully_cooled_down_video_account_set_answers_429_with_retry_after() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    // 9router videoGeneration.js:139-142 — the all-rate-limited arm calls
+    // unavailableResponse with `lastStatus || lastErrorCode || SERVICE_UNAVAILABLE`.
+    // Nothing attempted a request, so there is no upstream 429 to echo back;
+    // 429 is not a status this route can invent.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let retry_after = response
         .headers()
         .get("retry-after")

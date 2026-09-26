@@ -25,10 +25,11 @@
 //! ## Backend coupling
 //!
 //! This finding deliberately does **not** touch the backend. A separate bead
-//! (P248-001) reshapes `/api/usage/chart` to drop the `{data: ...}` envelope and
-//! rename the bucket key `date` → `label`. Until that lands,
-//! `UsageChartInner` must keep reading `result.data` and `dataKey="date"`; the
-//! last test here pins both so a half-landed P248-001 is caught.
+//! (P248-001, openproxy-c6gg finding 21) reshapes `/api/usage/chart` to drop
+//! the `{data: ...}` envelope and rename the bucket key `date` → `label`. That
+//! reshape has since landed, so `UsageChartInner` now reads the bare array and
+//! keys the axis on `label`; the two sides must move together, which is what
+//! the last test here pins so a half-landed P248-001 is caught.
 //!
 //! ## Why a Rust test for a TypeScript defect
 //!
@@ -124,24 +125,24 @@ fn chart_shows_the_no_data_state() {
     );
 }
 
-/// Pins the coupling to the not-yet-reshaped backend so whoever lands P248-001
-/// has to change these two lines in the same commit rather than shipping a
-/// silently blank chart.
+/// Pins the chart's coupling to the backend shape so a reshape on either side
+/// has to change both in the same commit rather than shipping a silently blank
+/// chart.
 #[test]
-fn chart_keeps_the_current_backend_envelope() {
+fn chart_reads_the_bare_backend_envelope() {
     let src = read_src("components/usage/UsageChartInner.tsx");
 
     assert_contains(
         &src,
-        "result.data || []",
+        "Array.isArray(result) ? result : []",
         CHART_INNER,
-        "/api/usage/chart still answers `{ data: [...] }`; the `-> [{...}]` \
-         reshape belongs to P248-001",
+        "/api/usage/chart answers a bare `[{...}]` — an envelope lookup here \
+         would silently render an empty chart",
     );
     assert_contains(
         &src,
-        "dataKey=\"date\"",
+        "dataKey=\"label\"",
         CHART_INNER,
-        "the bucket key is still `date`, not `label` — see P248-001",
+        "the bucket key is `label`; `date` would leave the X axis blank",
     );
 }
