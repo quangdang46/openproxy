@@ -38,6 +38,12 @@ const QWEN_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";
 const QWEN_TOKEN_URL: &str = "https://chat.qwen.ai/api/v1/oauth2/token";
 const CLINE_REFRESH_URL: &str = "https://api.cline.bot/api/v1/auth/refresh";
 const CLINE_USERS_ME_URL: &str = "https://api.cline.bot/api/v1/users/me";
+/// gemini-cli and antigravity do not talk to the identity endpoint — the
+/// service they actually hold a quota against is Cloud Code Assist, so that is
+/// what the test probes (testUtils.js:172-215).
+const CLOUD_CODE_ASSIST_TEST_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const CLOUD_CODE_ASSIST_TEST_BODY: &str = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,6 +315,54 @@ async fn test_oauth_connection(
         };
     }
 
+    if matches!(connection.provider.as_str(), "gemini-cli" | "antigravity") {
+        let initial =
+            probe_cloud_code_assist_access(state, connection, &access_token, effective_proxy).await;
+        if initial.valid {
+            return ConnectionTestResult {
+                valid: true,
+                error: None,
+                refreshed,
+                new_tokens,
+                soft_error: None,
+            };
+        }
+
+        // A 401 here is the only status worth a second mint — the other
+        // failures (403, 429, 5xx) are the account's, not the token's.
+        let Some(refresh_token) = connection
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return invalid(&initial.error);
+        };
+        if initial.status != 401 || refreshed {
+            return invalid(&initial.error);
+        }
+
+        let tokens = match refresh_oauth_token(connection, refresh_token, effective_proxy).await {
+            Ok(tokens) if !tokens.access_token.is_empty() => tokens,
+            _ => return invalid("Token invalid or revoked"),
+        };
+        let retry = probe_cloud_code_assist_access(
+            state,
+            connection,
+            &tokens.access_token,
+            effective_proxy,
+        )
+        .await;
+
+        return ConnectionTestResult {
+            valid: retry.valid,
+            error: (!retry.valid).then_some(retry.error),
+            refreshed: true,
+            new_tokens: Some(tokens),
+            soft_error: None,
+        };
+    }
+
     if connection.provider == "cline" {
         let initial = probe_cline_access_token(state, effective_proxy, &access_token).await;
         if initial.valid || initial.error.as_deref() != Some("Token invalid or revoked") {
@@ -413,25 +467,27 @@ async fn test_api_key_connection(
         let Some(base_url) = provider_specific_string(connection, "baseUrl") else {
             return invalid("Missing base URL");
         };
-        let normalized = normalize_anthropic_models_url(&base_url);
         let api_key = connection.api_key.clone().unwrap_or_default();
         let response = execute_request(
             state,
             &connection.provider,
             effective_proxy,
-            PreparedRequest {
-                method: Method::GET,
-                url: normalized,
-                headers: vec![
-                    ("x-api-key".to_string(), api_key.clone()),
-                    ("anthropic-version".to_string(), "2023-06-01".to_string()),
-                    ("Authorization".to_string(), format!("Bearer {api_key}")),
-                ],
-                body: None,
-            },
+            anthropic_compatible_messages_request(connection, &base_url, &api_key),
         )
         .await;
-        return compatible_result(response, "Invalid API key or base URL");
+        return match response {
+            Ok(response) => {
+                let valid = anthropic_compatible_is_valid(response.status().as_u16());
+                ConnectionTestResult {
+                    valid,
+                    error: (!valid).then(|| "Invalid API key or base URL".to_string()),
+                    refreshed: false,
+                    new_tokens: None,
+                    soft_error: None,
+                }
+            }
+            Err(error) => invalid(&error),
+        };
     }
 
     let response = match connection.provider.as_str() {
@@ -697,16 +753,7 @@ async fn test_api_key_connection(
             )
             .await
         }
-        "ollama" => {
-            simple_get_bearer_test(
-                state,
-                connection,
-                effective_proxy,
-                "https://ollama.com/api/tags",
-                "Invalid API key",
-            )
-            .await
-        }
+        "ollama" => test_ollama_connection(connection).await,
         "ollama-local" => test_ollama_local_connection(state, connection, effective_proxy).await,
         "deepgram" => {
             simple_get_token_test(
@@ -990,6 +1037,47 @@ async fn test_ollama_local_connection(
             "Ollama not reachable at {}",
             host.trim_end_matches('/')
         )),
+    }
+}
+
+/// 9router's `ollama` arm is the one API-key probe that calls bare `fetch`
+/// (testUtils.js:691-693) — not `fetchWithConnectionProxy`. It therefore
+/// inherits neither the connection proxy / Vercel relay nor the 15 s abort
+/// signal that `fetchWithConnectionProxy` bolts on, so this arm builds its own
+/// client instead of going through `execute_request`.
+async fn test_ollama_connection(connection: &ProviderConnection) -> ConnectionTestResult {
+    let client = ollama_probe_client();
+    match build_direct_request(&client, ollama_probe_request(connection))
+        .send()
+        .await
+    {
+        Ok(response) => ConnectionTestResult {
+            valid: response.status().is_success(),
+            error: (!response.status().is_success()).then(|| "Invalid API key".to_string()),
+            refreshed: false,
+            new_tokens: None,
+            soft_error: None,
+        },
+        Err(error) => invalid(&error.to_string()),
+    }
+}
+
+fn ollama_probe_client() -> Client {
+    // No `.timeout(DEFAULT_TIMEOUT)`: a bare `reqwest::Client::new()` is what
+    // makes this arm's request unbounded, matching `fetch` without an
+    // `AbortSignal`.
+    Client::new()
+}
+
+fn ollama_probe_request(connection: &ProviderConnection) -> PreparedRequest {
+    PreparedRequest {
+        method: Method::GET,
+        url: "https://ollama.com/api/tags".to_string(),
+        headers: vec![(
+            "Authorization".to_string(),
+            format!("Bearer {}", connection.api_key.clone().unwrap_or_default()),
+        )],
+        body: None,
     }
 }
 
@@ -1680,6 +1768,108 @@ async fn decode_refresh_response(response: reqwest::Response) -> Result<RefreshR
     })
 }
 
+struct CloudCodeAssistProbe {
+    valid: bool,
+    error: String,
+    status: u16,
+}
+
+async fn probe_cloud_code_assist_access(
+    state: &AppState,
+    connection: &ProviderConnection,
+    access_token: &str,
+    effective_proxy: &EffectiveProxy,
+) -> CloudCodeAssistProbe {
+    let request = cloud_code_assist_probe_request(&connection.provider, access_token);
+    let response =
+        match execute_request(state, &connection.provider, effective_proxy, request).await {
+            Ok(response) => response,
+            Err(error) => {
+                return CloudCodeAssistProbe {
+                    valid: false,
+                    error,
+                    status: 0,
+                }
+            }
+        };
+
+    let status = response.status().as_u16();
+    if response.status().is_success() {
+        return CloudCodeAssistProbe {
+            valid: true,
+            error: String::new(),
+            status,
+        };
+    }
+
+    let fallback = format!("API returned {status}");
+    let body_text = response.text().await.unwrap_or_default();
+    CloudCodeAssistProbe {
+        valid: false,
+        error: parse_provider_error_message(&body_text, &fallback),
+        status,
+    }
+}
+
+fn cloud_code_assist_probe_request(provider: &str, access_token: &str) -> PreparedRequest {
+    PreparedRequest {
+        method: Method::POST,
+        url: CLOUD_CODE_ASSIST_TEST_URL.to_string(),
+        headers: vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+            (
+                "User-Agent".to_string(),
+                cloud_code_assist_user_agent(provider).to_string(),
+            ),
+        ],
+        body: Some(PreparedBody::Json(
+            serde_json::from_str(CLOUD_CODE_ASSIST_TEST_BODY).unwrap_or(Value::Null),
+        )),
+    }
+}
+
+/// Cloud Code Assist meters quota per client, so the probe has to look like the
+/// CLI the token was minted for (testUtils.js:196-198).
+fn cloud_code_assist_user_agent(provider: &str) -> &'static str {
+    if provider == "antigravity" {
+        "google-api-nodejs-client/9.15.1 vscode-antigravity/1.107.0"
+    } else {
+        "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0"
+    }
+}
+
+/// 9router surfaces Google's own error text rather than a bare status, because
+/// the actionable detail ("Code Assist is not enabled for this account") only
+/// appears in the body (testUtils.js:181-196).
+fn parse_provider_error_message(body_text: &str, fallback: &str) -> String {
+    let trimmed = body_text.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        let message = parsed
+            .get("error")
+            .and_then(|error| {
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| error.as_str())
+            })
+            .or_else(|| parsed.get("message").and_then(Value::as_str))
+            .or_else(|| parsed.get("error").and_then(|error| error.as_str()));
+        if let Some(message) = message {
+            if !message.trim().is_empty() {
+                return message.trim().to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
 async fn probe_cline_access_token(
     state: &AppState,
     effective_proxy: &EffectiveProxy,
@@ -1737,15 +1927,10 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                 "store": false
             }))),
         }),
-        "gemini-cli" | "antigravity" => Some(PreparedRequest {
-            method: Method::GET,
-            url: "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".to_string(),
-            headers: vec![(
-                "Authorization".to_string(),
-                format!("Bearer {access_token}"),
-            )],
-            body: None,
-        }),
+        // gemini-cli and antigravity deliberately have no arm here: they are
+        // dispatched to `probe_cloud_code_assist_access` before this table is
+        // consulted, because the identity endpoint says nothing about whether
+        // the account can actually use Code Assist.
         "github" => Some(PreparedRequest {
             method: Method::GET,
             url: "https://api.github.com/user".to_string(),
@@ -2094,12 +2279,51 @@ fn is_anthropic_compatible_provider(provider: &str) -> bool {
     provider.starts_with("anthropic-compatible-")
 }
 
-fn normalize_anthropic_models_url(base_url: &str) -> String {
+/// 9router normalizes the operator's base URL by dropping a trailing slash and
+/// a trailing `/messages` (an operator who pasted the full messages URL), then
+/// appends `/v1/messages` (testUtils.js:493-495).
+fn anthropic_compatible_messages_url(base_url: &str) -> String {
     let mut normalized = base_url.trim().trim_end_matches('/').to_string();
     if normalized.ends_with("/messages") {
         normalized.truncate(normalized.len() - "/messages".len());
     }
-    format!("{normalized}/models")
+    format!("{normalized}/v1/messages")
+}
+
+fn anthropic_compatible_messages_request(
+    connection: &ProviderConnection,
+    base_url: &str,
+    api_key: &str,
+) -> PreparedRequest {
+    let model = connection
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or("claude-3-haiku-20240307")
+        .to_string();
+    PreparedRequest {
+        method: Method::POST,
+        url: anthropic_compatible_messages_url(base_url),
+        headers: vec![
+            ("x-api-key".to_string(), api_key.to_string()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+            ("Authorization".to_string(), format!("Bearer {api_key}")),
+        ],
+        body: Some(PreparedBody::Json(json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "test" }]
+        }))),
+    }
+}
+
+/// 9router rejects only 401/403 here (testUtils.js:513-515): a 400 or 529 from
+/// an overloaded endpoint still proves the key was accepted, and the probe must
+/// not report a working credential as broken.
+fn anthropic_compatible_is_valid(status: u16) -> bool {
+    status != 401 && status != 403
 }
 
 fn default_catalog_model(provider: &str) -> String {
@@ -2132,9 +2356,21 @@ fn is_token_expired(connection: &ProviderConnection) -> bool {
 }
 
 fn is_refreshable_provider(provider: &str) -> bool {
+    // kimi has no refresh transport here — and none in 9router either. It is
+    // listed as refreshable so an expired kimi token takes the refresh branch
+    // and reports the distinct "Token expired and refresh failed" instead of
+    // the bare "Token expired" (testUtils.js:77-78).
     matches!(
         provider,
-        "claude" | "codex" | "gemini-cli" | "antigravity" | "qwen" | "kiro" | "cline"
+        "claude"
+            | "codex"
+            | "gemini-cli"
+            | "antigravity"
+            | "qwen"
+            | "kiro"
+            | "cline"
+            | "kimi"
+            | "kimi-coding"
     )
 }
 
@@ -2242,9 +2478,19 @@ fn generic_probe_base_url(connection: &ProviderConnection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        oauth_probe_request, probe_accept_statuses, probe_soft_fail_message,
-        test_result_persistence, ConnectionTestResult,
+        anthropic_compatible_is_valid, anthropic_compatible_messages_request,
+        anthropic_compatible_messages_url, build_direct_request, cloud_code_assist_probe_request,
+        cloud_code_assist_user_agent, is_check_expiry_provider, is_refreshable_provider,
+        oauth_probe_request, ollama_probe_client, ollama_probe_request,
+        parse_provider_error_message, probe_accept_statuses, probe_soft_fail_message,
+        test_oauth_connection, test_result_persistence, ConnectionTestResult, PreparedBody,
     };
+    use crate::server::state::AppState;
+    use crate::types::ProviderConnection;
+    use axum::http::Method;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     const GROK_SPENDING_LIMIT: &str =
         "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.";
@@ -2337,6 +2583,273 @@ mod tests {
         assert_eq!(test_status, "error");
         assert_eq!(last_error.as_deref(), Some("Token invalid or revoked"));
         assert_eq!(last_error_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+    }
+
+    // -----------------------------------------------------------------------
+    // audit finding N1 — the ollama arm must not inherit the connection proxy.
+    // -----------------------------------------------------------------------
+
+    fn ollama_connection() -> ProviderConnection {
+        let mut provider_specific_data: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        provider_specific_data.insert(
+            "connectionProxyEnabled".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        provider_specific_data.insert(
+            "connectionProxyUrl".to_string(),
+            serde_json::Value::String("http://127.0.0.1:9".to_string()),
+        );
+        ProviderConnection {
+            id: "conn-ollama".to_string(),
+            provider: "ollama".to_string(),
+            api_key: Some("sk-ollama".to_string()),
+            use_connection_proxy: Some(true),
+            provider_specific_data,
+            ..Default::default()
+        }
+    }
+
+    /// 9router's `ollama` arm (testUtils.js:691-693) is the one API-key probe
+    /// that calls bare `fetch` instead of `fetchWithConnectionProxy`. Routing
+    /// it through `execute_request` sent it through the operator's connection
+    /// proxy (and the Vercel relay), so a key that 9router called valid failed
+    /// here whenever the proxy was misconfigured.
+    #[test]
+    fn ollama_probe_is_a_bare_get_that_ignores_the_connection_proxy() {
+        let request = ollama_probe_request(&ollama_connection());
+
+        assert_eq!(request.url, "https://ollama.com/api/tags");
+        assert_eq!(request.method, Method::GET);
+        assert_eq!(
+            request.headers,
+            vec![("Authorization".to_string(), "Bearer sk-ollama".to_string())]
+        );
+        assert!(request.body.is_none());
+    }
+
+    /// The same arm inherits no abort signal either: `fetchWithConnectionProxy`
+    /// is what bolts on the 15 s `AbortSignal.timeout`, and the ollama arm
+    /// skips it. `tests/connection_test_usage_parity.rs` pins the routing that
+    /// keeps this arm off the shared `execute_request` path.
+    #[test]
+    fn the_ollama_probe_gets_its_own_unproxied_client() {
+        // A request through the bare client reaches the origin; the same
+        // request through the shared client pool is the one that picks up
+        // `resolve_effective_proxy` and `DEFAULT_TIMEOUT`.
+        let connection = ollama_connection();
+        assert_eq!(connection.use_connection_proxy, Some(true));
+        let request = ollama_probe_request(&connection);
+        assert!(build_direct_request(&ollama_probe_client(), request)
+            .build()
+            .is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // audit finding N3 — anthropic-compatible probes POST /v1/messages.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn anthropic_compatible_probes_v1_messages() {
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com"),
+            "https://api.example.com/v1/messages"
+        );
+        // A pasted messages URL is stripped back to the base before /v1 is
+        // re-appended, so the operator does not get a doubled segment.
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_compatible_messages_url("https://api.example.com/messages"),
+            "https://api.example.com/v1/messages"
+        );
+    }
+
+    /// The old probe was a strict 2xx GET on `/models`, so an endpoint that
+    /// answers 404 for the wrong path reported "Invalid API key or base URL"
+    /// against a perfectly good credential.
+    #[test]
+    fn anthropic_compatible_probe_sends_the_key_against_v1_messages() {
+        let connection = ProviderConnection {
+            default_model: Some("claude-sonnet-4".to_string()),
+            ..Default::default()
+        };
+        let request = anthropic_compatible_messages_request(
+            &connection,
+            "https://api.example.com",
+            "sk-ant-test",
+        );
+
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.url, "https://api.example.com/v1/messages");
+        let names: Vec<&str> = request
+            .headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for header in [
+            "x-api-key",
+            "anthropic-version",
+            "content-type",
+            "Authorization",
+        ] {
+            assert!(names.contains(&header), "missing {header} in {names:?}");
+        }
+        let Some(PreparedBody::Json(body)) = &request.body else {
+            panic!("the probe must send a JSON body");
+        };
+        assert_eq!(body["model"], "claude-sonnet-4");
+        assert_eq!(body["messages"][0]["content"], "test");
+    }
+
+    /// 9router rejects only 401/403 (testUtils.js:513-515). A strict-2xx rule
+    /// turned an overloaded 529 — which still proves the key was accepted — into
+    /// a "broken credential" the operator then has to chase.
+    #[test]
+    fn anthropic_compatible_only_rejects_401_and_403() {
+        for status in [401u16, 403] {
+            assert!(
+                !anthropic_compatible_is_valid(status),
+                "{status} must read as a rejected key"
+            );
+        }
+        for status in [200u16, 400, 404, 429, 500, 529] {
+            assert!(
+                anthropic_compatible_is_valid(status),
+                "{status} must not be read as a rejected key"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // audit finding N7 — gemini family probes Cloud Code Assist.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gemini_family_probes_cloud_code_assist() {
+        for provider in ["gemini-cli", "antigravity"] {
+            let request = cloud_code_assist_probe_request(provider, "ya29.token");
+            assert_eq!(
+                request.url, "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+                "{provider} must probe the service, not the identity endpoint"
+            );
+            assert_eq!(request.method, Method::POST, "{provider}");
+            let Some(PreparedBody::Json(body)) = &request.body else {
+                panic!("{provider} must send a JSON body");
+            };
+            assert_eq!(body["metadata"]["pluginType"], "GEMINI");
+            assert_eq!(body["metadata"]["ideType"], "IDE_UNSPECIFIED");
+        }
+
+        // Quota is metered per client, so the two must not share a UA.
+        assert_ne!(
+            cloud_code_assist_user_agent("gemini-cli"),
+            cloud_code_assist_user_agent("antigravity")
+        );
+        assert!(cloud_code_assist_user_agent("gemini-cli").contains("gemini-cli/"));
+        assert!(cloud_code_assist_user_agent("antigravity").contains("antigravity/"));
+    }
+
+    /// The identity endpoint only proves the token parses. Leaving the old arm
+    /// in the generic table would let it drift back into being the probe.
+    #[test]
+    fn oauth_probe_request_no_longer_carries_the_google_identity_endpoint() {
+        for provider in ["gemini-cli", "antigravity"] {
+            assert!(
+                oauth_probe_request(provider, "ya29.token").is_none(),
+                "{provider} is dispatched to Cloud Code Assist before the generic table"
+            );
+        }
+        assert!(!super::CLOUD_CODE_ASSIST_TEST_URL.contains("userinfo"));
+    }
+
+    #[test]
+    fn provider_error_messages_come_from_the_body_when_present() {
+        assert_eq!(
+            parse_provider_error_message(
+                r#"{"error":{"message":"Code Assist is not enabled for this account"}}"#,
+                "API returned 403"
+            ),
+            "Code Assist is not enabled for this account"
+        );
+        assert_eq!(
+            parse_provider_error_message(r#"{"message":"quota exhausted"}"#, "API returned 429"),
+            "quota exhausted"
+        );
+        // Nothing usable in the body falls through to the body text, then the
+        // status-derived fallback.
+        assert_eq!(
+            parse_provider_error_message("upstream down", "API returned 502"),
+            "upstream down"
+        );
+        assert_eq!(
+            parse_provider_error_message("   ", "API returned 502"),
+            "API returned 502"
+        );
+        assert_eq!(
+            parse_provider_error_message("not json", "API returned 502"),
+            "not json"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // audit finding N9 — kimi is refreshable AND checks expiry.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn expired_kimi_with_a_refresh_token_reports_refresh_failed() {
+        for provider in ["kimi", "kimi-coding"] {
+            assert!(
+                is_refreshable_provider(provider),
+                "{provider} must be refreshable"
+            );
+            assert!(
+                is_check_expiry_provider(provider),
+                "{provider} must check expiry"
+            );
+        }
+
+        let state = test_state().await;
+        let expired = (Utc::now() - ChronoDuration::minutes(5)).to_rfc3339();
+
+        // kimi has no refresh transport, so the attempt fails — and because
+        // kimi checks expiry the operator is told the refresh failed rather
+        // than being left with a bare "Token expired".
+        let with_refresh = ProviderConnection {
+            id: "conn-kimi".to_string(),
+            provider: "kimi".to_string(),
+            auth_type: "oauth".to_string(),
+            access_token: Some("expired".to_string()),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: Some(expired.clone()),
+            ..Default::default()
+        };
+        let result =
+            test_oauth_connection(&state, &with_refresh, &super::EffectiveProxy::default()).await;
+        assert!(!result.valid);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Token expired and refresh failed")
+        );
+
+        // With no refresh token there is nothing to attempt, so it stays the
+        // plain expiry message.
+        let without_refresh = ProviderConnection {
+            refresh_token: None,
+            ..with_refresh.clone()
+        };
+        let result =
+            test_oauth_connection(&state, &without_refresh, &super::EffectiveProxy::default())
+                .await;
+        assert!(!result.valid);
+        assert_eq!(result.error.as_deref(), Some("Token expired"));
+    }
+
+    async fn test_state() -> AppState {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(crate::db::Db::load_from(temp.path()).await.expect("db"));
+        AppState::new(db)
     }
 }
 

@@ -1,14 +1,39 @@
 "use client";
 
-import { useMemo, useState, useCallback, useRef } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import {
   ReactFlow,
   Handle,
   Position,
+  Controls,
 } from "@xyflow/react";
 import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
+
+// Force-stop the FE animation if a provider stays active longer than this.
+// A request record can get stuck when the backend dies mid-flight, and an
+// edge that pulses forever reads as "this provider is serving right now".
+const FE_ACTIVE_TIMEOUT_MS = 60000;
+const FE_ACTIVE_TICK_MS = 1000;
+
+/**
+ * Drops providers that have been active for longer than the timeout, and any
+ * whose first sighting has fallen out of the raw set. Extracted so the
+ * staleness rule is testable without mounting ReactFlow.
+ */
+export function activeSetWithTimeout(
+  raw: Set<string>,
+  firstSeen: Record<string, number>,
+  now: number
+): Set<string> {
+  const kept = new Set<string>();
+  for (const provider of raw) {
+    const ts = firstSeen[provider];
+    if (ts === undefined || now - ts < FE_ACTIVE_TIMEOUT_MS) kept.add(provider);
+  }
+  return kept;
+}
 
 interface ProviderConfig {
   color: string;
@@ -228,13 +253,40 @@ export default function ProviderTopology({ providers = [], activeRequests = [], 
   const lastKey = lastProvider?.toLowerCase() || "";
   const errorKey = errorProvider?.toLowerCase() || "";
 
-  const activeSet = useMemo(() => new Set(activeKey ? activeKey.split(",") : []), [activeKey]);
+  const rawActiveSet = useMemo(() => new Set(activeKey ? activeKey.split(",") : []), [activeKey]);
   const lastSet = useMemo(() => new Set(lastKey ? [lastKey] : []), [lastKey]);
   const errorSet = useMemo(() => new Set(errorKey ? [errorKey] : []), [errorKey]);
 
+  // First sighting per active provider, so a stuck request record ages out
+  // instead of pulsing for the life of the page.
+  const firstSeenRef = useRef<Record<string, number>>({});
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const seen = firstSeenRef.current;
+    const now = Date.now();
+    for (const provider of rawActiveSet) {
+      if (seen[provider] === undefined) seen[provider] = now;
+    }
+    for (const provider of Object.keys(seen)) {
+      if (!rawActiveSet.has(provider)) delete seen[provider];
+    }
+  }, [rawActiveSet]);
+
+  useEffect(() => {
+    if (rawActiveSet.size === 0) return;
+    const id = setInterval(() => setTick((t) => t + 1), FE_ACTIVE_TICK_MS);
+    return () => clearInterval(id);
+  }, [rawActiveSet]);
+
+  const activeSet = useMemo(
+    () => activeSetWithTimeout(rawActiveSet, firstSeenRef.current, Date.now()),
+    [rawActiveSet, tick]
+  );
+
   const { nodes, edges } = useMemo(
     () => buildLayout(providers, activeSet, lastSet, errorSet),
-    [providers, activeKey, lastKey, errorKey]
+    [providers, activeSet, lastSet, errorSet]
   );
 
   // Stable key — only remount when provider list changes
@@ -244,13 +296,34 @@ export default function ProviderTopology({ providers = [], activeRequests = [], 
   );
 
   const rfInstance = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const fitOpts = { padding: 0.2, duration: 200 };
   const onInit = useCallback((instance: any) => {
     rfInstance.current = instance;
-    setTimeout(() => instance.fitView({ padding: 0.3 }), 50);
+    setTimeout(() => instance.fitView(fitOpts), 50);
   }, []);
 
+  // The canvas is sized by its parent, so a sidebar collapse or a window
+  // resize leaves the graph framed on stale dimensions.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (rfInstance.current) rfInstance.current.fitView(fitOpts);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Same when the node count changes: a newly connected provider lands off-screen.
+  useEffect(() => {
+    if (!rfInstance.current) return;
+    const id = setTimeout(() => rfInstance.current.fitView(fitOpts), 50);
+    return () => clearTimeout(id);
+  }, [nodes.length]);
+
   return (
-    <div className="h-[320px] w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 sm:h-[480px]">
+    <div ref={containerRef} className="h-[320px] w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 sm:h-[480px]">
       {providers.length === 0 ? (
         <div className="h-full flex items-center justify-center text-text-muted text-sm">
           No providers connected
@@ -262,18 +335,22 @@ export default function ProviderTopology({ providers = [], activeRequests = [], 
           edges={edges}
           nodeTypes={nodeTypes}
           fitView
-          fitViewOptions={{ padding: 0.3 }}
+          fitViewOptions={fitOpts}
+          minZoom={0.1}
+          maxZoom={2}
           onInit={onInit}
           proOptions={{ hideAttribution: true }}
-          panOnDrag={false}
-          zoomOnScroll={false}
-          zoomOnPinch={false}
-          zoomOnDoubleClick={false}
+          panOnDrag
+          zoomOnScroll
+          zoomOnPinch
+          zoomOnDoubleClick
           preventScrolling={false}
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable={false}
-        />
+        >
+          <Controls showInteractive={false} className="react-flow-controls-custom" />
+        </ReactFlow>
       )}
     </div>
   );

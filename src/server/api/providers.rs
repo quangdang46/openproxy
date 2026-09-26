@@ -332,6 +332,57 @@ pub struct TestModelResponse {
     pub latency_ms: Option<u64>,
     pub error: Option<String>,
     pub status: Option<u16>,
+    /// Set on a soft pass — the round-trip worked, but the response is not the
+    /// plain completion the probe usually gets.
+    pub note: Option<String>,
+}
+
+/// 9router spends 1024 tokens on the probe, not one (ping.js:117-120).
+/// Reasoning models (ClinePass/kimi-k3, deepseek-v4-pro) burn the budget on
+/// chain-of-thought before emitting an answer, so a tiny probe starves the
+/// answer and reports "no completion choices" for a model that works.
+fn chat_probe_body(model: &str) -> Value {
+    json!({
+        "model": model,
+        "max_tokens": 1024,
+        "stream": false,
+        "messages": [{ "role": "user", "content": "hi" }]
+    })
+}
+
+/// A length-limited response that carries reasoning but no visible content is a
+/// successful round-trip, not a failure (ping.js:196-205, issue #3010). Returns
+/// the note to surface so the caller can say why the answer looked empty.
+fn reasoning_only_note(parsed: Option<&Value>) -> Option<&'static str> {
+    let choices = parsed?.get("choices")?.as_array()?;
+    let first = choices.first()?;
+    if first.get("finish_reason")?.as_str()? != "length" {
+        return None;
+    }
+    let message = first.get("message")?;
+    let content_empty = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .is_empty();
+    if !content_empty {
+        return None;
+    }
+    let has_reasoning = [
+        "reasoning",
+        "reasoning_content",
+        "thinking",
+        "thinking_content",
+    ]
+    .iter()
+    .any(|key| {
+        message
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    has_reasoning.then_some("reasoning-only response (length-limited)")
 }
 
 fn truncate_test_model_detail(detail: &str) -> String {
@@ -378,12 +429,7 @@ async fn test_model(
             "input": "test"
         })
     } else {
-        serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "stream": false,
-            "messages": [{ "role": "user", "content": "hi" }]
-        })
+        chat_probe_body(&model)
     };
 
     let base_url = internal_base_url(&headers);
@@ -472,6 +518,7 @@ async fn test_model(
                     latency_ms: Some(latency_ms),
                     error: Some(format_test_model_http_error(status, detail)),
                     status: Some(status),
+                    note: None,
                 })
                 .into_response();
             }
@@ -492,6 +539,7 @@ async fn test_model(
                     error: (!has_embedding)
                         .then(|| "Provider returned no embedding data".to_string()),
                     status: Some(status),
+                    note: None,
                 })
                 .into_response();
             }
@@ -525,6 +573,7 @@ async fn test_model(
                             .map(|msg| format!("Provider status {}: {}", provider_status, msg))
                             .or_else(|| Some(format!("Provider status {}", provider_status))),
                         status: Some(status),
+                        note: None,
                     })
                     .into_response();
                 }
@@ -545,6 +594,7 @@ async fn test_model(
                     latency_ms: Some(latency_ms),
                     error: Some(truncate_test_model_detail(provider_error)),
                     status: Some(status),
+                    note: None,
                 })
                 .into_response();
             }
@@ -576,6 +626,10 @@ async fn test_model(
                 .unwrap_or(false);
 
             let ok_completion = has_choices || has_anthropic_content || has_gemini_candidates;
+            // A length-limited, reasoning-only response is a real round-trip
+            // that simply has no visible answer to show, so it passes and the
+            // note says why (ping.js:196-205).
+            let note = reasoning_only_note(parsed.as_ref());
 
             Json(TestModelResponse {
                 ok: ok_completion,
@@ -583,6 +637,7 @@ async fn test_model(
                 error: (!ok_completion)
                     .then(|| "Provider returned no completion choices for this model".to_string()),
                 status: Some(status),
+                note: note.map(str::to_string),
             })
             .into_response()
         }
@@ -1298,7 +1353,8 @@ async fn get_mock_status(State(state): State<AppState>, headers: HeaderMap) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::test_embedding_url;
+    use super::{chat_probe_body, reasoning_only_note, test_embedding_url};
+    use serde_json::json;
 
     /// One canned HTTP response from a throwaway listener, plus the request
     /// text the server actually read.
@@ -1380,5 +1436,80 @@ mod tests {
     async fn embedding_probe_tolerates_a_body_without_an_embedding() {
         let (result, _) = upstream_reply("200 OK", r#"{"object":"list"}"#.to_string()).await;
         assert_eq!(result.unwrap(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // audit finding N22 — the chat model-test probe.
+    // -----------------------------------------------------------------------
+
+    /// A one-token probe starves any reasoning model: the budget goes on
+    /// chain-of-thought and the answer never arrives, so a working model reads
+    /// as broken. 9router spends 1024 (ping.js:117-120).
+    #[test]
+    fn the_chat_probe_budget_is_1024_tokens() {
+        let body = chat_probe_body("kimi-k3");
+        assert_eq!(body["max_tokens"], json!(1024));
+        assert_eq!(body["model"], json!("kimi-k3"));
+        assert_eq!(body["stream"], json!(false));
+    }
+
+    #[test]
+    fn a_length_limited_reasoning_only_response_soft_passes() {
+        for key in [
+            "reasoning",
+            "reasoning_content",
+            "thinking",
+            "thinking_content",
+        ] {
+            let body = json!({
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": { "content": "", key: "weighing the options..." }
+                }]
+            });
+            assert_eq!(
+                reasoning_only_note(Some(&body)),
+                Some("reasoning-only response (length-limited)"),
+                "a {key} channel must count as a reasoning-only response"
+            );
+        }
+
+        // Whitespace is not a visible answer either.
+        let blank = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": { "content": "  \n ", "reasoning": "..." }
+            }]
+        });
+        assert_eq!(
+            reasoning_only_note(Some(&blank)),
+            Some("reasoning-only response (length-limited)")
+        );
+    }
+
+    /// The mirror cases: a real answer, a length limit with nothing in it, and
+    /// reasoning on a normally-finished response all leave the result
+    /// unexplained.
+    #[test]
+    fn only_an_empty_length_limited_reasoning_response_is_noted() {
+        let answered = json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "partial" } }]
+        });
+        assert_eq!(reasoning_only_note(Some(&answered)), None);
+
+        let neither = json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "" } }]
+        });
+        assert_eq!(reasoning_only_note(Some(&neither)), None);
+
+        let stopped = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "content": "", "reasoning_content": "..." }
+            }]
+        });
+        assert_eq!(reasoning_only_note(Some(&stopped)), None);
+
+        assert_eq!(reasoning_only_note(None), None);
     }
 }

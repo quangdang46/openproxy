@@ -2,7 +2,6 @@ import { Suspense, useState, useEffect, useMemo } from "react";
 // import { useSearchParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "@/components/usage/RequestDetailsTab";
-import ProviderBreakdownTable from "@/components/usage/ProviderBreakdownTable";
 import UsageAnalyticsGrid from "@/components/usage/UsageAnalyticsGrid";
 import CompressionStats from "@/components/usage/CompressionStats";
 import type { UsageRouter } from "@/shared/components/UsageStats";
@@ -14,6 +13,16 @@ const PERIODS = [
   { value: "30d", label: "30D" },
   { value: "60d", label: "60D" },
 ];
+
+// 9router's `?tab=` contract is exactly these three (page.js:31-33); a link
+// carrying anything else falls back to the overview in both products. The
+// control offers two of them — `logs` is reachable by deep link only.
+export const USAGE_TABS = ["overview", "logs", "details"] as const;
+export type UsageTab = (typeof USAGE_TABS)[number];
+
+export function resolveUsageTab(value: string | null): UsageTab {
+  return USAGE_TABS.includes(value as UsageTab) ? (value as UsageTab) : "overview";
+}
 
 export default function UsagePageClient() {
   return (
@@ -51,11 +60,7 @@ function UsageContent() {
   const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
-  const activeTab =
-    tabFromUrl &&
-    ["overview", "logs", "details", "providers", "analytics", "compression"].includes(tabFromUrl)
-      ? tabFromUrl
-      : "overview";
+  const activeTab = resolveUsageTab(tabFromUrl);
 
   const handleTabChange = (value: string) => {
     if (value === activeTab) return;
@@ -73,9 +78,6 @@ function UsageContent() {
         <SegmentedControl
           options={[
             { value: "overview", label: "Overview" },
-            { value: "providers", label: "Providers" },
-            { value: "analytics", label: "Analytics" },
-            { value: "compression", label: "Compression" },
             { value: "details", label: "Details" },
           ]}
           value={activeTab}
@@ -100,12 +102,17 @@ function UsageContent() {
           {activeTab === "overview" && (
             <Suspense fallback={<CardSkeleton />}>
               <UsageStats period={period} setPeriod={setPeriod} hidePeriodSelector router={router} />
+              {/* OpenProxy's extra read-outs, kept on the overview rather than
+                  in the shared ?tab= contract so a `?tab=providers` link still
+                  lands where 9router lands it. ProviderBreakdownTable is not
+                  among them: it is fed by `byProvider`, which only UsageStats
+                  holds, so from here it could only ever render its empty
+                  state. */}
+              <UsageAnalyticsGrid period={period} />
+              <CompressionStats period={period} />
             </Suspense>
           )}
           {activeTab === "logs" && <RequestLogger />}
-          {activeTab === "providers" && <ProviderBreakdownTable period={period} />}
-          {activeTab === "analytics" && <UsageAnalyticsGrid period={period} />}
-          {activeTab === "compression" && <CompressionStats period={period} />}
           {activeTab === "details" && <RequestDetailsTab />}
         </>
       )}
