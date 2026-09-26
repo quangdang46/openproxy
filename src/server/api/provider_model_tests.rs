@@ -326,10 +326,81 @@ async fn read_error_text(response: Response, status: StatusCode) -> String {
         Err(error) => return error.to_string(),
     };
 
-    if text.is_empty() {
+    // ping.js:131-133 hands the operator `error.message` — never the raw
+    // envelope — and caps the detail at 240 chars. 120 chars of raw body
+    // showed `{"error":{"code":…` and cut the provider's own sentence off
+    // mid-word, which is the only thing the test icon has to say.
+    let detail = crate::core::utils::error::parse_upstream_message(&text);
+    let detail: String = detail.chars().take(240).collect();
+
+    if detail.is_empty() {
         format!("HTTP {}", status.as_u16())
     } else {
-        let truncated: String = text.chars().take(120).collect();
-        format!("HTTP {}: {truncated}", status.as_u16())
+        format!("HTTP {}: {detail}", status.as_u16())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_error_text;
+    use axum::{body::Body, http::StatusCode, response::Response};
+
+    fn error_response(status: StatusCode, body: &str) -> Response {
+        Response::builder()
+            .status(status)
+            .body(Body::from(body.to_string()))
+            .expect("response")
+    }
+
+    /// The probe surfaces the provider's message, not the JSON envelope
+    /// openproxy's own error body wrapped it in.
+    #[tokio::test]
+    async fn read_error_text_unwraps_the_error_message() {
+        let text = read_error_text(
+            error_response(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"code":"bad_request","message":"unsupported for chat","type":"invalid_request_error"}}"#,
+            ),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_eq!(text, "HTTP 400: unsupported for chat");
+    }
+
+    /// ping.js:131-133 caps the detail at 240 chars. A message longer than
+    /// that is cut there — not at 120, which landed mid-sentence.
+    #[tokio::test]
+    async fn read_error_text_caps_the_detail_at_240_chars() {
+        let long = "x".repeat(400);
+        let body = format!(r#"{{"error":{{"message":"{long}"}}}}"#);
+        let text = read_error_text(
+            error_response(StatusCode::BAD_GATEWAY, &body),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        assert_eq!(text, format!("HTTP 502: {}", "x".repeat(240)));
+    }
+
+    /// A body that is not JSON (a bare gateway page) falls through verbatim.
+    #[tokio::test]
+    async fn read_error_text_keeps_a_non_json_body_verbatim() {
+        let text = read_error_text(
+            error_response(StatusCode::BAD_GATEWAY, "502 Bad Gateway"),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        assert_eq!(text, "HTTP 502: 502 Bad Gateway");
+    }
+
+    /// ping.js:131-133 omits the `: detail` half entirely when there is no
+    /// detail — an empty body yields the bare status.
+    #[tokio::test]
+    async fn read_error_text_without_a_body_is_the_bare_status() {
+        let text = read_error_text(
+            error_response(StatusCode::SERVICE_UNAVAILABLE, ""),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .await;
+        assert_eq!(text, "HTTP 503");
     }
 }
