@@ -1371,13 +1371,9 @@ async fn execute_single_model(
         let mut creds = json!({
             "provider": plan.provider,
         });
-        if let Some(headers) = client_headers {
+        if let Some(raw) = client_raw_headers_value(client_headers) {
             if let Some(obj) = creds.as_object_mut() {
-                let raw: serde_json::Map<String, Value> = headers
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect();
-                obj.insert("rawHeaders".into(), Value::Object(raw));
+                obj.insert("rawHeaders".into(), raw);
             }
         }
         let strip_refs: Vec<&str> = plan.strip_list.iter().map(String::as_str).collect();
@@ -1606,6 +1602,7 @@ async fn execute_single_model(
         &dispatch_model,
         body,
         sim_headers,
+        client_headers,
         api_key,
         endpoint,
         plan,
@@ -1613,6 +1610,53 @@ async fn execute_single_model(
         compression_stats,
     )
     .await
+}
+
+/// The client's own request headers, shaped as the `rawHeaders` value 9router
+/// hangs off the credentials for this request (chatCore.js:155:
+/// `credentials.rawHeaders = clientRawRequest?.headers || {}`).
+///
+/// Keys are lower-cased because every consumer looks the map up by its
+/// lower-cased spelling — `rawHeaders["user-agent"]` at cursor.js:305 is the
+/// canonical one — and Node hands `clientRawRequest.headers` over already
+/// lower-cased. `None` means "the client sent nothing to expose", so callers
+/// leave the key absent rather than writing an empty object.
+pub fn client_raw_headers_value(
+    client_headers: Option<&std::collections::HashMap<String, String>>,
+) -> Option<Value> {
+    let headers = client_headers?;
+    if headers.is_empty() {
+        return None;
+    }
+    let raw: serde_json::Map<String, Value> = headers
+        .iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v.clone())))
+        .collect();
+    Some(Value::Object(raw))
+}
+
+/// Expose the client's raw headers on a per-request credential copy so the
+/// EXECUTOR — not just the request translator — can read them (9router
+/// chatCore.js:155 sets them before the executor is picked).
+///
+/// Without this, executors that branch on the downstream client fingerprint
+/// never see it: Cursor's `force_agent_mode` (cursor.js:302-308) reads
+/// `rawHeaders["user-agent"]` to detect Claude Code and would otherwise be
+/// permanently false.
+///
+/// The write lands on the dispatch-local clone only — nothing in the fallback
+/// loop persists a whole connection back, so client headers (the caller's
+/// `authorization` among them) never reach SQLite. A request that carries no
+/// headers leaves any stored value alone rather than clobbering it with `{}`.
+pub fn attach_client_raw_headers(
+    connection: &mut crate::types::ProviderConnection,
+    client_headers: Option<&std::collections::HashMap<String, String>>,
+) {
+    if let Some(raw) = client_raw_headers_value(client_headers) {
+        connection
+            .provider_specific_data
+            .insert("rawHeaders".into(), raw);
+    }
 }
 
 /// Whether the effective simulation mode for `provider` is `mock` on this
@@ -1666,6 +1710,7 @@ async fn forward_with_provider_fallback(
     model: &str,
     mut request_body: Value,
     sim_headers: HeaderMap,
+    client_headers: Option<&std::collections::HashMap<String, String>>,
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
@@ -1844,18 +1889,19 @@ async fn forward_with_provider_fallback(
             //     provider has no usable credential at all → 404
             //   * otherwise the accounts were tried and ran out → 503
             //
-            // The rate-limited arm used to ship a bare "All accounts for
-            // <provider>/<model> are cooling down" with no reset time, because
-            // `friendly_error_message` used to replace the whole composed body
-            // with canned English and strip the `[…]` prefix. It no longer does
-            // either, so the client now gets the real body — and
-            // `attempt_error_response` appends 9router's `(reset after 4m 12s)`
-            // suffix to it before the friendly pass.
-            if retry_after.is_some() {
+            // The rate-limited arm composes 9router's body
+            // `[<provider>/<model>] <lastError>` (handlers/chat.js:239-242);
+            // `attempt_error_response` appends the `(reset after 4m 12s)`
+            // suffix from the same `retry_after` (open-sse/utils/error.js:117).
+            // A bare "cooling down" said neither which provider was blocked nor
+            // why, so a user could not tell whether to wait seconds or hours.
+            if let Some(until) = retry_after {
+                let last_error = cooling_down_last_error(&snapshot, provider, model, until)
+                    .unwrap_or_else(|| "Unavailable".to_string());
                 return Err(ComboAttemptError {
                     status: 503,
-                    message: format!("All accounts for {provider}/{model} are cooling down"),
-                    retry_after,
+                    message: format!("[{provider}/{model}] {last_error}"),
+                    retry_after: Some(until),
                     upstream_body: None,
                 });
             }
@@ -1883,6 +1929,15 @@ async fn forward_with_provider_fallback(
                 base_url: Some(base.clone()),
             });
         }
+
+        // 9router chatCore.js:155 stamps the client header map onto the
+        // credentials object the executor is about to receive. Executors that
+        // branch on the downstream fingerprint (cursor's `force_agent_mode`,
+        // opencode's session passthrough) read `rawHeaders` off these
+        // credentials, so without this write they never see the caller. It
+        // lands on the dispatch-local clone only, so nothing persisted picks up
+        // the caller's `authorization`.
+        attach_client_raw_headers(&mut connection, client_headers);
 
         // get_model_info resolves openai-compatible/anthropic-compatible
         // nodes to their node NAME as the provider — match on name OR prefix
@@ -3454,6 +3509,59 @@ fn earliest_retry_after(
         })
         .filter(|until| *until > now)
         .min()
+}
+
+/// The last error a cooling-down account recorded, for the cooling-down body.
+///
+/// 9router's `getProviderCredentials` returns `lastError` from the earliest
+/// locked connection (src/sse/services/auth.js:125) and the handler composes
+/// `[provider/model] <lastError>` from it (handlers/chat.js:239-242). Our
+/// `last_error` is the same field; the account is chosen the same way
+/// `earliest_retry_after` picks the window, so the text and the deadline
+/// describe the same account. `None` when no locked account kept a message —
+/// 9router falls back to the literal "Unavailable" at the compose site.
+fn cooling_down_last_error(
+    snapshot: &AppDb,
+    provider: &str,
+    model: &str,
+    earliest: DateTime<Utc>,
+) -> Option<String> {
+    snapshot
+        .provider_connections
+        .iter()
+        .filter(|connection| {
+            connection.provider == provider
+                && connection.is_active()
+                && connection_has_credentials(connection)
+                && connection_supports_model(connection, model)
+        })
+        .flat_map(|connection| {
+            let mut deadlines = Vec::new();
+            if let Some(until) = connection
+                .rate_limited_until
+                .as_deref()
+                .and_then(parse_timestamp)
+            {
+                deadlines.push(until);
+            }
+            for key in [format!("modelLock_{model}"), "modelLock___all".to_string()] {
+                if let Some(until) = connection
+                    .extra
+                    .get(&key)
+                    .and_then(Value::as_str)
+                    .and_then(parse_timestamp)
+                {
+                    deadlines.push(until);
+                }
+            }
+            deadlines
+                .into_iter()
+                .filter(|until| *until == earliest)
+                .map(|until| (until, connection.last_error.clone()))
+                .collect::<Vec<_>>()
+        })
+        .find_map(|(_, last_error)| last_error)
+        .filter(|message| !message.trim().is_empty())
 }
 
 /// TTS gate (9router chatCore.js:185-189): strip tool messages + tools for
@@ -6359,7 +6467,8 @@ mod tests {
 
     use super::{
         build_dashboard_sse_response, build_proxied_response, check_fallback_error,
-        earliest_retry_after, is_no_auth_provider, is_tts_request, select_connection,
+        cooling_down_last_error, earliest_retry_after, is_no_auth_provider, is_tts_request,
+        select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -6455,6 +6564,67 @@ mod tests {
             .expect("retry-after should be derived from the earliest blocked account");
 
         assert!(retry_after <= early + ChronoDuration::seconds(1));
+    }
+
+    /// 9router pairs the reset window with the error text of the SAME account
+    /// (src/sse/services/auth.js:110-131): the deadline comes from the
+    /// earliest lock, the message from that connection's `lastError`. Pairing
+    /// the earliest deadline with a different account's text would attribute
+    /// one account's cause to another's wait.
+    #[test]
+    fn cooling_down_last_error_pairs_the_text_with_the_earliest_lock() {
+        let early = Utc::now() + ChronoDuration::seconds(30);
+        let late = Utc::now() + ChronoDuration::seconds(90);
+
+        let mut early_locked = connection("early", 1);
+        early_locked.extra.insert(
+            "modelLock_gpt-4.1".into(),
+            Value::String(early.to_rfc3339()),
+        );
+        early_locked.last_error = Some("quota exhausted".into());
+
+        let mut late_rate_limited = connection("late", 2);
+        late_rate_limited.rate_limited_until = Some(late.to_rfc3339());
+        late_rate_limited.last_error = Some("rate limited".into());
+
+        let snapshot = AppDb {
+            provider_connections: vec![late_rate_limited, early_locked],
+            ..AppDb::default()
+        };
+
+        let earliest = earliest_retry_after(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("the earliest lock sets the window");
+
+        assert_eq!(
+            cooling_down_last_error(&snapshot, "openai", "gpt-4.1", earliest).as_deref(),
+            Some("quota exhausted"),
+            "the text must come from the account that owns the reported deadline"
+        );
+    }
+
+    /// A blank or absent `last_error` is not a cause. 9router falls back to the
+    /// literal "Unavailable" at the compose site (handlers/chat.js:239), so
+    /// this returns `None` rather than handing the caller an empty message.
+    #[test]
+    fn cooling_down_last_error_ignores_a_blank_recorded_error() {
+        let until = Utc::now() + ChronoDuration::seconds(60);
+
+        let mut blank = connection("blank", 1);
+        blank.extra.insert(
+            "modelLock_gpt-4.1".into(),
+            Value::String(until.to_rfc3339()),
+        );
+        blank.last_error = Some("   ".into());
+
+        let snapshot = AppDb {
+            provider_connections: vec![blank],
+            ..AppDb::default()
+        };
+
+        assert_eq!(
+            cooling_down_last_error(&snapshot, "openai", "gpt-4.1", until),
+            None
+        );
     }
 
     #[test]
@@ -6785,6 +6955,7 @@ mod tests {
             "gpt-4.1",
             body,
             axum::http::HeaderMap::new(),
+            None,
             None,
             None,
             &plan,
@@ -7119,7 +7290,9 @@ mod tests {
     /// 9router `unavailableResponse` (error.js:117-127) puts the human-readable
     /// reset time in the MESSAGE, not only in the header — the header tells a
     /// well-behaved client when to return, the suffix tells whoever is reading
-    /// the error why it is waiting.
+    /// the error why it is waiting. The composed text is 9router's
+    /// `[provider/model] <lastError>` (chat.js:239-242); the end-to-end
+    /// assertion lives in tests/cooling_down_body.rs.
     #[tokio::test]
     async fn a_rate_limited_error_carries_the_reset_after_suffix_in_its_body() {
         use super::attempt_error_response;
@@ -7127,7 +7300,7 @@ mod tests {
 
         let resp = attempt_error_response(ComboAttemptError {
             status: 503,
-            message: "All accounts for openai/gpt-4o are cooling down".to_string(),
+            message: "[openai/gpt-4o] Rate limit reached for gpt-4o".to_string(),
             retry_after: Some(Utc::now() + ChronoDuration::seconds(150)),
             upstream_body: None,
         });
@@ -7140,7 +7313,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&body).unwrap();
         let message = parsed["error"]["message"].as_str().unwrap();
         assert!(
-            message.starts_with("All accounts for openai/gpt-4o are cooling down ("),
+            message.starts_with("[openai/gpt-4o] Rate limit reached for gpt-4o ("),
             "the composed body must survive: {message:?}"
         );
         assert!(
