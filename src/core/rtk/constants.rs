@@ -43,6 +43,11 @@ pub const STATUS_MAX_UNTRACKED: usize = 10;
 pub const LS_EXT_SUMMARY_TOP: usize = 5;
 
 /// ls filter: directory names to skip in noise filter
+///
+/// Matched by exact string compare, exactly as 9router's
+/// `LS_NOISE_DIRS.includes(parsed.name)` is — so the `*.egg-info` entry never
+/// matches a real directory name there either. "env" is the Python legacy
+/// virtualenv; ".env" (dotenv) is deliberately absent.
 pub const LS_NOISE_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -51,12 +56,24 @@ pub const LS_NOISE_DIRS: &[&str] = &[
     ".next",
     "dist",
     "build",
+    ".cache",
+    ".turbo",
+    ".vercel",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
     ".venv",
     "venv",
-    ".cache",
+    "env",
+    "coverage",
+    ".nyc_output",
+    ".DS_Store",
+    "Thumbs.db",
     ".idea",
     ".vscode",
-    ".DS_Store",
+    ".vs",
+    "*.egg-info",
+    ".eggs",
 ];
 
 /// tree filter: max output lines before truncation
