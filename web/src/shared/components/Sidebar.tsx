@@ -83,10 +83,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const [pathname, setPathname] = useState(() =>
     typeof window !== "undefined" ? window.location.pathname : ""
   );
-  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
     setPathname(window.location.pathname);
   }, []);
 
