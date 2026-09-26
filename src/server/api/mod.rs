@@ -1150,19 +1150,22 @@ async fn create_provider_api(
             .into_response();
     };
 
-    let Some(api_key) = req
+    // 9router keeps the key optional for Ollama Local and stores whatever came
+    // in — `apiKey: apiKey || ""` (route.js:119-121, :179) — so the dashboard's
+    // no-key-field form posts `""` and still creates the connection.
+    let api_key = req
         .api_key
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
+        .unwrap_or_default()
+        .to_string();
+    if api_key.is_empty() && !is_ollama_local_provider(provider) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "error": "API key is required" })),
         )
             .into_response();
-    };
+    }
 
     let (connection_proxy_enabled, connection_proxy_url, connection_no_proxy) =
         match normalize_create_provider_proxy(&req) {
@@ -3098,6 +3101,16 @@ fn bad_request_response(message: &str) -> Response {
 /// `api_key` field). Must match `WEB_COOKIE_PROVIDERS` in the dashboard.
 fn is_web_cookie_provider(provider: &str) -> bool {
     matches!(provider, "grok-web" | "perplexity-web" | "deepseek-web")
+}
+
+/// The one provider 9router's create route creates without an API key
+/// (route.js:119-121). It is a literal string in that guard, not a registry
+/// flag, so this is deliberately not the `no_auth` set the validate route
+/// short-circuits on (`provider_validate.rs`): ollama-local.js declares
+/// `category: "apikey"` and no `noAuth`, while every other member of that set is
+/// still rejected here for a missing key.
+fn is_ollama_local_provider(provider: &str) -> bool {
+    provider == "ollama-local"
 }
 
 /// Providers that authenticate with an API key — the union 9router's
