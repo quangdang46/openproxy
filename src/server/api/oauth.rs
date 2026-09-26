@@ -7061,10 +7061,16 @@ async fn handle_zed_proxy_connection(
             }
         };
 
-    // Best-effort user info for display name/email.
+    // Best-effort user info for display name/email — and, crucially, the
+    // organization id. `/client/llm_tokens` requires one, so a login that does
+    // not resolve and persist it produces a connection whose every chat call
+    // fails with "No Zed organization selected". The email is a nicety; this
+    // is load-bearing.
     let client = reqwest::Client::new();
     let auth = zed_auth::build_user_auth_header(&user_id, &access_token).unwrap_or_default();
     let mut email: Option<String> = None;
+    let mut system_id: Option<String> = None;
+    let mut organization_id: Option<String> = None;
     if let Ok(info) = client
         .get(format!(
             "{}{}",
@@ -7078,6 +7084,18 @@ async fn handle_zed_proxy_connection(
     {
         if let Ok(data) = info.json::<Value>().await {
             email = data.get("email").and_then(Value::as_str).map(String::from);
+            system_id = data
+                .get("system_id")
+                .or_else(|| data.get("systemId"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            // Same resolver the executor's fallback uses, so a connection
+            // created here and one resolved later cannot disagree.
+            organization_id = zed_auth::resolve_zed_organization_id(
+                &std::collections::BTreeMap::new(),
+                Some(&data),
+            );
         }
     }
 
@@ -7088,6 +7106,19 @@ async fn handle_zed_proxy_connection(
     let store_result = state
         .db
         .update(move |db| {
+            let mut psd = std::collections::BTreeMap::from([
+                psd_entry,
+                ("authMethod".to_string(), Value::String("oauth".into())),
+            ]);
+            // `x-zed-system-id` is minted per install in 9router
+            // (zedAuth.js:83) and sent on every cloud call. Absent it the
+            // gateway may attribute the account to no device.
+            if let Some(sid) = system_id {
+                psd.insert("systemId".to_string(), Value::String(sid));
+            }
+            if let Some(org) = organization_id {
+                psd.insert("organizationId".to_string(), Value::String(org));
+            }
             db.provider_connections
                 .push(crate::types::ProviderConnection {
                     id: connection_id.clone(),
@@ -7097,10 +7128,7 @@ async fn handle_zed_proxy_connection(
                     created_at: Some(now.clone()),
                     updated_at: Some(now),
                     access_token: Some(access_token),
-                    provider_specific_data: std::collections::BTreeMap::from([
-                        psd_entry,
-                        ("authMethod".to_string(), Value::String("oauth".into())),
-                    ]),
+                    provider_specific_data: psd,
                     test_status: Some("active".into()),
                     ..Default::default()
                 });

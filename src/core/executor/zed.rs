@@ -369,13 +369,18 @@ impl ZedExecutor {
             }
             if let Ok(info) = request.send().await {
                 if let Ok(data) = info.json::<Value>().await {
-                    organization_id = data
-                        .pointer("/organization/id")
-                        .or_else(|| data.get("organizationId"))
-                        .or_else(|| data.get("organization_id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
+                    // The same resolver the login uses. The previous field set
+                    // — /organization/id, organizationId, organization_id —
+                    // is not what Zed's /client/users/me returns, so the probe
+                    // could only ever produce an empty string, and
+                    // /client/llm_tokens then rejected the request with "No
+                    // Zed organization selected". This is the reader half of
+                    // that bug; the login persisting the id is the writer half.
+                    organization_id = zed_auth::resolve_zed_organization_id(
+                        &credentials.provider_specific_data,
+                        Some(&data),
+                    )
+                    .unwrap_or_default();
                 }
             }
         }

@@ -212,6 +212,65 @@ pub fn build_user_auth_header(user_id: &str, access_token: &str) -> Result<Strin
     Ok(format!("{user_id} {access_token}"))
 }
 
+/// 9router `normalizeOrganizationId` (zedAuth.js:216-225): a string passes
+/// through, a single-element array unwraps, anything else stringifies.
+pub fn normalize_organization_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(items) if items.len() == 1 => items.first().map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }),
+        Value::Array(_) | Value::Object(_) | Value::Number(_) | Value::Bool(_) => {
+            Some(value.to_string())
+        }
+        Value::Null => None,
+    }
+}
+
+/// Resolve the Zed organization id (JS `resolveZedOrganizationId`,
+/// zedAuth.js:227-239), with its precedence preserved exactly:
+///
+///   1. explicit `psd.organizationId` or `psd.defaultOrganizationId`
+///   2. `userInfo.default_organization_id` / `defaultOrganizationId`
+///   3. the first `organizations[]` entry flagged `is_personal`, else the first
+///
+/// This lives here, not at the call sites, because BOTH halves of the Zed
+/// login bug were the same bug seen from two ends: the login never persisted
+/// an organization id, and the executor probed three field names Zed's
+/// `/client/users/me` does not return (`organization/id`, `organizationId`,
+/// `organization_id`). Neither half alone fixes anything — the writer with
+/// the wrong reader still finds nothing, and the right reader with no writer
+/// has nothing to read.
+pub fn resolve_zed_organization_id(
+    psd: &std::collections::BTreeMap<String, Value>,
+    user_info: Option<&Value>,
+) -> Option<String> {
+    for key in ["organizationId", "defaultOrganizationId"] {
+        if let Some(v) = psd.get(key).and_then(normalize_organization_id) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    let Some(info) = user_info else {
+        return None;
+    };
+    for key in ["default_organization_id", "defaultOrganizationId"] {
+        if let Some(v) = info.get(key).and_then(normalize_organization_id) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    let orgs = info.get("organizations").and_then(Value::as_array)?;
+    let chosen = orgs
+        .iter()
+        .find(|o| o.get("is_personal").and_then(Value::as_bool) == Some(true))
+        .or_else(|| orgs.first())?;
+    chosen.get("id").and_then(normalize_organization_id)
+}
+
 /// Exchange the decrypted access token for a short-lived LLM bearer
 /// (JS fetchZedLlmToken): POST /client/llm_tokens with the organization id.
 pub async fn fetch_llm_token(
@@ -682,5 +741,119 @@ mod tests {
             decrypt_access_token(&blob, &auth.private_key_verifier).unwrap(),
             "legacy-token"
         );
+    }
+}
+
+#[cfg(test)]
+mod zed_org_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn psd(pairs: &[(&str, &str)]) -> BTreeMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
+    }
+
+    /// THE REGRESSION. `/client/llm_tokens` requires an organization id and
+    /// `fetch_llm_token` returns Err("No Zed organization selected") without
+    /// one, so every Zed chat failed. Nothing in the tree could produce the
+    /// value: the login persisted only `userId`/`authMethod`, and the reader
+    /// probed three field names `/client/users/me` does not return.
+    #[test]
+    fn an_organization_is_recovered_from_the_users_me_shape() {
+        let info = json!({
+            "default_organization_id": "org-default",
+            "organizations": [{"id": "org-personal", "is_personal": true}],
+        });
+        assert_eq!(
+            resolve_zed_organization_id(&BTreeMap::new(), Some(&info)).as_deref(),
+            Some("org-default")
+        );
+    }
+
+    /// 9router's precedence, in order. Each step must win over the ones below
+    /// it, so a future refactor cannot silently reorder them.
+    #[test]
+    fn explicit_psd_beats_the_user_payload() {
+        let info = json!({"default_organization_id": "from-user"});
+        assert_eq!(
+            resolve_zed_organization_id(&psd(&[("organizationId", "from-psd")]), Some(&info))
+                .as_deref(),
+            Some("from-psd")
+        );
+    }
+
+    #[test]
+    fn default_organization_id_is_an_accepted_spelling() {
+        let info = json!({"default_organization_id": "from-user"});
+        assert_eq!(
+            resolve_zed_organization_id(&psd(&[("defaultOrganizationId", "alt-psd")]), Some(&info))
+                .as_deref(),
+            Some("alt-psd")
+        );
+    }
+
+    /// With no explicit value, the personal organization wins over the first
+    /// entry — a user's personal org is not necessarily `organizations[0]`.
+    #[test]
+    fn the_personal_organization_wins_over_the_first_entry() {
+        let info = json!({
+            "organizations": [
+                {"id": "org-team", "is_personal": false},
+                {"id": "org-mine", "is_personal": true},
+            ]
+        });
+        assert_eq!(
+            resolve_zed_organization_id(&BTreeMap::new(), Some(&info)).as_deref(),
+            Some("org-mine")
+        );
+    }
+
+    /// No personal flag anywhere: fall back to the first entry rather than
+    /// giving up, which would reproduce the original failure.
+    #[test]
+    fn the_first_organization_is_the_last_resort() {
+        let info = json!({"organizations": [{"id": "org-first"}, {"id": "org-second"}]});
+        assert_eq!(
+            resolve_zed_organization_id(&BTreeMap::new(), Some(&info)).as_deref(),
+            Some("org-first")
+        );
+    }
+
+    /// An empty organizations array is not an organization; returning "" here
+    /// is what produced the empty-string id the old probe always yielded.
+    #[test]
+    fn no_organization_anywhere_resolves_to_none_not_empty_string() {
+        assert_eq!(
+            resolve_zed_organization_id(&BTreeMap::new(), Some(&json!({}))),
+            None
+        );
+        assert_eq!(
+            resolve_zed_organization_id(&BTreeMap::new(), Some(&json!({"organizations": []}))),
+            None
+        );
+        assert_eq!(resolve_zed_organization_id(&BTreeMap::new(), None), None);
+        assert_eq!(
+            resolve_zed_organization_id(&psd(&[("organizationId", "")]), Some(&json!({}))),
+            None,
+            "an empty psd value must not short-circuit as a valid id"
+        );
+    }
+
+    /// 9router normalizeOrganizationId: a single-element array unwraps.
+    #[test]
+    fn a_wrapped_single_element_array_is_unwrapped() {
+        assert_eq!(
+            normalize_organization_id(&json!(["org-1"])).as_deref(),
+            Some("org-1")
+        );
+        assert_eq!(
+            normalize_organization_id(&json!("org-2")).as_deref(),
+            Some("org-2")
+        );
+        assert_eq!(normalize_organization_id(&Value::Null), None);
     }
 }
