@@ -136,6 +136,15 @@ async fn dashboard_fallback(State(state): State<AppState>, request: Request<Body
         return (StatusCode::NOT_FOUND, "Not Found").into_response();
     }
 
+    // The landing URL is `/dashboard`, not `/`. A 307 keeps the canonical URL
+    // in the address bar so a bookmark, a reload and the in-app nav all land on
+    // the same screen — and, unlike the meta-refresh stub this replaced, it is
+    // a single server response, so it cannot loop against the `index.html` the
+    // Astro build emits for `/`.
+    if path == "/" {
+        return axum::response::Redirect::temporary("/dashboard").into_response();
+    }
+
     // Mode 1: reverse proxy
     if state.dashboard_sidecar_url.is_some() {
         return proxy_dashboard_request(state, request).await;
@@ -148,6 +157,22 @@ async fn dashboard_fallback(State(state): State<AppState>, request: Request<Body
 
     // Mode 3: embedded assets
     serve_embedded(request.uri()).await
+}
+
+/// Whether a candidate under `/dashboard` reached the shell fallback, i.e.
+/// matched no built page.
+///
+/// 9router answers any unmatched route with a real 404
+/// (`cli-tools/[toolId]/page.js:8`, `media-providers/[kind]/page.js:179`), so a
+/// deleted or renamed route is detectable by a crawler, a link checker or an
+/// uptime monitor. Falling through to `dashboard.html` instead returned 200
+/// and the endpoint page for a route that does not exist.
+///
+/// The dashboard build is static, so by the time we get here every built page
+/// and every dynamic-detail placeholder has already been probed: a miss under
+/// `/dashboard` really is an unknown route.
+fn is_unbuilt_dashboard_path(candidate: &str) -> bool {
+    candidate == "dashboard" || candidate.starts_with("dashboard/")
 }
 
 /// Paths that are owned by the API routers — never served by the dashboard.
@@ -199,6 +224,9 @@ async fn serve_embedded(uri: &Uri) -> Response {
         if let Some(resp) = dynamic_segment_fallback(candidate, lookup_embedded) {
             return resp;
         }
+        if is_unbuilt_dashboard_path(candidate) {
+            return (StatusCode::NOT_FOUND, "Not Found").into_response();
+        }
         // SPA fallback: requests without a file extension are client-router
         // routes. Serve the SPA shell so the JS router can take over.
         if let Some(resp) = lookup_embedded("dashboard.html") {
@@ -240,7 +268,12 @@ fn lookup_embedded(path: &str) -> Option<Response> {
 }
 
 fn normalize_asset_path(raw: &str) -> &str {
-    let trimmed = raw.trim_start_matches('/');
+    // The trailing slash goes too. 9router inherits Next's default
+    // `trailingSlash: false` and normalises `/dashboard/providers/` to
+    // `/dashboard/providers` before routing, so the user always gets the list
+    // page. Without the strip, the trailing slash leaves an empty final
+    // segment and `dynamic_segment_fallback` reads that as a provider id.
+    let trimmed = raw.trim_start_matches('/').trim_end_matches('/');
     if trimmed.is_empty() {
         "index.html"
     } else {
@@ -265,7 +298,13 @@ where
     F: Fn(&str) -> Option<Response>,
 {
     // Only attempt this for paths with at least two segments (parent + slug).
-    if let Some(parent) = candidate.rsplit_once('/').map(|(p, _)| p) {
+    // An empty slug means the URL ended in `/` — `normalize_asset_path` already
+    // strips that, so reaching here means a caller bypassed it, and the honest
+    // answer is "no detail page" rather than a detail shell with a blank id.
+    if let Some((parent, slug)) = candidate.rsplit_once('/') {
+        if slug.is_empty() {
+            return None;
+        }
         let fallback = format!("{parent}/_dynamic.html");
         if let Some(resp) = lookup(&fallback) {
             return Some(resp);
@@ -309,6 +348,9 @@ async fn serve_from_disk(root: &Path, uri: &Uri) -> Response {
         // Dynamic-segment fallback (mirrors embedded mode logic above).
         if let Some(resp) = dynamic_segment_fallback(candidate, |p| read_disk_asset(root, p)) {
             return resp;
+        }
+        if is_unbuilt_dashboard_path(candidate) {
+            return (StatusCode::NOT_FOUND, "Not Found").into_response();
         }
         if let Some(resp) = read_disk_asset(root, "dashboard.html") {
             return resp;

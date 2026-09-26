@@ -1,15 +1,20 @@
 ---
-// `/` shows the dashboard endpoint page directly. Previously this file
-// emitted a `<meta http-equiv="refresh" content="0;url=/dashboard">` stub
-// which, combined with `astro.config.mjs build.format: 'file'`, produced an
-// infinite redirect loop on the embedded server (bug #1 in the bug report).
-// Rendering the dashboard inline removes the round-trip entirely.
+// `/` is not a page: the server answers it with a 307 to `/dashboard`
+// (see `dashboard_fallback` in src/server/dashboard/mod.rs), which is what
+// 9router's `redirect('/dashboard')` does. This file only produces
+// `web/dist/index.html` — the last-resort shell the embedded server falls back
+// to for a path that is neither an asset nor a built page.
+//
+// It deliberately carries no redirect of its own. The meta-refresh stub this
+// replaced looked harmless but fought `build.format: 'file'` and could send
+// the browser back where it came from; a real 307 is a single response the
+// router can reason about, and this page has nothing left to say.
 import Layout from '@/layouts/Layout.astro';
-import EndpointPageClient from '@/components/EndpointPageClient';
-import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
-<Layout>
-  <DashboardLayout client:only="react">
-    <EndpointPageClient client:only="react" />
-  </DashboardLayout>
+<Layout title="OpenProxy">
+  <main class="min-h-screen flex items-center justify-center bg-canvas px-4">
+    <p class="text-sm text-muted">
+      Continue to <a href="/dashboard" class="text-primary hover:underline">/dashboard</a>.
+    </p>
+  </main>
 </Layout>

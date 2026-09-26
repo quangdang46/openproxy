@@ -363,9 +363,19 @@ fn edit_connection_modal_has_a_region_control() {
     );
     assert_contains(
         &src,
-        "updates.providerSpecificData = { region }",
+        "updates.providerSpecificData = buildRegionSpecificData()",
         EDIT_MODAL,
         "and writes it back (9router EditConnectionModal.js:171-174)",
+    );
+    // NOT `{ region }`, the shape Add builds (AddApiKeyModal.js:70-72). Add
+    // creates the blob so there is nothing to keep; Edit merges into what the
+    // connection already carries — proxyPoolId, baseUrl — or saving a region
+    // would wipe them (EditConnectionModal.js:71-74).
+    assert_contains(
+        &src,
+        "{ ...(connection?.providerSpecificData || {}), region }",
+        EDIT_MODAL,
+        "the saved region merges into the existing provider-specific data",
     );
     assert_contains(
         &src,
@@ -622,6 +632,11 @@ fn model_chips_are_native_buttons() {
 
 /// A native button must not contain interactive descendants, so the star and
 /// the checkbox are siblings of the chip rather than children.
+///
+/// The slice boundary is found by content, not by matching a block of indented
+/// JSX: only the chip takes `rowClick`, and its opening tag is the last
+/// `<button` before that handler. Pinning indentation here made the assertion
+/// fail on a reformat that changed nothing about the structure.
 #[test]
 fn model_chip_controls_are_siblings_not_descendants() {
     let src = read_src("shared/components/ModelSelectModal.tsx");
@@ -629,12 +644,14 @@ fn model_chip_controls_are_siblings_not_descendants() {
     let row_start = src
         .find("<div className=\"inline-flex items-center gap-0.5\" key={model.value}>")
         .expect("the chip row wrapper must exist");
-    let chip_start = src[row_start..]
-        .find(
-            "<button\n                    type=\"button\"\n                    onClick={rowClick}",
-        )
+    let chip_click = src[row_start..]
+        .find("onClick={rowClick}")
         .map(|i| row_start + i)
         .expect("the chip button must follow the star and the checkbox");
+    let chip_start = src[row_start..chip_click]
+        .rfind("<button")
+        .map(|i| row_start + i)
+        .expect("the chip must open a <button>, not hang a click handler off a div");
 
     let before_chip = &src[row_start..chip_start];
     assert_contains(
