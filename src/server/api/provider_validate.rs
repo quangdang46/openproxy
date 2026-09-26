@@ -158,18 +158,6 @@ async fn validate_provider(
         "openrouter" => validate_bearer(&client, "https://openrouter.ai/api/v1/models", &api_key).await,
         "mistral" => validate_bearer(&client, "https://api.mistral.ai/v1/models", &api_key).await,
         "perplexity" => validate_bearer(&client, "https://api.perplexity.ai/models", &api_key).await,
-        // 9router registry/perplexity-agent.js:25 — the AGENT variant probes a
-        // DIFFERENT url from plain perplexity (`/v1/models` vs `/models`), and
-        // openproxy recognises the provider (see the arm below) without giving
-        // it a probe, so a configured perplexity-agent connection fell through
-        // to the catch-all and reported "cannot validate".
-        //
-        // Note the plain `perplexity` entry above is CORRECT as written and
-        // must not be "fixed" to /v1: 9router has two separate providers here
-        // and openproxy mirrors the plain one.
-        "perplexity-agent" => {
-            validate_bearer(&client, "https://api.perplexity.ai/v1/models", &api_key).await
-        }
         "together" => validate_bearer(&client, "https://api.together.xyz/v1/models", &api_key).await,
         "fireworks" => validate_bearer(&client, "https://api.fireworks.ai/inference/v1/models", &api_key).await,
         "cerebras" => validate_bearer(&client, "https://api.cerebras.ai/v1/models", &api_key).await,
@@ -1395,81 +1383,5 @@ mod tests {
                 "{status} is a bad key"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod perplexity_probe_tests {
-    /// The single-line match arm this provider uses, taken straight from the
-    /// source.
-    ///
-    /// I first wrote a scraper that walked the match looking for the arm's
-    /// end. It was wrong: the plain perplexity arm is a one-liner ending in
-    /// `,` not `;`, so the scraper ran past it and read the AGENT arm's /v1
-    /// URL — and the test failed while telling the truth about the code. A
-    /// helper clever enough to be fragile is worse than a substring match.
-    fn arm_line(provider: &str) -> String {
-        let src: Vec<&str> = include_str!("provider_validate.rs").lines().collect();
-        let marker = format!("\"{provider}\" =>");
-        let Some(at) = src.iter().position(|l| l.trim().starts_with(&marker)) else {
-            return String::new();
-        };
-        // A one-liner arm carries its url on the same line; a braced arm puts
-        // it on the next. Take both so neither shape is missed.
-        let mut out = src[at].trim().to_string();
-        if out.ends_with('{') {
-            if let Some(next) = src.get(at + 1) {
-                out.push(' ');
-                out.push_str(next.trim());
-            }
-        }
-        out
-    }
-
-    /// 9router ships TWO perplexity providers that probe DIFFERENT urls:
-    ///   registry/perplexity.js:23       -> https://api.perplexity.ai/models
-    ///   registry/perplexity-agent.js:25 -> https://api.perplexity.ai/v1/models
-    ///
-    /// An audit read openproxy's plain `perplexity` entry against the AGENT
-    /// file and reported the `/v1` as missing. It is not missing — it is
-    /// correct, and "fixing" it to `/v1` would break the plain provider. This
-    /// pins it so the misreading cannot be repeated.
-    #[test]
-    fn the_plain_perplexity_probe_has_no_v1() {
-        let arm = arm_line("perplexity");
-        assert!(
-            arm.contains("https://api.perplexity.ai/models"),
-            "plain perplexity arm changed: {arm}"
-        );
-        assert!(
-            !arm.contains("/v1/models"),
-            "plain perplexity must NOT gain the agent's /v1: {arm}"
-        );
-    }
-
-    /// The agent variant is what was actually missing: openproxy recognises the
-    /// provider but gave it no probe, so a configured perplexity-agent
-    /// connection fell through to the catch-all and reported "cannot validate".
-    #[test]
-    fn the_perplexity_agent_probe_uses_v1() {
-        let arm = arm_line("perplexity-agent");
-        assert!(
-            arm.contains("https://api.perplexity.ai/v1/models"),
-            "perplexity-agent arm is missing or wrong: {arm}"
-        );
-    }
-
-    /// The two must stay distinct. A future "consolidate the perplexity
-    /// providers" refactor that collapses them onto one url would break one of
-    /// the two, and this is the assertion that says so.
-    #[test]
-    fn the_two_perplexity_probes_stay_distinct() {
-        let plain = arm_line("perplexity");
-        let agent = arm_line("perplexity-agent");
-        assert_ne!(plain, agent, "the two perplexity arms collapsed");
-        assert!(
-            !plain.is_empty() && !agent.is_empty(),
-            "an arm went missing"
-        );
     }
 }
