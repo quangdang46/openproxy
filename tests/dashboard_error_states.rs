@@ -8,9 +8,8 @@
 //!    cannot see that failure, so the UI reports success for an operation
 //!    the backend rejected. These must return 5xx.
 //! 2. `DELETE /api/provider-nodes/{id}` retained only `db.provider_nodes`,
-//!    orphaning the node's connections and custom models: they stayed in
-//!    `/api/providers` (and `filter_available_accounts`) with no UI left to
-//!    find or remove them.
+//!    orphaning the node's connections: they stayed in `/api/providers` (and
+//!    `filter_available_accounts`) with no UI left to find or remove them.
 //!
 //! Failure is forced by dropping the SQLite table the incremental diff writes
 //! to, so `Db::update` returns `Err` for real rather than being mocked.
@@ -320,12 +319,12 @@ async fn upsert_favorites_returns_500_when_db_write_fails() {
 
 // ── provider_nodes.rs ────────────────────────────────────────────
 // Deleting a compatible node used to retain only `db.provider_nodes`. Its
-// connections and custom models stayed behind: still listed by
-// /api/providers, still selectable in filter_available_accounts, and with no
-// UI left to find or remove them.
+// connections stayed behind: still listed by /api/providers, still selectable
+// in filter_available_accounts, and with no UI left to find or remove them.
+// The connections cascade with the node; the custom models do not.
 
 #[tokio::test]
-async fn delete_provider_node_removes_its_connections_and_custom_models() {
+async fn delete_provider_node_removes_its_connections_but_preserves_custom_models() {
     let state = app_state().await;
     state
         .db
@@ -367,8 +366,10 @@ async fn delete_provider_node_removes_its_connections_and_custom_models() {
         "connection conn-a was orphaned by the delete"
     );
     assert!(
-        !snapshot.custom_models.iter().any(|m| m.id == "model-a"),
-        "custom model model-a was orphaned by the delete"
+        snapshot.custom_models.iter().any(|m| m.id == "model-a"),
+        "custom models are user data keyed by provider alias, not owned by the node row: \
+         9router's delete leaves them behind so a node recreated with the same id gets \
+         its custom model list back"
     );
 
     // The other node's rows must survive untouched.
