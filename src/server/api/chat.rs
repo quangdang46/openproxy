@@ -1768,16 +1768,20 @@ async fn forward_with_provider_fallback(
                 }
             }
 
-            // 9router chat.js:237-249 splits these on what the credential
-            // lookup actually reported, not on `retry_after` alone:
+            // 9router splits these on what the credential lookup actually
+            // reported, not on `retry_after` alone:
             //   * every account rate-limited → 503 + Retry-After
             //   * nothing excluded → no account was ever attempted, so the
             //     provider has no usable credential at all → 404
             //   * otherwise the accounts were tried and ran out → 503
-            // The 503 body is deliberately not 9router's `[provider/model]
-            // <lastError> (reset after 4m 12s)` (chat.js:238-242):
-            // friendly_error_message replaces that whole message with canned
-            // English and strips the `[…]` prefix before the client sees it.
+            //
+            // The rate-limited arm used to ship a bare "All accounts for
+            // <provider>/<model> are cooling down" with no reset time, because
+            // `friendly_error_message` used to replace the whole composed body
+            // with canned English and strip the `[…]` prefix. It no longer does
+            // either, so the client now gets the real body — and
+            // `attempt_error_response` appends 9router's `(reset after 4m 12s)`
+            // suffix to it before the friendly pass.
             if retry_after.is_some() {
                 return Err(ComboAttemptError {
                     status: 503,
@@ -5667,6 +5671,38 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
+/// Human-readable form of a rate-limit reset time, ported from 9router
+/// `formatRetryAfter` (open-sse/services/accountFallback.js:90-103).
+///
+/// 9router ships this inside the error MESSAGE, not just the `Retry-After`
+/// header (`unavailableResponse`, error.js:117: `` `${message} (${retryAfterHuman})` ``).
+/// The header alone tells a well-behaved client when to come back; the suffix
+/// tells a human reading the error why it is waiting at all, and how long.
+fn format_retry_after(rate_limited_until: &DateTime<Utc>) -> String {
+    let diff_ms = (*rate_limited_until - Utc::now()).num_milliseconds();
+    if diff_ms <= 0 {
+        return "reset after 0s".to_string();
+    }
+    // Ceil, not floor: a 30.1s wait must not render as "reset after 29s".
+    let total_sec = (diff_ms + 999) / 1_000;
+    let hours = total_sec / 3_600;
+    let minutes = (total_sec % 3_600) / 60;
+    let seconds = total_sec % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    // 9router: `s > 0 || parts.length === 0` — a bare "reset after" with no
+    // number is worse than a redundant "0s".
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{seconds}s"));
+    }
+    format!("reset after {}", parts.join(" "))
+}
+
 fn combo_error_response(error: ComboExecutionError) -> Response {
     with_cors_response(attempt_error_response(ComboAttemptError {
         status: error.status,
@@ -5677,6 +5713,13 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
 }
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
+    // The composed message, with 9router's `(reset after …)` suffix, built
+    // BEFORE either branch so both see it (9router error.js:117-127).
+    let message = match error.retry_after {
+        Some(ref until) => format!("{} ({})", error.message, format_retry_after(until)),
+        None => error.message.clone(),
+    };
+
     // H23: When upstream_body is available, return it verbatim instead
     // of constructing a new error body.
     if let Some(body_bytes) = error.upstream_body {
@@ -5696,8 +5739,7 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
     // message text, and neither do we. Re-deriving is what turned a
     // handler-written 400 into 406/403 over its own prose.
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let friendly =
-        crate::core::utils::error::friendly_error_message(status.as_u16(), &error.message);
+    let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), &message);
     let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
     let mut response = (status, Json(body)).into_response();
 
@@ -6579,6 +6621,60 @@ mod tests {
             upstream_body: None,
         });
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// 9router `unavailableResponse` (error.js:117-127) puts the human-readable
+    /// reset time in the MESSAGE, not only in the header — the header tells a
+    /// well-behaved client when to return, the suffix tells whoever is reading
+    /// the error why it is waiting.
+    #[tokio::test]
+    async fn a_rate_limited_error_carries_the_reset_after_suffix_in_its_body() {
+        use super::attempt_error_response;
+        use crate::core::combo::ComboAttemptError;
+
+        let resp = attempt_error_response(ComboAttemptError {
+            status: 503,
+            message: "All accounts for openai/gpt-4o are cooling down".to_string(),
+            retry_after: Some(Utc::now() + ChronoDuration::seconds(150)),
+            upstream_body: None,
+        });
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.headers().contains_key("retry-after"));
+
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let message = parsed["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("All accounts for openai/gpt-4o are cooling down ("),
+            "the composed body must survive: {message:?}"
+        );
+        assert!(
+            message.contains("reset after 2m 3") || message.contains("reset after 2m 2"),
+            "expected a ~2m30s reset, got {message:?}"
+        );
+        assert!(message.ends_with(')'), "{message:?}");
+    }
+
+    /// No retry window means no suffix — a 404 must not claim a reset time.
+    #[tokio::test]
+    async fn an_error_without_a_retry_window_has_no_reset_suffix() {
+        use super::attempt_error_response;
+        use crate::core::combo::ComboAttemptError;
+
+        let resp = attempt_error_response(ComboAttemptError {
+            status: 404,
+            message: "No active credentials for provider: openai".to_string(),
+            retry_after: None,
+            upstream_body: None,
+        });
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        let message = parsed["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("reset after"), "{message:?}");
     }
 
     #[test]
@@ -7644,5 +7740,44 @@ mod eof_order_tests {
     fn an_empty_eof_emits_nothing() {
         let plan = plan_eof_emits(false, "openai", false, vec![], vec![], None, vec![], vec![]);
         assert!(plan.is_empty(), "{plan:?}");
+    }
+}
+
+#[cfg(test)]
+mod retry_after_format_tests {
+    use super::format_retry_after;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn omits_zero_components() {
+        let until = Utc::now() + Duration::hours(1);
+        assert_eq!(format_retry_after(&until), "reset after 1h");
+    }
+
+    #[test]
+    fn formats_minutes_and_seconds() {
+        let until = Utc::now() + Duration::seconds(4 * 60 + 12);
+        assert_eq!(format_retry_after(&until), "reset after 4m 12s");
+    }
+
+    #[test]
+    fn formats_bare_seconds() {
+        let until = Utc::now() + Duration::seconds(9);
+        assert_eq!(format_retry_after(&until), "reset after 9s");
+    }
+
+    #[test]
+    fn formats_hours_minutes_and_seconds() {
+        let until = Utc::now() + Duration::hours(2) + Duration::minutes(30);
+        assert_eq!(format_retry_after(&until), "reset after 2h 30m");
+    }
+
+    /// A window that has already elapsed renders as zero rather than a
+    /// negative, and a window that rounds down to a whole second still carries
+    /// the seconds component.
+    #[test]
+    fn already_past_formats_as_zero() {
+        let until = Utc::now() - Duration::seconds(1);
+        assert_eq!(format_retry_after(&until), "reset after 0s");
     }
 }
