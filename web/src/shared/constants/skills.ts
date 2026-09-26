@@ -42,6 +42,13 @@ export const SKILLS: Skill[] = [
     icon: "image",
   },
   {
+    id: "openproxy-video",
+    name: "Video Generation",
+    description: "Async text-to-video and image-to-video jobs — submit, poll the request_id, download the MP4.",
+    endpoint: "/v1/videos/generations",
+    icon: "movie",
+  },
+  {
     id: "openproxy-tts",
     name: "Text-to-Speech",
     description: "OpenAI-compatible TTS routed through supported providers.",
