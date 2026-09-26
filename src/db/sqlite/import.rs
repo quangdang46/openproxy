@@ -8,7 +8,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use super::SqliteDb;
+use super::{patch::custom_model_key, SqliteDb};
 
 /// Import an `AppDb`-shaped JSON payload into the SQLite database.
 /// Wipes existing data and reinserts in an atomic transaction.
@@ -240,11 +240,19 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     import_kv_scope(conn, "modelAliases", payload.get("modelAliases"))?;
     if let Some(arr) = payload.get("customModels").and_then(Value::as_array) {
         for (idx, item) in arr.iter().enumerate() {
-            let fallback_key = format!("idx{idx}");
-            let key = item
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or(&fallback_key);
+            let field = |name: &str| item.get(name).and_then(Value::as_str).unwrap_or("");
+            let model_type = match field("type") {
+                "" => "llm",
+                model_type => model_type,
+            };
+            // A well-formed row is addressed the way 9router's `customKey()`
+            // does, so two providers may each customize the same model id —
+            // keyed on the id alone the second INSERT would abort the whole
+            // import on the `(scope, key)` primary key.
+            let key = match field("id") {
+                "" => format!("idx{idx}"),
+                id => custom_model_key(field("providerAlias"), id, model_type),
+            };
             let val_str = serde_json::to_string(item).unwrap_or_else(|_| "null".into());
             conn.execute(
                 "INSERT INTO kv(scope, key, value) VALUES('customModels', ?1, ?2)",
@@ -443,6 +451,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(lifetime, Some(4242));
+    }
+
+    #[test]
+    fn import_keeps_two_providers_customizing_the_same_model_id() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        import_db(
+            &db,
+            &json!({
+                "customModels": [
+                    { "providerAlias": "openai", "id": "gpt-4o", "type": "llm" },
+                    { "providerAlias": "anthropic", "id": "gpt-4o", "type": "llm" },
+                ],
+            }),
+        )
+        .unwrap();
+
+        let keys: Vec<String> = db
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT key FROM kv WHERE scope = 'customModels' ORDER BY key")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(keys, vec!["anthropic|gpt-4o|llm", "openai|gpt-4o|llm"]);
     }
 
     #[test]

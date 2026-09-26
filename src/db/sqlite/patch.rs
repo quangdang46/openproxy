@@ -241,12 +241,27 @@ fn kv_map_pricing(map: &PricingTable) -> HashMap<String, Value> {
         .collect()
 }
 
-/// Serialize `custom_models` (`Vec<CustomModel>`) into `id → Value`, matching
-/// the keying the `import_all` path uses (kv key = model id).
+/// 9router's `customKey()` (`9router/src/lib/db/repos/aliasRepo.js:23-25`):
+/// a custom model is addressed by `providerAlias|id|type`, never by the bare
+/// model id. The kv primary key is `(scope, key)`, so keying on the id alone let
+/// a second provider's custom model of the same name overwrite the first
+/// provider's row on disk — the in-memory `Vec` kept both until a restart, when
+/// the provider page's Available Models lost one.
+pub fn custom_model_key(provider_alias: &str, id: &str, model_type: &str) -> String {
+    format!("{provider_alias}|{id}|{model_type}")
+}
+
+/// Serialize `custom_models` (`Vec<CustomModel>`) into `composite key → Value`,
+/// matching the keying the `import_all` path uses.
 fn custom_models_map(models: &[crate::types::CustomModel]) -> HashMap<String, Value> {
     models
         .iter()
-        .map(|m| (m.id.clone(), serde_json::to_value(m).unwrap_or(Value::Null)))
+        .map(|m| {
+            (
+                custom_model_key(&m.provider_alias, &m.id, &m.r#type),
+                serde_json::to_value(m).unwrap_or(Value::Null),
+            )
+        })
         .collect()
 }
 
@@ -411,6 +426,11 @@ mod tests {
 
     #[test]
     fn create_update_delete_connection() {
+        // Serializes against encryption_boundary_data_column_holds_ciphertext
+        // for the same reason as unchanged_rows_not_written below: it reads a
+        // connection back, so it sees a `None` api_key whenever that test has
+        // the encryption key set and this row was written in plaintext.
+        let _guard = ENV_LOCK.lock();
         let db = open();
         let mut old = AppDb::default();
         let mut new = AppDb::default();
@@ -566,6 +586,46 @@ mod tests {
             .with_conn(|c| kv_repo::get_all(c, "customModels"))
             .unwrap();
         assert_eq!(all.len(), 0);
+    }
+
+    /// The kv row is the only durable copy of a custom model, and its key is
+    /// `(scope, key)` — so the bare model id made the second provider's write
+    /// overwrite the first provider's row, and the loss only surfaced on the
+    /// next reload.
+    #[test]
+    fn same_id_under_two_providers_is_two_rows() {
+        let db = open();
+        let mut old = AppDb::default();
+        let mut new = AppDb::default();
+        for provider in ["openai", "anthropic"] {
+            new.custom_models.push(CustomModel {
+                provider_alias: provider.into(),
+                id: "gpt-4o".into(),
+                r#type: "llm".into(),
+                name: None,
+                extra: BTreeMap::new(),
+            });
+        }
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+
+        let mut keys: Vec<String> = db
+            .with_conn(|c| kv_repo::get_all(c, "customModels"))
+            .unwrap()
+            .into_keys()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["anthropic|gpt-4o|llm", "openai|gpt-4o|llm"]);
+
+        // Removing one leaves the other — the delete is addressed by the same key.
+        old = new.clone();
+        new.custom_models.retain(|m| m.provider_alias != "openai");
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+        let all = db
+            .with_conn(|c| kv_repo::get_all(c, "customModels"))
+            .unwrap();
+        assert_eq!(all.keys().collect::<Vec<_>>(), vec!["anthropic|gpt-4o|llm"]);
     }
 
     #[test]
