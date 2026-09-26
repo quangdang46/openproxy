@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ChangeEvent } from "react";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 import { planBulkAdd } from "@/shared/utils/bulkAdd";
@@ -66,6 +66,15 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [validating, setValidating] = useState<boolean>(false);
   const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
+
+  // One modal instance serves every provider, so `useState` alone seeds the
+  // region for whichever provider was on screen at mount. Without the re-seed
+  // the Select keeps the previously-opened provider's region — or none at all,
+  // which buildProviderSpecificData then drops, leaving the connection without
+  // a cluster.
+  useEffect(() => {
+    setRegion(defaultRegion);
+  }, [defaultRegion]);
 
   // Bulk add: one key per line. Cloudflare uses name|apiKey|accountId.
   // Skipped for Azure/Ollama/xAI single-key flows that need extra fields.
