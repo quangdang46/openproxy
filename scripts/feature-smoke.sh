@@ -79,6 +79,41 @@ for c in conns:
 ' 2>/dev/null || printf '  (provider list unavailable)\n'
 fi
 
+# Opt-in: a REAL inference call against a real upstream.
+#
+# This is the only check that can catch what cargo cannot — a gate header the
+# gateway rejects, an executor that never reaches the wire, a translation that
+# returns 200 with an empty body. It is off by default because it costs tokens
+# and must not run on a 30-minute timer.
+#
+#   SMOKE_LIVE=1  run it
+#   SMOKE_LIVE_MODEL=<id>  pick the upstream (default below)
+#
+# The request is /v1/messages with stream:true on purpose: that is the
+# TRANSLATED SSE path (Anthropic client, OpenAI upstream), the one that dropped
+# 100% of its content before bead g37k. A passthrough probe would have stayed
+# green through that whole regression.
+if [ "${SMOKE_LIVE:-0}" = "1" ] && [ -n "$KEY" ]; then
+  echo "== live translated stream (costs tokens) =="
+  MODEL="${SMOKE_LIVE_MODEL:-oc/mimo-v2.5-free}"
+  body=$(curl -s -N -m 120 \
+    -H "authorization: Bearer $KEY" -H "content-type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"max_tokens\":24,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: SMOKE_OK\"}]}" \
+    "$BASE/v1/messages" 2>/dev/null)
+  if printf '%s' "$body" | grep -q '"type":"error"'; then
+    # An upstream refusal (billing, model gone, rate limit) is the operator's,
+    # not a translation regression — report it, do not fail the smoke.
+    printf '  warn upstream refused: %s\n' \
+      "$(printf '%s' "$body" | head -c 160)"
+  elif printf '%s' "$body" | grep -q 'text_delta'; then
+    pass "live /v1/messages stream carried a text_delta"
+  elif printf '%s' "$body" | grep -q 'message_start'; then
+    fail "live stream returned message_start but NO content — the g37k regression, live"
+  else
+    fail "live stream returned no recognisable Anthropic frames"
+  fi
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "SMOKE OK"
