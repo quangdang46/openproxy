@@ -1775,12 +1775,23 @@ fn media_error_response(status: StatusCode, message: &str) -> Response {
     with_cors_response((status, Json(body)).into_response())
 }
 
+/// The media-route error response.
+///
+/// Uses the status VERBATIM and the message untouched, matching 9router's
+/// `errorResponse` (open-sse/utils/error.js:30-38) and the sibling
+/// [`video_error_response`].
+///
+/// It used to run the chat-oriented `infer_status_from_message` and
+/// `friendly_error_message` heuristics first, which rewrote a client-chosen
+/// status off the message TEXT: a 400 "Combos are not supported for video
+/// generation" came back as 406, because the re-deriver maps "not supported" to
+/// 406. 9router has no such re-deriver at all — `buildErrorBody` takes the
+/// status it is given — so that heuristic is an openproxy-only invention, and
+/// applied to a message openproxy generated ITSELF it silently relabelled
+/// local validation failures as upstream ones. `friendly_error_message` also
+/// replaced the text with generic prose that dropped the provider name.
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    let status_code =
-        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
-    let status = StatusCode::from_u16(status_code).unwrap_or(status);
-    let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
-    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(message));
     with_cors_response((status, Json(body)).into_response())
 }
 
@@ -3341,16 +3352,37 @@ mod tests {
 
     /// And the contrast that makes the bug visible: the shared chat-oriented
     /// constructor really does mangle the same input.
+    /// The inverse of what this test used to assert. It pinned the DIVERGENCE
+    /// as intended behaviour: that a 400 openproxy generated itself came back
+    /// as 406, because `infer_status_from_message` maps "not supported" -> 406.
+    /// 9router's `errorResponse` uses the status verbatim, so parity is that the
+    /// 400 stays a 400.
     #[tokio::test]
-    async fn shared_json_error_response_rewrites_video_text() {
+    async fn a_local_bad_request_keeps_its_status() {
         let response = json_error_response(
             StatusCode::BAD_REQUEST,
             "Combos are not supported for video generation",
         );
-        assert_ne!(
+        assert_eq!(
             response.status(),
             StatusCode::BAD_REQUEST,
-            "infer_status_from_message turns this into 406"
+            "9router errorResponse uses the status verbatim; a message openproxy \
+             wrote itself must not be re-derived into an upstream-looking 406"
+        );
+    }
+
+    /// And the message must survive verbatim — `friendly_error_message` used to
+    /// replace it with generic prose that dropped the provider name.
+    #[tokio::test]
+    async fn a_local_error_keeps_its_message() {
+        let response = json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Combos are not supported for video generation",
+        );
+        let body = response_text(response).await;
+        assert!(
+            body.contains("video generation"),
+            "the provider/route named in the message must survive: {body}"
         );
     }
 
@@ -3839,4 +3871,14 @@ mod combo_media_tests {
             assert!(!combo_expands(route), "{route} must not expand combos");
         }
     }
+}
+
+#[cfg(test)]
+async fn response_text(response: Response) -> String {
+    String::from_utf8_lossy(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .into_owned()
 }
