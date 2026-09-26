@@ -2619,4 +2619,41 @@ mod zed_models_tests {
     fn an_empty_catalog_yields_no_models() {
         assert!(map_zed_catalog_models(&[]).is_empty());
     }
+
+    /// Dispatch, not mapping. A mapping test passes even if the arm was never
+    /// registered, and that is exactly the shape of the original defect: the
+    /// functions all existed and were correct, and Zed still failed because the
+    /// match never reached them. A zed connection with no access token must
+    /// therefore fail with the Zed-specific message, NOT the catch-all's
+    /// "does not support models listing".
+    #[tokio::test]
+    async fn a_zed_connection_reaches_the_zed_arm() {
+        let connection = ProviderConnection {
+            id: "zed-conn".into(),
+            provider: "zed".into(),
+            auth_type: "oauth".into(),
+            // No access token: fails inside fetch_zed_models, which proves the
+            // arm was taken without needing a network call or a Zed account.
+            ..Default::default()
+        };
+        let db = std::sync::Arc::new(openproxy_types_test_db().await);
+        let state = crate::server::state::AppState::new(db);
+        let err = fetch_provider_models_response(&state, &connection)
+            .await
+            .expect_err("no token must not succeed");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("Zed connection has no access token"),
+            "the zed arm must produce its own error, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("does not support models listing"),
+            "zed fell through to the catch-all: {rendered}"
+        );
+    }
+
+    async fn openproxy_types_test_db() -> crate::db::Db {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        crate::db::Db::load_from(tmp.path()).await.expect("db")
+    }
 }
