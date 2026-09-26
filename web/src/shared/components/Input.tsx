@@ -5,9 +5,9 @@ import React from "react";
 import type { InputProps } from "@/types";
 
 /**
- * MiniMax text-input — 8px rounded, 1px hairline border, 2px brand-blue-deep
- * focus ring, 40px desktop height. Error: 1px #d45656 border + matching
- * red label.
+ * Text input — 10px rounded, transparent border, 2px coral focus ring, and no
+ * fixed height so the 16px mobile font grows the box instead of being crammed
+ * into one. Error: 1px red ring + matching red message.
  */
 export default function Input({
   label,
@@ -35,7 +35,7 @@ export default function Input({
       <div className="relative">
         {icon && (
           <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-steel">
-            <span className="material-symbols-outlined text-[18px]">{icon}</span>
+            <span className="material-symbols-outlined text-[20px]">{icon}</span>
           </div>
         )}
         <input
@@ -45,28 +45,27 @@ export default function Input({
           onChange={onChange}
           disabled={disabled}
           className={cn(
-            "w-full h-10 py-2.5 px-3 text-[14px] text-ink bg-canvas rounded-mini-md",
-            "border border-hairline placeholder:text-muted-soft",
+            "w-full py-2.5 px-3 text-sm text-ink bg-surface-2 rounded-[10px]",
+            "border border-transparent placeholder:text-muted-soft",
             "focus:outline-none focus:border-brand-coral focus:ring-2 focus:ring-brand-coral/25 focus:[border-width:1px]",
             "transition-colors duration-150 ease-out disabled:opacity-50 disabled:cursor-not-allowed",
             // iOS zoom fix
-            "text-[16px] sm:text-[14px]",
+            "text-[16px] sm:text-sm",
             icon && "pl-10",
-            error &&
-              "border-[color:var(--color-danger)] focus:border-[color:var(--color-danger)]",
+            error && "ring-1 ring-red-500 focus:ring-2 focus:ring-red-500/40 border-red-500/40",
             inputClassName
           )}
           {...props}
         />
       </div>
       {error && (
-        <p className="type-body-sm text-[color:var(--color-danger)] flex items-center gap-1">
+        <p className="text-xs text-[color:var(--color-danger)] flex items-center gap-1">
           <span className="material-symbols-outlined text-[14px]">error</span>
           {error}
         </p>
       )}
       {hint && !error && (
-        <p className="type-body-sm text-slate">{hint}</p>
+        <p className="text-xs text-slate">{hint}</p>
       )}
     </div>
   );
