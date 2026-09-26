@@ -278,4 +278,54 @@ mod tests {
             assert!(p.sse_to_json, "{provider} aggregates to JSON");
         }
     }
+
+    /// qxxf finding 9 says to DELETE the opencode/oc forceStream entries
+    /// because 9router's registry marks forceStream on eight providers and
+    /// opencode is not one of them. Following that would break the free tier.
+    ///
+    /// Proven live against the real gateway on 2026-09-27, both directions:
+    ///
+    ///   with the entry    stream:false -> 200, content "NONSTREAM_OK"
+    ///   without the entry stream:false -> FreeTierError
+    ///                       "OpenCode's free tier can only be used from
+    ///                        within OpenCode"
+    ///
+    /// The registry is not the whole reference: 9router's opencode EXECUTOR
+    /// forces `Accept: text/event-stream` and the FreeTierError string appears
+    /// nowhere in this checkout, but the gateway enforces the gate regardless.
+    /// A registry-only reading of parity would ship that break.
+    ///
+    /// This test exists so the next "match the registry exactly" cleanup cannot
+    /// remove the entry on evidence this thin.
+    #[test]
+    fn opencode_forces_streaming_against_a_live_free_tier_gate() {
+        for provider in ["opencode", "oc"] {
+            assert!(
+                provider_requires_streaming(provider),
+                "{provider} must force upstream streaming or the free tier 403s"
+            );
+        }
+    }
+
+    /// The eight providers 9router's registry actually marks, so the
+    /// opencode entry above is an ADDITION with its own justification rather
+    /// than a silent divergence in the middle of a copied list.
+    #[test]
+    fn the_registry_marked_set_is_preserved_alongside_it() {
+        for provider in [
+            "commandcode",
+            "grok-cli",
+            "codex",
+            "codebuddy-intl",
+            "codebuddy-cn",
+            "openai",
+            "zed",
+            "api-airforce",
+        ] {
+            assert!(
+                provider_requires_streaming(provider),
+                "{provider} is registry-marked"
+            );
+        }
+    }
 }
