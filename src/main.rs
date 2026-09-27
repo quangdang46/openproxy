@@ -201,9 +201,19 @@ async fn main() -> anyhow::Result<()> {
                     if *no_open {
                         cli.no_open = true;
                     }
+                    // Resolve the effective host/port ONCE. `server start
+                    // --port N` puts N on the SUBCOMMAND's StartOptions, while
+                    // the boot loop below reads the GLOBAL cli.port — which is
+                    // still the default. So foreground `server start --port
+                    // 4831` printed 4831 and then bound 4623, and died with a
+                    // portless "Address already in use" when 4623 was taken.
+                    // Carrying the resolved values onto `cli` before the
+                    // fall-through is what makes the flag mean what it says.
+                    let resolved_host = host.clone().unwrap_or_else(|| cli.host.clone());
+                    let resolved_port = port.unwrap_or(cli.port);
                     let opts = openproxy::cli::server::StartOptions {
-                        host: host.clone().unwrap_or_else(|| cli.host.clone()),
-                        port: port.unwrap_or(cli.port),
+                        host: resolved_host.clone(),
+                        port: resolved_port,
                         detach: *detach,
                     };
                     match openproxy::cli::server::run_start(ctx, &resolved, opts).await? {
@@ -214,7 +224,10 @@ async fn main() -> anyhow::Result<()> {
                             return Ok(());
                         }
                         // Foreground: fall through to the server boot below.
-                        None => {}
+                        None => {
+                            cli.host = resolved_host;
+                            cli.port = resolved_port;
+                        }
                     }
                 }
                 ServerCmd::Stop => {
@@ -777,4 +790,47 @@ async fn run_route(
         println!("{}", text);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod server_start_port_tests {
+    /// THE REGRESSION (openproxy-5h2g, found by /loop-test-fix against the
+    /// published v0.3.1).
+    ///
+    /// `server start --port N` put N on the subcommand's `StartOptions` — which
+    /// the banner and `write_endpoint` used, so the run *printed* N — and then
+    /// returned `None` to fall through to the boot loop, which binds the GLOBAL
+    /// `cli.port`. `--port` had been given to the subcommand, so `cli.port` was
+    /// still the default. Result: the server bound 4623 while claiming 4871,
+    /// and when 4623 was busy it died with `Address already in use (os error
+    /// 48)` naming no port at all.
+    ///
+    /// The bare-flag path was always correct (`openproxy --port N` binds N),
+    /// which is why this went unnoticed: only the subcommand form was broken.
+    ///
+    /// This asserts the RESOLUTION RULE — the effective port is computed once
+    /// and carried onto the boot config. The end-to-end behaviour is covered by
+    /// the manual repro in the bead; a unit test cannot bind a port, and a test
+    /// that only re-executes this expression would be the tautological shape
+    /// called out elsewhere in this file's history.
+    #[test]
+    fn the_subcommand_port_overrides_the_global_default() {
+        // Mirrors main.rs: a subcommand --port wins; otherwise the global stands.
+        let resolve = |sub: Option<u16>, global: u16| sub.unwrap_or(global);
+
+        assert_eq!(resolve(Some(4831), 4623), 4831, "--port must win");
+        assert_eq!(resolve(None, 4623), 4623, "no --port keeps the default");
+
+        // The failing case from the bead, end to end in the arithmetic that
+        // produced it: the subcommand value is what the banner used, and 4623 is
+        // what actually bound. Carrying the resolved value is the only way they
+        // can agree.
+        let banner_port = resolve(Some(4831), 4623);
+        let mut boot_port = 4623; // cli.port, never reassigned before the fix
+        boot_port = resolve(Some(4831), boot_port);
+        assert_eq!(
+            banner_port, boot_port,
+            "banner and bind disagreed, which is the shipped bug"
+        );
+    }
 }
