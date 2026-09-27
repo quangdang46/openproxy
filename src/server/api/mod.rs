@@ -1264,9 +1264,43 @@ async fn create_provider_api(
         default_conn.provider_specific_data.extend(fields);
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
+            // 9router connectionsRepo.js:165-167 collapses an apikey connection
+            // onto an existing row with the same (authType, name) instead of
+            // adding a second one. `access_token` connections are explicitly
+            // NOT deduped there — 'user manages duplicates manually' — so the
+            // guard is scoped to apikey exactly as the reference scopes it.
+            //
+            // Without this, adding a connection whose name already exists
+            // produced two rows with the same name, and the dashboard then
+            // showed an ambiguous list with no way to tell which one is live.
+            if default_conn.auth_type == "apikey" {
+                if let Some(name) = default_conn.name.clone() {
+                    if let Some(existing) = db.provider_connections.iter_mut().find(|c| {
+                        c.provider == default_conn.provider
+                            && c.auth_type == "apikey"
+                            && c.name.as_deref() == Some(name.as_str())
+                    }) {
+                        // Merge into the existing row, keeping its id: the
+                        // caller holds references to connections by id, so
+                        // replacing the row would orphan them.
+                        existing.api_key = default_conn.api_key.clone();
+                        existing.default_model = default_conn.default_model.clone();
+                        existing.is_active = default_conn.is_active;
+                        existing.updated_at = default_conn.updated_at.clone();
+                        existing.provider_specific_data =
+                            default_conn.provider_specific_data.clone();
+                        existing.test_status = default_conn.test_status.clone();
+                        collapsed = Some(existing.clone());
+                        return;
+                    }
+                }
+            }
             db.provider_connections.push(default_conn.clone());
             // 9router reorderInTx on create: a new connection lands at 1..n
             // instead of carrying whatever priority the client sent, which
@@ -1280,7 +1314,12 @@ async fn create_provider_api(
             StatusCode::CREATED,
             Json(json!({
                 "success": true,
-                "connection": redact_provider_connection(&default_conn)
+                // Report the row that survives, not the one that was
+                // discarded — otherwise a collapsing add answers with an id the
+                // caller never had.
+                "connection": redact_provider_connection(
+                    collapsed.as_ref().unwrap_or(&default_conn),
+                )
             })),
         )
             .into_response(),
@@ -1352,6 +1391,9 @@ async fn update_provider_api(
         )
             .into_response();
     }
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1423,6 +1465,9 @@ async fn delete_provider_api(
         )
             .into_response();
     }
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1485,6 +1530,9 @@ async fn create_node_api(
         extra: std::collections::BTreeMap::new(),
     };
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1606,6 +1654,9 @@ async fn create_combo_api(
         extra,
     };
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1658,6 +1709,9 @@ async fn update_combo_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1721,6 +1775,9 @@ async fn delete_combo_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1800,6 +1857,9 @@ async fn create_key_api(
         extra: std::collections::BTreeMap::new(),
     };
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1859,6 +1919,9 @@ async fn update_key_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -1919,6 +1982,9 @@ async fn delete_key_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -2112,6 +2178,9 @@ async fn create_pool_api(
     pool.created_at = Some(now.clone());
     pool.updated_at = Some(now);
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -2162,6 +2231,9 @@ async fn update_pool_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -2260,6 +2332,9 @@ async fn delete_pool_api(
             .into_response();
     }
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -2518,6 +2593,9 @@ async fn update_settings_api(
         || req.combo_strategies.is_some()
         || req.combo_sticky_round_robin_limit.is_some();
 
+    // Filled by the closure when an existing row was collapsed onto, so the
+    // response can describe the row the caller will actually keep using.
+    let mut collapsed: Option<crate::types::ProviderConnection> = None;
     let result = state
         .db
         .update(|db| {
@@ -3705,6 +3783,48 @@ mod connection_priority_tests {
         assert_eq!(
             v.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             vec!["a", "b", "c"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod apikey_name_collapse_tests {
+    use super::*;
+
+    /// THE GAP. Adding an API-key connection whose name already existed created
+    /// a SECOND row with that name, leaving the dashboard showing two
+    /// indistinguishable connections and no way to tell which one is live.
+    ///
+    /// 9router collapses it: for `authType === "apikey" && data.name` it finds
+    /// the existing (apikey, name) row and merges into it, keeping the id
+    /// (connectionsRepo.js:165-175). Scoped to apikey on purpose — the line
+    /// below it says access_token connections are 'never dedup — user manages
+    /// duplicates manually'.
+    #[test]
+    fn the_collapse_predicate_is_scoped_to_apikey_connections() {
+        let matches = |existing: &ProviderConnection, incoming_auth: &str, name: &str| {
+            existing.provider == "openai-compatible"
+                && existing.auth_type == incoming_auth
+                && existing.name.as_deref() == Some(name)
+        };
+
+        let apikey = ProviderConnection {
+            provider: "openai-compatible".into(),
+            auth_type: "apikey".into(),
+            name: Some("prod".into()),
+            ..Default::default()
+        };
+        assert!(
+            matches(&apikey, "apikey", "prod"),
+            "an apikey connection with the same name must collapse"
+        );
+        assert!(
+            !matches(&apikey, "access_token", "prod"),
+            "access_token connections are never deduped by the reference"
+        );
+        assert!(
+            !matches(&apikey, "apikey", "staging"),
+            "a different name is a different connection"
         );
     }
 }
