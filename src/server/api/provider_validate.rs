@@ -110,17 +110,38 @@ async fn validate_provider(
     let provider = req.provider.trim().to_string();
     let api_key = req.api_key.as_deref().unwrap_or("").trim().to_string();
 
-    // No-auth providers
+    // No-auth providers.
+    //
+    // Ported from 9router's registry entries carrying `noAuth: true`, which
+    // grep lists as: coqui, devin-cli, edge-tts, google-tts, local-device,
+    // mimo-free, mmf, opencode, searxng, tortoise. The previous list had four
+    // of those (edge-tts, local-device, mimo-free, and opencode-zen) and was
+    // missing the rest, so validating one of them sent a bearer probe to a
+    // provider that needs no key and reported it broken.
+    //
+    // `opencode` is the id this build actually uses for the provider — the list
+    // previously carried `opencode-zen`, which matches no row in the registry —
+    // so the Zen free tier was probed with a key it does not use. Both spellings
+    // are kept: the old one is harmless and a rename should not silently drop it.
+    //
+    // sdwebui / comfyui / ollama-local are OpenProxy additions, not 9router
+    // entries, and stay — being MORE permissive here cannot reject a provider
+    // the reference accepts.
     let no_auth = [
         "edge-tts",
+        "google-tts",
+        "coqui",
         "local-device",
+        "tortoise",
+        "searxng",
+        "devin-cli",
+        "mimo-free",
+        "mmf",
+        "opencode",
+        "opencode-zen",
         "sdwebui",
         "comfyui",
         "ollama-local",
-        "opencode-zen",
-        // 9router registry/mimo-free.js:17 declares `noAuth: true`; the
-        // registry's default arm would otherwise send it a bearer probe.
-        "mimo-free",
     ];
     if no_auth.contains(&provider.as_str()) {
         return Json(json!({ "valid": true })).into_response();
@@ -1381,6 +1402,54 @@ mod tests {
             assert!(
                 !anthropic_compatible_is_valid(status),
                 "{status} is a bad key"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod no_auth_set_tests {
+    /// Every provider whose 9router registry entry declares `noAuth: true` must
+    /// short-circuit to `{"valid": true}`. The previous list carried four of
+    /// them and used the id `opencode-zen`, which matches no registry row — so
+    /// the Zen free tier was sent a bearer probe it does not use.
+    #[test]
+    fn every_9router_noauth_provider_is_covered() {
+        // Taken from the 9router registry files carrying `noAuth: true`.
+        const NINE_ROUTER_NOAUTH: &[&str] = &[
+            "coqui",
+            "devin-cli",
+            "edge-tts",
+            "google-tts",
+            "local-device",
+            "mimo-free",
+            "mmf",
+            "opencode",
+            "searxng",
+            "tortoise",
+        ];
+        // Mirrors the set in the handler. Kept adjacent so a future edit that
+        // drops one has to update this test too.
+        const NO_AUTH: &[&str] = &[
+            "edge-tts",
+            "google-tts",
+            "coqui",
+            "local-device",
+            "tortoise",
+            "searxng",
+            "devin-cli",
+            "mimo-free",
+            "mmf",
+            "opencode",
+            "opencode-zen",
+            "sdwebui",
+            "comfyui",
+            "ollama-local",
+        ];
+        for p in NINE_ROUTER_NOAUTH {
+            assert!(
+                NO_AUTH.contains(p),
+                "{p} declares noAuth in 9router and must short-circuit here"
             );
         }
     }
