@@ -188,6 +188,32 @@ async fn validate_provider(
         "hyperbolic" => validate_bearer(&client, "https://api.hyperbolic.xyz/v1/models", &api_key).await,
         "chutes" => validate_bearer(&client, "https://llm.chutes.ai/v1/models", &api_key).await,
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,
+        // Ported from 9router's probe table (testUtils.js). Only the providers
+        // whose reference case is a plain bearer probe are added here — see the
+        // bead note for the eight that are NOT, and why porting them as bearer
+        // probes would be wrong.
+        "vercel-ai-gateway" => {
+            validate_bearer(&client, "https://ai-gateway.vercel.sh/v1/models", &api_key).await
+        }
+        "glm-cn" => validate_bearer(
+            &client,
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+            &api_key,
+        )
+        .await,
+        "alims-intl" => validate_bearer(
+            &client,
+            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            &api_key,
+        )
+        .await,
+        "fal-ai" => validate_bearer(&client, "https://api.fal.ai/v1/models?limit=1", &api_key).await,
+        "kimchi" => validate_bearer(
+            &client,
+            "https://api.cast.ai/v1/llm/openai/supported-providers",
+            &api_key,
+        )
+        .await,
         "xiaomi-mimo" => validate_bearer(&client, "https://api.xiaomimimo.com/v1/models", &api_key).await,
         "xiaomi-tokenplan" => {
             let region = req.provider_specific_data.as_ref()
