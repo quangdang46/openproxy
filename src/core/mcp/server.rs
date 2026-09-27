@@ -599,7 +599,7 @@ fn tool_table() -> Vec<ToolHandler> {
             "health",
             "Get server health status",
             json!({}),
-            |_state, _args| { Ok(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })) }
+            |_state, _args| { Ok(json!({ "status": "ok", "version": env!("OPENPROXY_VERSION") })) }
         ),
         // ── Settings tools ────────────────────────────────────────────────
         mcp_tool!(
@@ -677,7 +677,7 @@ fn handle_initialize(id: Value) -> Value {
             },
             server_info: McpServerInfo {
                 name: "openproxy",
-                version: env!("CARGO_PKG_VERSION"),
+                version: env!("OPENPROXY_VERSION"),
             },
         })
         .unwrap_or_default(),
@@ -869,7 +869,7 @@ fn handle_resources_read(state: &AppState, id: Value, params: &Value) -> Value {
     let text = match uri {
         "openproxy://health" => serde_json::to_string_pretty(&json!({
             "status": "ok",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": env!("OPENPROXY_VERSION"),
         })),
         "openproxy://models" => {
             let snap = state.db.snapshot();

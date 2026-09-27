@@ -64,7 +64,7 @@ impl AgentCard {
             name: "OpenProxy".to_string(),
             description: "OpenProxy — AI proxy/router for multi-provider model access, routing, and configuration management".to_string(),
             url: format!("{api_base}/api/a2a"),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("OPENPROXY_VERSION").to_string(),
             capabilities: AgentCapabilities {
                 streaming: true,
                 push_notifications: false,
@@ -425,7 +425,7 @@ fn handle_health_skill() -> Vec<TaskPart> {
         r#type: "text".to_string(),
         text: Some(format!(
             "OpenProxy v{} is running.",
-            env!("CARGO_PKG_VERSION")
+            env!("OPENPROXY_VERSION")
         )),
         metadata: None,
     }]
@@ -434,7 +434,7 @@ fn handle_health_skill() -> Vec<TaskPart> {
 fn handle_generic_task(text: &str, state: &crate::server::state::AppState) -> Vec<TaskPart> {
     let snap = state.db.snapshot();
     let info = json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("OPENPROXY_VERSION"),
         "providers": snap.provider_connections.len(),
         "combos": snap.combos.len(),
         "api_keys": snap.api_keys.len(),

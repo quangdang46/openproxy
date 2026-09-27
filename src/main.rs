@@ -459,7 +459,7 @@ async fn main() -> anyhow::Result<()> {
     // stdout is captured (containers, CI, …). The tracing subscriber
     // writes to the log file only — this is the only terminal feedback.
     eprintln!();
-    eprintln!("  openproxy {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  openproxy {}", env!("OPENPROXY_VERSION"));
     eprintln!(
         "  Dashboard → http://{}:{}",
         browser_host(&cli.host),

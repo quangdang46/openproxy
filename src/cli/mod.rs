@@ -66,7 +66,12 @@ pub mod tests;
 #[command(
     name = "openproxy",
     about = "Local AI routing gateway (server + agent-first CLI)",
-    version
+    // The tag-derived version, not clap's CARGO_PKG_VERSION default. A tagged
+    // release is built from a Cargo.toml that is only bumped by hand, so the
+    // default made v0.3.1 and v0.3.2 both announce "0.3.0" — in `--version` and,
+    // via the same constant, in the A2A and MCP handshakes. build.rs resolves
+    // CI tag -> git tag -> CARGO_PKG_VERSION and exports OPENPROXY_VERSION.
+    version = env!("OPENPROXY_VERSION"),
 )]
 pub struct Cli {
     /// Bind host. Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0`
