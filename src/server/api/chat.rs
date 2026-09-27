@@ -3274,6 +3274,29 @@ fn model_capacity(
     }
 }
 
+/// The name and prefix a node-backed connection may be keyed by, when
+/// `provider` is that node's id. Empty when `provider` is not a node.
+fn node_provider_aliases(snapshot: &AppDb, provider: &str) -> Vec<String> {
+    let Some(node) = snapshot
+        .provider_nodes
+        .iter()
+        .find(|node| node.id == provider)
+    else {
+        return Vec::new();
+    };
+    // A node's prefix is usually its name, so the two must be de-duplicated —
+    // the caller extends the candidate list per alias, and a repeated alias
+    // would list the same connection twice.
+    let mut aliases: Vec<String> = [Some(node.name.clone()), node.prefix.clone()]
+        .into_iter()
+        .flatten()
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty() && alias != provider)
+        .collect();
+    aliases.dedup();
+    aliases
+}
+
 fn select_connection(
     snapshot: &AppDb,
     provider: &str,
@@ -3284,8 +3307,27 @@ fn select_connection(
     let now = Utc::now();
 
     // First: use filter_available_accounts to get accounts not in cooldown / not locked.
-    let available =
+    let mut available =
         filter_available_accounts(&snapshot.provider_connections, provider, model, None, now);
+
+    // A node-prefixed model resolves to the node's *id* (both the dashboard and
+    // 9router key node-backed connections by id), but a connection created
+    // before that convention — or one that arrived by import — can be keyed by
+    // the node's name or prefix instead. Those models are advertised in
+    // /v1/models, so without this they would 404 with a bare node UUID the
+    // operator has no way to act on. Only consulted when the id match is empty,
+    // so a correctly-keyed connection always wins.
+    if available.is_empty() {
+        for alias in node_provider_aliases(snapshot, provider) {
+            available.extend(filter_available_accounts(
+                &snapshot.provider_connections,
+                &alias,
+                model,
+                None,
+                now,
+            ));
+        }
+    }
 
     // Then: apply remaining filters that filter_available_accounts does not cover:
     //   - credentials presence
@@ -7348,6 +7390,101 @@ mod tests {
     // 9router error.js:27-35 hands the status it was given to the response
     // untouched. Re-deriving one from the message text turned a handler's own
     // 400 into a 406 because the prose mentioned an unsupported model.
+    /// A node-prefixed model resolves to the node's *id*, so a connection keyed
+    /// by the node's *name* would otherwise never be selected — the model is
+    /// advertised in /v1/models and then 404s with a bare UUID. Reproduced
+    /// live before the fix: `xpiki-claude/probe-node-model` was listed by
+    /// /v1/models and every request to it failed.
+    #[test]
+    fn a_node_connection_keyed_by_name_is_still_selectable() {
+        use super::{node_provider_aliases, select_connection};
+        use crate::types::{ProviderConnection, ProviderNode};
+
+        let node = ProviderNode {
+            id: "node-uuid-1".into(),
+            r#type: "anthropic-compatible".into(),
+            name: "xpiki-claude".into(),
+            prefix: Some("xpiki-claude".into()),
+            api_type: None,
+            base_url: None,
+            created_at: None,
+            updated_at: None,
+            extra: Default::default(),
+        };
+        let mut connection = ProviderConnection::default();
+        connection.id = "conn-1".into();
+        // The legacy/imported shape: keyed by the node's name, not its id.
+        connection.provider = "xpiki-claude".into();
+        connection.api_key = Some("sk-test".into());
+        connection.is_active = Some(true);
+
+        let mut db = AppDb::default();
+        db.provider_nodes.push(node);
+        db.provider_connections.push(connection);
+
+        assert_eq!(
+            node_provider_aliases(&db, "node-uuid-1"),
+            vec!["xpiki-claude".to_string()],
+            "name and prefix are the same string, so the alias is listed once"
+        );
+        assert!(
+            node_provider_aliases(&db, "some-other-provider").is_empty(),
+            "a non-node provider has no aliases"
+        );
+
+        let selected = select_connection(
+            &db,
+            "node-uuid-1",
+            "probe-node-model",
+            &Default::default(),
+            None,
+        )
+        .expect("a name-keyed node connection must still be selectable");
+        assert_eq!(selected.id, "conn-1");
+    }
+
+    /// The id-keyed shape — what the dashboard creates — must keep working, and
+    /// must win over an alias-keyed one rather than being shadowed by it.
+    #[test]
+    fn an_id_keyed_node_connection_still_wins() {
+        use super::select_connection;
+        use crate::types::{ProviderConnection, ProviderNode};
+
+        let node = ProviderNode {
+            id: "node-uuid-2".into(),
+            r#type: "anthropic-compatible".into(),
+            name: "dual".into(),
+            prefix: Some("dual".into()),
+            api_type: None,
+            base_url: None,
+            created_at: None,
+            updated_at: None,
+            extra: Default::default(),
+        };
+        let mut by_id = ProviderConnection::default();
+        by_id.id = "by-id".into();
+        by_id.provider = "node-uuid-2".into();
+        by_id.api_key = Some("sk-id".into());
+        by_id.is_active = Some(true);
+        let mut by_name = ProviderConnection::default();
+        by_name.id = "by-name".into();
+        by_name.provider = "dual".into();
+        by_name.api_key = Some("sk-name".into());
+        by_name.is_active = Some(true);
+
+        let mut db = AppDb::default();
+        db.provider_nodes.push(node);
+        db.provider_connections.push(by_name);
+        db.provider_connections.push(by_id);
+
+        let selected = select_connection(&db, "node-uuid-2", "m", &Default::default(), None)
+            .expect("the id-keyed connection must be selectable");
+        assert_eq!(
+            selected.id, "by-id",
+            "the id match must win, not the name fallback"
+        );
+    }
+
     #[test]
     fn attempt_error_response_does_not_reinfer_the_status_from_the_message() {
         use super::attempt_error_response;

@@ -131,6 +131,15 @@ struct UpdateProviderRequest {
     mode: Option<String>,
     connection_no_proxy: Option<String>,
     proxy_pool_id: Option<Value>,
+    /// Accepted so it can be rejected explicitly rather than silently dropped.
+    ///
+    /// `authType` is derived from the provider — it is what decides whether the
+    /// access token or the API key is the credential — and is set by each
+    /// provider's own connect/import flow, not by a generic edit. Flipping it
+    /// here would make a connection claim an authentication mode it does not
+    /// have. It used to be an unknown field, which serde ignored, so a client
+    /// sending it got a 200 and no change.
+    auth_type: Option<String>,
 }
 
 impl UpdateProviderRequest {
@@ -223,6 +232,13 @@ async fn update_provider(
         }
         return not_found("Connection not found");
     };
+
+    if req.auth_type.is_some() {
+        return bad_request(
+            "authType is derived from the provider and cannot be set here; \
+             re-run the provider's connect or import flow to change it",
+        );
+    }
 
     let proxy_config = match normalize_connection_proxy(&req) {
         Ok(config) => config,
@@ -1190,6 +1206,21 @@ mod tests {
         assert!(!valid_combo_name(""));
     }
 
+    /// `authType` decides whether the access token or the API key is the
+    /// credential, and it is set by each provider's own connect/import flow.
+    /// It used to be an unknown field that serde silently dropped, so a client
+    /// got a 200 and no change.
+    #[test]
+    fn an_auth_type_write_is_rejected_rather_than_silently_dropped() {
+        let body = serde_json::json!({ "authType": "oauth" });
+        let parsed: UpdateProviderRequest = serde_json::from_value(body).expect("parses");
+        assert_eq!(
+            parsed.auth_type.as_deref(),
+            Some("oauth"),
+            "the field must be recognised so the handler can refuse it, not dropped"
+        );
+    }
+
     #[test]
     fn proxy_pool_update_rejects_missing_url_when_enabled() {
         let req = UpdateProviderRequest {
@@ -1210,6 +1241,7 @@ mod tests {
             connection_no_proxy: None,
             proxy_pool_id: None,
             mode: None,
+            auth_type: None,
         };
 
         assert!(normalize_connection_proxy(&req).is_err());
