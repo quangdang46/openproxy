@@ -25,7 +25,7 @@ use openproxy::types::{ApiKey, ProviderConnection};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::util::ServiceExt;
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
 fn active_key(key: &str) -> ApiKey {
@@ -662,5 +662,183 @@ async fn a_json_video_generation_body_still_reaches_account_selection() {
         status,
         StatusCode::BAD_REQUEST,
         "no accounts configured, so account selection is where it stops: {payload}"
+    );
+}
+
+// ── Video: verbatim body forwarding (finding 6) ────────────────────────────
+
+/// The model actually forwarded upstream for `xai/grok-imagine-video`.
+const XAI_VIDEO_MODEL: &str = "grok-imagine-video";
+
+/// Run `f` with OPENPROXY_XAI_VIDEO_URL pointed at `uri`, restoring it after.
+///
+/// The override is process-wide, so the restore matters: another test must not
+/// inherit a mock URL. The lock serialises the read-modify-write against other
+/// tests in this binary that touch the same variable.
+async fn with_video_base_url<T>(uri: &str, f: impl std::future::Future<Output = T>) -> T {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var("OPENPROXY_XAI_VIDEO_URL").ok();
+    // Process-global; the lock above is what makes the window safe, and the
+    // restore below is what stops the next test inheriting a mock URL.
+    std::env::set_var("OPENPROXY_XAI_VIDEO_URL", uri);
+    let out = f.await;
+    match previous {
+        Some(v) => std::env::set_var("OPENPROXY_XAI_VIDEO_URL", v),
+        None => std::env::remove_var("OPENPROXY_XAI_VIDEO_URL"),
+    }
+    out
+}
+
+/// THE WIRE-LEVEL GUARD for finding 6, and the one the previous commit said was
+/// impossible.
+///
+/// "Forwards the caller's bytes untouched" is a statement about what the UPSTREAM
+/// received. A unit test that compares a copy of the decision expression cannot
+/// establish it — I shipped exactly that and it would have passed even if the
+/// handler stopped computing the flag. This asserts the bytes on the wire.
+///
+/// The override exists for exactly this: the base was a const, so every video
+/// test stopped at account selection before the forward ever happened.
+#[tokio::test]
+async fn a_rewritten_video_body_is_reserialised_with_the_prefix_stripped() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "job-1"})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let state = app_state_with(vec![connection("conn-xai", "xai", "sk-xai")]).await;
+
+    // Deliberately NOT alphabetical key order. If the body were re-serialised
+    // from a serde_json::Value (a BTreeMap) this order would be lost — which is
+    // exactly what the control below establishes.
+    let raw = br#"{"zeta":1,"model":"xai/grok-imagine-video","prompt":"a cat","alpha":2}"#;
+
+    let (status, body) = with_video_base_url(&format!("{}/v1/videos", upstream.uri()), async {
+        let response = openproxy::build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/videos/generations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(raw.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        (status, bytes.to_vec())
+    })
+    .await;
+
+    assert!(
+        status.is_success(),
+        "forward failed: {status} {:?}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let sent = upstream
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .expect("upstream must have received the request");
+
+    let text = String::from_utf8_lossy(&sent.body).into_owned();
+    assert!(
+        !text.contains("xai/"),
+        "the provider prefix must be stripped for the upstream: {text}"
+    );
+    assert!(
+        text.contains(XAI_VIDEO_MODEL),
+        "the bare model id must reach the upstream: {text}"
+    );
+    // A REWRITTEN body goes through serde_json::to_vec, and serde_json::Value is
+    // a BTreeMap — so keys come out ALPHABETICAL. Asserted in that direction;
+    // my first version checked the caller's order here, which inverted the
+    // meaning of the test and failed against correct behaviour.
+    let alphabetical = ["alpha", "model", "prompt", "zeta"];
+    let positions: Vec<usize> = alphabetical
+        .iter()
+        .map(|k| text.find(&format!("\"{k}\"")).unwrap_or(usize::MAX))
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[0] < w[1]),
+        "a rewritten body is re-serialised, so keys sort alphabetically: \
+         {positions:?} in {text}"
+    );
+    // Which is exactly why the untouched case below is the one that must NOT
+    // sort — it is the only one of the two that keeps the caller's order.
+    assert_ne!(
+        text, r#"{"zeta":1,"model":"grok-imagine-video","prompt":"a cat","alpha":2}"#,
+        "this body was rewritten, so it must NOT have kept the caller's order"
+    );
+}
+
+/// The untouched case: when the model needs no rewrite the ORIGINAL bytes go
+/// upstream, key order intact.
+///
+/// This is the assertion the previous commit could not make. It fails if anything
+/// routes the body through `serde_json::to_vec` on the untouched path.
+#[tokio::test]
+async fn a_body_needing_no_rewrite_reaches_the_upstream_in_caller_order() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "job-1"})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let state = app_state_with(vec![connection("conn-xai", "xai", "sk-xai")]).await;
+
+    // Model already bare — no prefix to strip, so nothing changes. Key order is
+    // deliberately non-alphabetical and survives ONLY on the verbatim path.
+    let raw = br#"{"zeta":1,"model":"grok-imagine-video","prompt":"a cat","alpha":2}"#;
+
+    with_video_base_url(&format!("{}/v1/videos", upstream.uri()), async {
+        let response = openproxy::build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/videos/generations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(raw.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let st = response.status();
+        let b = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        assert!(
+            st.is_success(),
+            "forward failed: {st} {}",
+            String::from_utf8_lossy(&b)
+        );
+    })
+    .await;
+
+    let sent = upstream
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .expect("upstream must have received the request");
+
+    assert_eq!(
+        sent.body.as_slice(),
+        raw,
+        "an untouched body must be forwarded byte-for-byte, in the caller's order"
     );
 }

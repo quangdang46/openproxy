@@ -26,6 +26,26 @@ const DEFAULT_VIDEO_PROVIDER: &str = "xai";
 /// Docs: https://docs.x.ai/developers/rest-api-reference/inference/videos
 const XAI_VIDEO_BASE_URL: &str = "https://api.x.ai/v1/videos";
 
+/// The base to actually POST/GET, honouring `OPENPROXY_XAI_VIDEO_URL`.
+///
+/// An env override rather than a const for one reason: the verbatim-forwarding
+/// fix (bead openproxy-xq7a finding 6) is a WIRE-format guarantee — "an untouched
+/// body goes upstream byte for byte" — and nothing in this crate could assert
+/// it while the destination was a hardcoded const. Every video test stopped at
+/// account selection, before the forward.
+///
+/// This follows the existing OPENPROXY_*_URL convention (see
+/// oauth/token_refresh.rs:436, 480, 706 — the same shape, same reason: the
+/// upstream host is the one thing a test must be able to redirect). Unset, it
+/// returns the const, so production behaviour is byte-identical.
+fn xai_video_base_url() -> String {
+    std::env::var("OPENPROXY_XAI_VIDEO_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| XAI_VIDEO_BASE_URL.to_string())
+}
+
 /// Async OpenRouter video jobs (POST collection root → { id, status },
 /// GET /videos/{id} polls). Creation POSTs to the collection root with no
 /// `/generations` suffix.
@@ -535,7 +555,7 @@ async fn video_forward_raw(
 
     let snapshot = state.db.snapshot();
     let idempotency_key = idempotency_key(&headers);
-    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
+    let url = format!("{}/{}", xai_video_base_url(), action);
     let mut last_error: Option<Response> = None;
 
     for connection in &connections {
@@ -2262,7 +2282,7 @@ async fn video_get_handler_with_query(
         ),
         _ => format!(
             "{}/{}",
-            XAI_VIDEO_BASE_URL.trim_end_matches('/'),
+            xai_video_base_url(),
             urlencoding::encode(&request_id)
         ),
     };
@@ -2484,11 +2504,7 @@ fn video_create_url(
                 model
             ))
         }
-        _ => Ok(format!(
-            "{}/{}",
-            XAI_VIDEO_BASE_URL.trim_end_matches('/'),
-            action
-        )),
+        _ => Ok(format!("{}/{}", xai_video_base_url(), action)),
     }
 }
 
