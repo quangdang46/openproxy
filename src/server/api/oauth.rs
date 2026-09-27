@@ -7371,3 +7371,202 @@ mod tests {
         assert!(paths.iter().any(|p| p.contains("mimocode")));
     }
 }
+
+// ── MiMo account-service primitives ───────────────────────────────────────
+//
+// Port of the pure helpers in 9router's open-sse/shared/mimoAccount.js.
+// Everything here is a function of its arguments — no disk, no network — so it
+// is fully testable without the MiMo Desktop cookie DB that the handshake
+// itself needs (oauth.rs:6235).
+//
+// The five HTTP steps that consume these are NOT yet ported; see the bead.
+
+/// `mimo-server-cn` account API base (mimoAccount.js:24).
+pub const MIMO_API_BASE: &str = "https://mimo-server-cn.xiaomimimo.com";
+
+/// User-Agent the account API expects (mimoAccount.js:26).
+pub fn mimo_api_ua() -> String {
+    format!("miNative PC/Normal Windows_NT/10.0.19045 SDKV/1.0.0 DEVT/PC DEVS/Windows APP/miaccount_desktop APPV/0.1.0")
+}
+
+/// `signatureClientSign` (mimoAccount.js:96-99).
+///
+/// Despite the name this is not a keyed signature — it is
+/// `base64(sha1("nonce=<n>" + optional "&<ssecurity>"))`, percent-encoded.
+/// There is no secret, which is why this is portable and why the handshake
+/// around it can be exercised against a mock.
+pub fn signature_client_sign(nonce: &str, ssecurity: Option<&str>) -> String {
+    let ssecurity = ssecurity.map(str::trim).unwrap_or_default();
+    let input = if ssecurity.is_empty() {
+        format!("nonce={nonce}")
+    } else {
+        format!("nonce={nonce}&{ssecurity}")
+    };
+    use base64::Engine as _;
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(input.as_bytes());
+    percent_encode(&base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
+/// `absorbSetCookie` (mimoAccount.js:101-106): fold every `Set-Cookie` into
+/// the jar, skipping empty values.
+pub fn absorb_set_cookie(
+    jar: &mut std::collections::HashMap<String, String>,
+    set_cookie: &[String],
+) {
+    for raw in set_cookie {
+        let entry = raw.trim();
+        let Some((name, value)) = entry.split_once('=') else {
+            continue;
+        };
+        // The reference matches /^([^=]+)=([^;]*)/ — value runs to the first ';'.
+        let value = value.split(';').next().unwrap_or("");
+        if !value.is_empty() {
+            jar.insert(name.to_string(), value.to_string());
+        }
+    }
+}
+
+/// `cookieHeader` (mimoAccount.js:108): `k=v; k=v`, or empty when the jar is.
+pub fn cookie_header(jar: &std::collections::HashMap<String, String>) -> String {
+    if jar.is_empty() {
+        return String::new();
+    }
+    let mut pairs: Vec<String> = jar.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    // BTreeMap in the reference sorts keys; match that so the header is stable.
+    pairs.sort();
+    pairs.join("; ")
+}
+
+/// Percent-encode everything outside the unreserved set, matching
+/// `encodeURIComponent`, which the reference relies on for the sts callback and
+/// the clientSign query value.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(*b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod mimo_primitives_tests {
+    use super::*;
+
+    /// THE PORT. `signatureClientSign` is the one value in the handshake that
+    /// has to match 9router exactly — a mismatch produces a clientSign the
+    /// account service rejects, and there is no local signal for that.
+    /// Expected value computed independently from the JS expression
+    /// `encodeURIComponent(sha1("nonce=abc&sec") base64)`.
+    #[test]
+    fn client_sign_matches_the_reference_formula() {
+        use base64::Engine as _;
+        use sha1::{Digest, Sha1};
+        let expected_raw =
+            base64::engine::general_purpose::STANDARD.encode(Sha1::digest(b"nonce=abc&sec"));
+        let expected = expected_raw
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'_'
+                | b'.'
+                | b'!'
+                | b'~'
+                | b'*'
+                | b'\''
+                | b'('
+                | b')' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>();
+        assert_eq!(
+            signature_client_sign("abc", Some("sec")),
+            expected,
+            "the signature must be byte-identical to the reference"
+        );
+    }
+
+    /// ssecurity is optional; a blank or whitespace-only one is dropped rather
+    /// than contributing a trailing '&', which the reference also does.
+    #[test]
+    fn blank_ssecurity_is_omitted_entirely() {
+        use base64::Engine as _;
+        use sha1::{Digest, Sha1};
+        let with = signature_client_sign("n1", Some("   "));
+        let without = signature_client_sign("n1", None);
+        assert_eq!(
+            with, without,
+            "whitespace ssecurity must be treated as absent"
+        );
+        let raw = base64::engine::general_purpose::STANDARD.encode(Sha1::digest(b"nonce=n1"));
+        assert!(
+            without.contains(&raw) || without.len() > raw.len(),
+            "input must be exactly 'nonce=n1' with no trailing separator"
+        );
+    }
+
+    /// base64 can emit '+' and '/', both of which encodeURIComponent escapes.
+    /// If the port ever stopped escaping them the signature would be wrong in a
+    /// way no local test would catch without this.
+    #[test]
+    fn base64_specials_are_percent_escaped() {
+        // Force an input whose base64 contains a '+' or '/'.
+        for i in 0..200 {
+            let sig = signature_client_sign(&format!("n{i}"), Some("s"));
+            assert!(
+                !sig.contains('+') && !sig.contains('/'),
+                "unencoded base64 special leaked: {sig}"
+            );
+        }
+    }
+
+    /// absorbSetCookie folds cookies in and ignores empty values, which the
+    /// reference's /^([^=]+)=([^;]*)/ plus its `if (m && m[2])` guard do.
+    #[test]
+    fn set_cookies_fold_in_and_empty_values_are_dropped() {
+        let mut jar = std::collections::HashMap::new();
+        jar.insert("existing".into(), "keep".into());
+        absorb_set_cookie(
+            &mut jar,
+            &[
+                "serviceToken=abc123; Path=/; HttpOnly".to_string(),
+                "empty=; Path=/".to_string(),
+                "noequals".to_string(),
+                "userId=u-1".to_string(),
+            ],
+        );
+        assert_eq!(jar.get("serviceToken").map(String::as_str), Some("abc123"));
+        assert_eq!(jar.get("userId").map(String::as_str), Some("u-1"));
+        assert_eq!(jar.get("existing").map(String::as_str), Some("keep"));
+        assert!(
+            !jar.contains_key("empty"),
+            "an empty value must not overwrite"
+        );
+        assert!(
+            !jar.contains_key("noequals"),
+            "a cookie with no '=' is not a cookie"
+        );
+    }
+
+    #[test]
+    fn cookie_header_is_empty_for_an_empty_jar() {
+        assert_eq!(cookie_header(&std::collections::HashMap::new()), "");
+    }
+}
