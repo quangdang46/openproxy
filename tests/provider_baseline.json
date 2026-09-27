@@ -527,7 +527,11 @@
     "serviceKinds": [
       "llm"
     ],
-    "models": [],
+    "models": [
+      "mimo-v2.5-tts",
+      "mimo-x-flash-preview",
+      "mimo-x-pro-preview"
+    ],
     "hasSearch": false,
     "hasFetch": false
   },
@@ -1640,5 +1644,4 @@
     "hasSearch": false,
     "hasFetch": false
   }
-
 ]
