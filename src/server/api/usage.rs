@@ -80,6 +80,9 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "ollama" => fetch_ollama_quota(token).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
         "kimi" | "kimi-coding" => fetch_kimi_oauth_usage(token, psd).await,
+        // MiMo's weekly quota is authorised by an account-session cookie, not
+        // by the access token, so it needs the five-step SSO handshake first.
+        "xiaomi-mimo" => fetch_xiaomi_mimo_quota(connection).await,
         _ => serde_json::json!({}),
     }
 }
@@ -91,6 +94,40 @@ fn usage_message_for_provider(provider: &str) -> String {
         "ollama" => "Ollama Cloud uses a free tier with light usage limits (resets every 5h & 7d). For detailed usage tracking, visit ollama.com/settings/keys.".to_string(),
         other => format!("Usage API not implemented for {other}"),
     }
+}
+
+/// MiMo's weekly quota.
+///
+/// The weekly allowance is a property of the *account*, not of the API key, so
+/// this cannot ride on `access_token` the way the other fetchers do: it needs
+/// the account-service session cookie that the SSO handshake mints. Without a
+/// passToken — neither configured nor readable from MiMo Desktop — the answer is
+/// `no-session`, which the dashboard renders as "not linked" rather than as a
+/// quota of zero.
+async fn fetch_xiaomi_mimo_quota(connection: &ProviderConnection) -> Value {
+    use crate::server::api::mimo_account as mimo;
+
+    let Some(pass_jar) = mimo::resolve_pass_jar(Some(connection)) else {
+        return serde_json::json!({ "error": "no-session" });
+    };
+    let client = match mimo::mimo_sso_client() {
+        Ok(client) => client,
+        Err(reason) => return serde_json::json!({ "error": reason.to_string() }),
+    };
+    let endpoints = mimo::MimoEndpoints::default();
+
+    let session =
+        mimo::get_service_cookie(mimo::global_cache(), &client, &endpoints, &pass_jar).await;
+    let Some(cookie) = session.cookie else {
+        return serde_json::json!({
+            "error": match session.failure {
+                Some(mimo::MimoSessionFailure::NoPassToken) => "no-session",
+                _ => "session-failed",
+            }
+        });
+    };
+    serde_json::to_value(mimo::get_mimo_account_usage(&client, &endpoints, &cookie).await)
+        .unwrap_or_else(|_| serde_json::json!({ "error": "bad-response" }))
 }
 
 pub fn routes() -> Router<AppState> {

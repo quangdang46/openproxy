@@ -137,6 +137,7 @@ rust-embed = { version = "8", features = ["compression", "mime-guess"] }
 mime_guess = "2"
 open = "5"
 quick-xml = "0.42.0"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]
 # `test-util` provides tokio::time::pause/advance so TTL-boundary tests can use a

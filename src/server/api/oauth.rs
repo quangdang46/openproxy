@@ -3387,12 +3387,26 @@ async fn codex_start_proxy_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexStartProxyQuery>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" && provider != "zed" {
+    if !matches!(provider.as_str(), "codex" | "xai" | "zed" | "xiaomi-mimo") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Proxy only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
+    }
+
+    // MiMo: the encrypted callback needs its own loopback listener, and it is
+    // a singleton so a re-auth reuses the callback URL already given out.
+    if provider == "xiaomi-mimo" {
+        return match crate::oauth::xiaomi_mimo::start_proxy().await {
+            Ok(port) => Json(json!({
+                "success": true,
+                "port": port,
+                "callbackUrl": crate::oauth::xiaomi_mimo::callback_url(port),
+            }))
+            .into_response(),
+            Err(reason) => Json(json!({ "success": false, "reason": reason })).into_response(),
+        };
     }
 
     // Zed: RSA native-app flow — start the callback listener on the
@@ -3476,12 +3490,37 @@ async fn codex_poll_status_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexPollStatusQuery>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" && provider != "zed" {
+    if !matches!(provider.as_str(), "codex" | "xai" | "zed" | "xiaomi-mimo") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Poll only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
+    }
+
+    // MiMo: the session survives until the client exchanges it, so a finished
+    // session must not be consumed by the poll. The private key is never part
+    // of the payload.
+    if provider == "xiaomi-mimo" {
+        let Some(state_param) = query
+            .state
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing state" })),
+            )
+                .into_response();
+        };
+        return match crate::oauth::xiaomi_mimo::session_status(state_param) {
+            Some(view) => {
+                Json(serde_json::to_value(view).unwrap_or_else(|_| json!({ "status": "unknown" })))
+                    .into_response()
+            }
+            None => Json(json!({ "status": "unknown" })).into_response(),
+        };
     }
 
     if provider == "zed" {
@@ -3556,12 +3595,26 @@ async fn codex_stop_proxy_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" && provider != "zed" {
+    if !matches!(provider.as_str(), "codex" | "xai" | "zed" | "xiaomi-mimo") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Proxy only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
+    }
+
+    // MiMo: the encrypted callback needs its own loopback listener, and it is
+    // a singleton so a re-auth reuses the callback URL already given out.
+    if provider == "xiaomi-mimo" {
+        return match crate::oauth::xiaomi_mimo::start_proxy().await {
+            Ok(port) => Json(json!({
+                "success": true,
+                "port": port,
+                "callbackUrl": crate::oauth::xiaomi_mimo::callback_url(port),
+            }))
+            .into_response(),
+            Err(reason) => Json(json!({ "success": false, "reason": reason })).into_response(),
+        };
     }
 
     match provider.as_str() {
@@ -3587,6 +3640,46 @@ async fn authorize_oauth_compat(
     let state = generate_state();
 
     match provider.as_str() {
+        // Custom ECDH handshake, not OAuth2: there is no authorization code and
+        // no token endpoint. The platform redirects to a loopback callback
+        // carrying one encrypted parameter, sealed under a key derived from an
+        // exchange started here.
+        "xiaomi-mimo" => {
+            use crate::oauth::xiaomi_mimo;
+            let port = match xiaomi_mimo::start_proxy().await {
+                Ok(port) => port,
+                Err(reason) => {
+                    return make_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to start callback server: {reason}"),
+                        "proxy_start_failed",
+                        &provider,
+                    )
+                }
+            };
+            let keypair = xiaomi_mimo::generate_keypair();
+            let handshake_state = params.get("state").cloned().unwrap_or_else(generate_state);
+            if !xiaomi_mimo::register_session(&handshake_state, keypair.secret().clone()) {
+                return make_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to register the MiMo handshake",
+                    "internal_error",
+                    &provider,
+                );
+            }
+            let redirect = xiaomi_mimo::callback_url(port);
+            Json(json!({
+                "state": handshake_state,
+                "authorizeUrl": xiaomi_mimo::build_authorize_url(
+                    &keypair.public_key,
+                    &redirect,
+                    Some(&xiaomi_mimo::key_name()),
+                ),
+                "redirectUri": redirect,
+                "port": port,
+            }))
+            .into_response()
+        }
         "claude" => build_auth_compat_response(
             &provider,
             "authorization_code_pkce",
@@ -6232,7 +6325,7 @@ fn xiaomi_mimo_auth_candidates() -> Vec<PathBuf> {
 /// Chromium cookie DB (exclusively locked while Desktop runs, so a copy failure
 /// means null) and reads the `passToken`/`userId`/`cUserId` cookies for
 /// `account.xiaomi.com`.
-fn read_mimo_desktop_pass_token() -> Option<(String, Option<String>, Option<String>)> {
+pub(crate) fn read_mimo_desktop_pass_token() -> Option<(String, Option<String>, Option<String>)> {
     let home = cursor_home_dir();
     let cookie_src = match std::env::consts::OS {
         "windows" => home
@@ -7360,6 +7453,68 @@ mod tests {
             psd.get("chatgptPlanType"),
             Some(&serde_json::Value::String("plus".to_string()))
         );
+    }
+
+    /// The MiMo sign-in is not OAuth2, so it cannot go through the generic
+    /// `build_auth_compat_response` shape — the dashboard needs the authorize
+    /// URL, the loopback redirect and the port, and no code verifier.
+    #[tokio::test]
+    async fn xiaomi_mimo_authorize_returns_the_encrypted_handshake_fields() {
+        use crate::oauth::xiaomi_mimo::tests_support::serialise;
+        use axum::body::to_bytes;
+
+        // The handshake key and the callback proxy are process-wide, so this
+        // cannot overlap another test that registers a MiMo session.
+        let _serialised = serialise();
+
+        let response = authorize_oauth_compat(
+            Path("xiaomi-mimo".to_string()),
+            Query(std::collections::BTreeMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let payload: Value = serde_json::from_slice(&body).expect("body is JSON");
+
+        let port = payload
+            .get("port")
+            .and_then(Value::as_u64)
+            .expect("the loopback port is reported");
+        assert!(port > 0, "the proxy must be bound to a real port");
+        assert_eq!(
+            payload.get("redirectUri").and_then(Value::as_str),
+            Some(format!("http://127.0.0.1:{port}/").as_str()),
+            "the platform is redirected to the loopback root"
+        );
+
+        let authorize = payload
+            .get("authorizeUrl")
+            .and_then(Value::as_str)
+            .expect("an authorize URL is returned");
+        assert!(
+            authorize.contains("/authorize?") && authorize.contains("kn=mimocode"),
+            "the URL is the MiMo authorize endpoint: {authorize}"
+        );
+        assert!(
+            payload.get("codeVerifier").is_none(),
+            "there is no authorization code to exchange, so no verifier"
+        );
+
+        // The handshake key must be registered, or the callback could never be
+        // decrypted when the platform redirects back.
+        let state_value = payload
+            .get("state")
+            .and_then(Value::as_str)
+            .expect("a state");
+        assert!(
+            crate::oauth::xiaomi_mimo::session_status(state_value).is_some(),
+            "the private key is registered against the returned state"
+        );
+
+        crate::oauth::xiaomi_mimo::stop_proxy().await;
     }
 
     #[test]

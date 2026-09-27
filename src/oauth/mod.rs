@@ -19,6 +19,7 @@ pub mod providers;
 pub mod secret;
 #[cfg(test)]
 pub mod tests;
+pub mod xiaomi_mimo;
 pub mod zed_auth;
 
 pub enum OAuthFlowKind {
