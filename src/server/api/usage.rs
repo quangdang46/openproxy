@@ -691,9 +691,20 @@ async fn get_connection_usage(
 }
 
 fn is_codex_reset_auth_type(auth_type: &str) -> bool {
+    // 9router's registry uses BOTH `apikey` and `api_key` spellings
+    // (grep over its authType literals returns apikey, api_key, access_token,
+    // cookie, oauth, none). This list was missing `api_key`, so a connection
+    // stored with the underscored spelling — which the reference recognises and
+    // writes — was not classified as a reset-auth row here. That is the
+    // direction that loses parity.
+    //
+    // `accesstoken` (no underscore) stays: 9router never emits it, but dropping
+    // it would be STRICTER than the reference and could reject a row an
+    // existing OpenProxy install already stored. Widening toward the reference
+    // and keeping back-compat is the same shape as the API-key CRC fix.
     matches!(
         auth_type.trim().to_ascii_lowercase().as_str(),
-        "oauth" | "access_token" | "accesstoken"
+        "oauth" | "access_token" | "accesstoken" | "apikey" | "api_key"
     )
 }
 
@@ -2092,5 +2103,52 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let out = rt.block_on(refresh_oauth_connection(&conn, false)).unwrap();
         assert_eq!(out.access_token.as_deref(), Some("stale-token"));
+    }
+}
+
+#[cfg(test)]
+mod codex_reset_auth_type_tests {
+    use super::is_codex_reset_auth_type;
+
+    /// 9router's registry writes BOTH `apikey` and `api_key`. The old list had
+    /// only the first, so a row stored with the underscored spelling was not
+    /// classified as a reset-auth connection here — parity lost in the
+    /// direction where a row the reference recognises is invisible to us.
+    #[test]
+    fn every_auth_type_spelling_9router_writes_is_recognised() {
+        for spelling in ["oauth", "access_token", "apikey", "api_key"] {
+            assert!(
+                is_codex_reset_auth_type(spelling),
+                "{spelling} is written by 9router and must be recognised"
+            );
+        }
+    }
+
+    /// `accesstoken` is not a 9router spelling, but dropping it would be
+    /// STRICTER than the reference and could reject a row an existing install
+    /// already stored — so it is kept deliberately.
+    #[test]
+    fn the_legacy_spelling_is_still_accepted() {
+        assert!(is_codex_reset_auth_type("accesstoken"));
+    }
+
+    /// Case and surrounding whitespace are normalised, where 9router's `===`
+    /// is case-sensitive. Leniency here cannot reject anything the reference
+    /// accepts, so it is kept.
+    #[test]
+    fn case_and_whitespace_are_normalised() {
+        assert!(is_codex_reset_auth_type("  OAUTH "));
+        assert!(is_codex_reset_auth_type("Api_Key"));
+    }
+
+    /// And an auth type that is genuinely unrelated is still not claimed.
+    #[test]
+    fn unrelated_auth_types_are_not_claimed() {
+        for spelling in ["cookie", "none", "", "bearer"] {
+            assert!(
+                !is_codex_reset_auth_type(spelling),
+                "{spelling:?} is not a reset-auth type"
+            );
+        }
     }
 }
