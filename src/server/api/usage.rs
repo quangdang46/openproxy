@@ -1851,6 +1851,36 @@ mod tests {
         let _app = routes();
     }
 
+    /// MiMo's weekly quota is an *account* allowance read from the account
+    /// service, not a property of the API key — so it is dispatched on the
+    /// OAuth path and authorised by the session cookie the SSO handshake
+    /// mints, never by the access token.
+    ///
+    /// The dispatch is asserted here rather than through the HTTP route
+    /// because `authType` is provider-derived: a connection only becomes
+    /// `oauth` via the encrypted-callback exchange, which cannot be driven
+    /// from a test. Without a passToken — neither configured nor readable
+    /// from MiMo Desktop — the answer must be `no-session`, not a quota of
+    /// zero, which the dashboard would otherwise render as "0% used".
+    #[tokio::test]
+    async fn xiaomi_mimo_quota_dispatches_to_the_account_service() {
+        let mut connection = ProviderConnection::default();
+        connection.provider = "xiaomi-mimo".into();
+        connection.auth_type = "oauth".into();
+        connection.access_token = Some("sk-not-a-real-key".into());
+
+        let result = fetch_oauth_quota(&connection).await;
+        assert_eq!(
+            result.get("error").and_then(|v| v.as_str()),
+            Some("no-session"),
+            "a MiMo account with no passToken must read as no-session, got {result}"
+        );
+        assert!(
+            result.get("percent").is_none(),
+            "an unavailable quota must not be reported as a usage figure"
+        );
+    }
+
     #[test]
     fn test_connection_usage_response_serialization() {
         let response = ConnectionUsageResponse {

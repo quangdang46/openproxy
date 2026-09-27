@@ -563,6 +563,7 @@ pub(crate) mod tests_support {
 use once_cell::sync::Lazy;
 use parking_lot::Mutex as LockMutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -664,6 +665,22 @@ pub struct MimoProxy {
     port: u16,
     stop: tokio::sync::watch::Sender<bool>,
     retired: Arc<tokio::sync::Notify>,
+    alive: Arc<AtomicBool>,
+}
+
+/// Clears `alive` when the accept loop ends — whether it returned on the
+/// handshake budget, was stopped, or was dropped mid-await with its runtime.
+///
+/// Without this the port stays advertised after the socket is gone, and every
+/// later sign-in is handed a callback URL that refuses connections. That is
+/// not hypothetical: the budget is five minutes, so a second attempt in a
+/// session would break long after the first one worked.
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl MimoProxy {
@@ -685,7 +702,10 @@ impl MimoProxy {
         let (stop, stop_rx) = tokio::sync::watch::channel(false);
         let retired = Arc::new(tokio::sync::Notify::new());
         let signalled = Arc::clone(&retired);
+        let alive = Arc::new(AtomicBool::new(true));
+        let guard = AliveGuard(Arc::clone(&alive));
         tokio::spawn(async move {
+            let _alive = guard;
             serve_callbacks(listener, stop_rx).await;
             signalled.notify_waiters();
         });
@@ -694,12 +714,21 @@ impl MimoProxy {
             port,
             stop,
             retired,
+            alive,
         })
     }
 
     /// The port the platform must redirect the browser to.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Whether the listener is still accepting.
+    ///
+    /// Goes false as soon as the accept loop ends, whether it returned on the
+    /// handshake budget or was dropped with its runtime.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     /// The redirect URI to hand the platform as `redirect_uri`.
@@ -729,8 +758,13 @@ static MIMO_PROXY: Lazy<tokio::sync::Mutex<Option<MimoProxy>>> =
 /// for MiMo reuses the same callback URL rather than orphaning a port.
 pub async fn start_proxy() -> Result<u16, String> {
     let mut slot = MIMO_PROXY.lock().await;
-    if let Some(running) = slot.as_ref() {
+    if let Some(running) = slot.as_ref().filter(|proxy| proxy.is_alive()) {
         return Ok(running.port());
+    }
+    // The held proxy's listener has ended — retire the handle and bind again
+    // rather than handing out a port that refuses connections.
+    if let Some(dead) = slot.take() {
+        dead.stop().await;
     }
     let proxy = MimoProxy::spawn().await?;
     let port = proxy.port();
@@ -1226,6 +1260,56 @@ mod proxy_tests {
         let first = start_proxy().await.expect("proxy starts");
         let second = start_proxy().await.expect("proxy is reusable");
         assert_eq!(first, second, "a second start must not bind a second port");
+        stop_proxy().await;
+    }
+
+    /// REGRESSION, found by driving the flow over HTTP.
+    ///
+    /// The handshake budget is five minutes, and when it expires the accept
+    /// loop returns and the socket closes — but the process-wide slot still
+    /// held the handle, so every later `authorize` was handed the *same dead
+    /// port*. A second MiMo sign-in in a session was therefore handed a
+    /// callback URL that refused connections, long after the first one worked.
+    ///
+    /// The slot must notice its listener is gone and bind again.
+    #[tokio::test]
+    async fn a_retired_listener_is_not_handed_out_again() {
+        let _serialised = serialise();
+        stop_proxy().await;
+
+        let first = MimoProxy::spawn().await.expect("proxy starts");
+        assert!(first.is_alive(), "a fresh listener is accepting");
+        let retired_port = first.port();
+
+        // Retiring the listener must make the handle report itself dead, so
+        // the singleton can tell the difference between "reuse this" and
+        // "this is a corpse".
+        first.stop().await;
+        assert!(
+            !MIMO_PROXY
+                .lock()
+                .await
+                .as_ref()
+                .map(|p| p.is_alive())
+                .unwrap_or(false),
+            "a stopped listener must not report itself alive"
+        );
+
+        // Whatever the slot holds, a fresh start must hand out a port that
+        // actually accepts.
+        let port = start_proxy().await.expect("proxy restarts");
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+        assert!(
+            client
+                .get(format!("http://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .is_ok(),
+            "the port handed out must be live (retired port was {retired_port})"
+        );
         stop_proxy().await;
     }
 
