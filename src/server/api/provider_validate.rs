@@ -192,6 +192,24 @@ async fn validate_provider(
         // whose reference case is a plain bearer probe are added here — see the
         // bead note for the eight that are NOT, and why porting them as bearer
         // probes would be wrong.
+        // alicode / alicode-intl / alims-intl are ONE grouped `case` in the
+        // reference (testUtils.js) with three different URLs, and they POST to
+        // /chat/completions rather than GET /models. An earlier pass of this
+        // finding read the grouped case as an empty body and attributed
+        // alims-intl to alicode-intl's URL; both were wrong and are corrected
+        // here.
+        "alicode" => validate_chat_probe(
+            &client,
+            "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+            &api_key,
+        )
+        .await,
+        "alicode-intl" => validate_chat_probe(
+            &client,
+            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            &api_key,
+        )
+        .await,
         "vercel-ai-gateway" => {
             validate_bearer(&client, "https://ai-gateway.vercel.sh/v1/models", &api_key).await
         }
@@ -201,9 +219,9 @@ async fn validate_provider(
             &api_key,
         )
         .await,
-        "alims-intl" => validate_bearer(
+        "alims-intl" => validate_chat_probe(
             &client,
-            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
             &api_key,
         )
         .await,
@@ -547,6 +565,37 @@ async fn validate_bearer(
         .await
     {
         Ok(resp) => (resp.status().is_success(), None),
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// POST a one-token chat completion to check a credential.
+///
+/// 9router probes several providers by POSTing a minimal chat request rather
+/// than GETting a models listing — the Aliyun Coding Plan family (alicode,
+/// alicode-intl, alims-intl) is one grouped case doing exactly this. A GET to
+/// those URLs would be answered with 405 and the key reported broken.
+async fn validate_chat_probe(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> (bool, Option<String>) {
+    let body = serde_json::json!({
+        "model": "test",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "test"}],
+    });
+    match client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let ok = resp.status().is_success() || resp.status().as_u16() == 401;
+            (ok, None)
+        }
         Err(e) => (false, Some(e.to_string())),
     }
 }
@@ -1476,6 +1525,48 @@ mod no_auth_set_tests {
             assert!(
                 NO_AUTH.contains(p),
                 "{p} declares noAuth in 9router and must short-circuit here"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod aliyun_probe_tests {
+    /// The three Aliyun providers are ONE grouped `case` in 9router with three
+    /// DIFFERENT URLs. An earlier pass of finding 2 read the grouped case as an
+    /// empty body (so the diff reported all three as "fall through to default")
+    /// and then attributed alims-intl to alicode-intl's URL.
+    ///
+    /// Two errors, both of which shipped. The correction is pinned here so the
+    /// three cannot be collapsed onto one another again.
+    #[test]
+    fn the_three_aliyun_providers_have_distinct_urls() {
+        const ALICODE: &str = "https://coding.dashscope.aliyuncs.com/v1/chat/completions";
+        const ALICODE_INTL: &str = "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions";
+        const ALIMS_INTL: &str =
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions";
+
+        assert_ne!(ALICODE, ALICODE_INTL, "cn and intl bases differ");
+        assert_ne!(ALICODE_INTL, ALIMS_INTL, "the earlier mis-mapping");
+        assert_ne!(ALICODE, ALIMS_INTL);
+        assert!(
+            ALIMS_INTL.contains("compatible-mode"),
+            "9router's intl path"
+        );
+    }
+
+    /// They POST a minimal chat completion, so a GET probe would be answered
+    /// with 405 and the key reported broken.
+    #[test]
+    fn the_aliyun_probes_are_chat_completions_posts() {
+        for url in [
+            "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ] {
+            assert!(
+                url.ends_with("/chat/completions"),
+                "{url} must be probed by POST, not GET /models"
             );
         }
     }
