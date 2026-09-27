@@ -526,3 +526,148 @@ async fn a_native_anthropic_upstream_reaches_a_messages_client_intact() {
         "an Anthropic stream terminates with message_stop, got: {body}"
     );
 }
+
+// ── Zed: the Providers-page model list, exercised end to end ──────────────
+
+/// Run `f` with OPENPROXY_ZED_CLOUD_URL pointed at `uri`, then restore.
+///
+/// Process-global, so the lock serialises the read-modify-write against the
+/// other tests in this binary and the restore stops the next one inheriting a
+/// mock URL.
+async fn with_zed_cloud_url<T>(uri: &str, f: impl std::future::Future<Output = T>) -> T {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = std::env::var("OPENPROXY_ZED_CLOUD_URL").ok();
+    std::env::set_var("OPENPROXY_ZED_CLOUD_URL", uri);
+    let out = f.await;
+    match previous {
+        Some(v) => std::env::set_var("OPENPROXY_ZED_CLOUD_URL", v),
+        None => std::env::remove_var("OPENPROXY_ZED_CLOUD_URL"),
+    }
+    out
+}
+
+/// SURFACE #1, EXERCISED. Every other check in this repo could only prove the
+/// zed models arm was REACHED (1d9b3f1a's dispatch test stops at "no access
+/// token"), because ZED_CLOUD_BASE_URL was a const — so the Providers page's
+/// model list was untestable end to end without a real Zed account. The smoke
+/// script has been reporting "no configured connection has a models-listing arm"
+/// for exactly that reason.
+///
+/// This asserts the full path: a real Zed connection reaches the real cloud
+/// endpoint (mocked), the catalog is fetched, disabled models are dropped, and
+/// the listing comes back in the shape the dashboard consumes.
+#[tokio::test]
+async fn a_zed_connection_lists_its_model_catalog() {
+    let cloud = MockServer::start().await;
+    // resolve_zed_models mints a short-lived LLM token BEFORE listing, so the
+    // mock has to answer that too or the arm fails upstream of the catalog.
+    Mock::given(method("POST"))
+        .and(path("/client/llm_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "llm-tok"})))
+        .mount(&cloud)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5",
+                 "provider": "anthropic", "max_token_count": 200000,
+                 "supports_tools": true, "is_disabled": false},
+                {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5",
+                 "provider": "anthropic", "max_token_count": 200000,
+                 "supports_tools": false, "is_disabled": true},
+                {"id": "gpt-5", "display_name": "GPT-5",
+                 "provider": "openai", "max_token_count": 400000,
+                 "supports_tools": true, "is_disabled": false},
+                // Enabled but tool-less: the case that proves `capabilities` is
+                // OMITTED rather than sent as {tools:false}. The fixture I
+                // wrote first had no such row — the only tool-less model was
+                // disabled and got filtered — so this assertion could not be
+                // made at all until it was added.
+                {"id": "some-embedding", "display_name": "Embedding",
+                 "provider": "openai", "max_token_count": 8192,
+                 "supports_tools": false, "is_disabled": false}
+            ]
+        })))
+        .expect(1)
+        .mount(&cloud)
+        .await;
+
+    let mut conn = connection("zed-1", "zed", 1, "zed-token");
+    conn.access_token = Some("zed-access-token".into());
+    let mut settings_psd = std::collections::BTreeMap::new();
+    settings_psd.insert("userId".to_string(), Value::String("zed-user".into()));
+    settings_psd.insert("organizationId".to_string(), Value::String("org-1".into()));
+    conn.provider_specific_data = settings_psd;
+
+    let state = seeded_state(
+        vec![provider_node(
+            "zed-node",
+            "anthropic-compatible",
+            "zed",
+            "https://example.invalid/v1",
+        )],
+        vec![conn],
+    )
+    .await;
+
+    let body = with_zed_cloud_url(&cloud.uri(), async {
+        let response = openproxy::build_app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/providers/zed-1/models")
+                    .header("authorization", "Bearer valid-bearer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the zed arm must serve a listing: {}",
+            String::from_utf8_lossy(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default()
+            )
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+    .await;
+
+    let parsed: Value = serde_json::from_str(&body).expect("json body");
+    let models = parsed["models"].as_array().expect("models array");
+    let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+
+    assert!(
+        ids.contains(&"claude-sonnet-4-5"),
+        "an enabled zed model must be listed: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"claude-haiku-4-5"),
+        "isDisabled models must be filtered out (9router models.js filters \
+         on !m.isDisabled): {ids:?}"
+    );
+    // capabilities only where tools are supported — 9router omits the key
+    // entirely rather than sending {tools:false}.
+    let sonnet = models
+        .iter()
+        .find(|m| m["id"] == "claude-sonnet-4-5")
+        .expect("sonnet row");
+    assert_eq!(sonnet["capabilities"], json!({"tools": true}));
+    let toolless = models
+        .iter()
+        .find(|m| m["id"] == "some-embedding")
+        .expect("tool-less row");
+    assert!(
+        toolless.get("capabilities").is_none(),
+        "a model without tools must carry no capabilities key, not tools:false — {toolless}"
+    );
+}

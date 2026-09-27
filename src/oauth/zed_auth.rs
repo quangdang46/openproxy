@@ -27,6 +27,24 @@ use std::time::{Duration, Instant};
 
 pub const ZED_WEB_BASE_URL: &str = "https://zed.dev";
 pub const ZED_CLOUD_BASE_URL: &str = "https://cloud.zed.dev";
+
+/// The Zed cloud base to actually call, honouring `OPENPROXY_ZED_CLOUD_URL`.
+///
+/// Same reason and same convention as `OPENPROXY_XAI_VIDEO_URL`
+/// (server/api/media.rs) and `OPENPROXY_*_TOKEN_URL` (oauth/token_refresh.rs):
+/// the upstream host is the one thing a test must be able to redirect. Without
+/// it, the zed arm of GET /api/providers/{id}/models — surface #1 of AGENTS.md —
+/// could only be tested up to "reached the arm and found no access token", so
+/// the whole Providers-page model list was unexercisable without a real Zed
+/// account. Read per call so a test can set and restore it; an env read beside
+/// an HTTP call is free.
+pub fn zed_cloud_base_url() -> String {
+    std::env::var("OPENPROXY_ZED_CLOUD_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| ZED_CLOUD_BASE_URL.to_string())
+}
 /// JS ZED_HOSTED_CONFIG.defaultNativeAppPort.
 pub const ZED_DEFAULT_NATIVE_APP_PORT: u16 = 58443;
 
@@ -285,7 +303,7 @@ pub async fn fetch_llm_token(
     }
     let auth = build_user_auth_header(user_id, access_token)?;
     let mut request = client
-        .post(format!("{ZED_CLOUD_BASE_URL}/client/llm_tokens"))
+        .post(format!("{}/client/llm_tokens", zed_cloud_base_url()))
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("Authorization", auth)
@@ -475,7 +493,7 @@ async fn fetch_zed_models_catalog(
     )
     .await?;
     let mut request = client
-        .get(format!("{ZED_CLOUD_BASE_URL}/models"))
+        .get(format!("{}/models", zed_cloud_base_url()))
         .header("Accept", "application/json")
         .header(AUTHORIZATION, format!("Bearer {token}"));
     if let Some(sid) = system_id.filter(|s| !s.is_empty()) {
