@@ -211,8 +211,17 @@ pub fn parse_api_key(api_key: &str) -> Option<ParsedApiKey> {
         let machine_id = parts[1];
         let key_id = parts[2];
         let crc = parts[3];
-        let expected_crc = generate_crc(machine_id, key_id);
-        if !timing_safe_eq(crc, &expected_crc) {
+        // Two widths are in the wild. 9router generates an 8-char CRC
+        // (apiKey.js:25, `.slice(0, 8)`); OpenProxy generated 12. A key made
+        // by either side previously failed the other's parser, so a key copied
+        // between them did not authenticate.
+        //
+        // BOTH are accepted so that narrowing the generator to 8 does not
+        // invalidate every key already issued with 12. New keys are 8, which
+        // is the part that moves toward the reference.
+        if !timing_safe_eq(crc, &generate_crc(machine_id, key_id))
+            && !timing_safe_eq(crc, &generate_crc_legacy(machine_id, key_id))
+        {
             return None;
         }
 
@@ -249,12 +258,30 @@ pub fn generate_api_key_with_machine(machine_id: &str) -> String {
     format!("sk-{machine_id}-{key_id}-{crc}")
 }
 
+/// The CRC segment for a newly generated key.
+///
+/// 8 hex chars, matching 9router's `generateCrc` (apiKey.js:25). OpenProxy
+/// previously emitted 12, which made keys 39 characters where 9router's are 35
+/// and made the two parsers reject each other's keys.
 fn generate_crc(machine_id: &str, key_id: &str) -> String {
+    crc_hex(machine_id, key_id)[..CRC_LEN].to_string()
+}
+
+/// The 12-char CRC OpenProxy used to generate. Accepted on verify only, so
+/// keys already issued keep working; never generated.
+fn generate_crc_legacy(machine_id: &str, key_id: &str) -> String {
+    crc_hex(machine_id, key_id)[..LEGACY_CRC_LEN].to_string()
+}
+
+const CRC_LEN: usize = 8;
+const LEGACY_CRC_LEN: usize = 12;
+
+fn crc_hex(machine_id: &str, key_id: &str) -> String {
     let key = api_key_secret();
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key");
     mac.update(machine_id.as_bytes());
     mac.update(key_id.as_bytes());
-    hex::encode(mac.finalize().into_bytes())[..12].to_string()
+    hex::encode(mac.finalize().into_bytes())
 }
 
 #[cfg(test)]
@@ -262,9 +289,9 @@ mod tests {
     use super::{
         api_key_secret, api_key_secret_path, dashboard_initial_password,
         dashboard_password_is_ephemeral, generate_api_key_with_machine, generate_crc,
-        generate_random_secret, initial_password_path, parse_api_key, persist_secret_to,
-        read_persisted_secret_from, reset_dashboard_initial_password, resolve_api_key_secret,
-        resolve_dashboard_initial_password,
+        generate_crc_legacy, generate_random_secret, initial_password_path, parse_api_key,
+        persist_secret_to, read_persisted_secret_from, reset_dashboard_initial_password,
+        resolve_api_key_secret, resolve_dashboard_initial_password,
     };
     use std::sync::Mutex;
 
@@ -433,5 +460,47 @@ mod tests {
         );
 
         std::env::remove_var("DATA_DIR");
+    }
+
+    /// THE GAP. 9router generates an 8-char CRC (apiKey.js:25); OpenProxy
+    /// generated 12. Keys were 35 vs 39 characters and the two parsers
+    /// rejected each other's keys, so copying a key between them broke auth
+    /// with no indication why.
+    ///
+    /// Asserts the interop property directly: a key minted at the reference
+    /// width authenticates, and one at the old OpenProxy width still does —
+    /// narrowing the generator must not invalidate issued keys.
+    #[test]
+    fn keys_from_either_crc_width_authenticate() {
+        let machine = "0c95d51dc22a43fa";
+        let key_id = "140bdd08318d";
+
+        assert_eq!(generate_crc(machine, key_id).len(), 8, "must match 9router");
+        let new_width = format!("sk-{machine}-{key_id}-{}", generate_crc(machine, key_id));
+        assert!(
+            parse_api_key(&new_width).is_some(),
+            "reference width must work"
+        );
+
+        assert_eq!(generate_crc_legacy(machine, key_id).len(), 12);
+        let legacy = format!(
+            "sk-{machine}-{key_id}-{}",
+            generate_crc_legacy(machine, key_id)
+        );
+        assert!(
+            parse_api_key(&legacy).is_some(),
+            "issued keys must keep working"
+        );
+    }
+
+    /// Accepting two widths must not widen acceptance past them: a CRC that
+    /// matches neither is still rejected.
+    #[test]
+    fn a_wrong_crc_is_still_rejected() {
+        let bad = "sk-0c95d51dc22a43fa-140bdd08318d-deadbeef";
+        assert!(
+            parse_api_key(bad).is_none(),
+            "a bogus CRC must not authenticate"
+        );
     }
 }
