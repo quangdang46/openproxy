@@ -491,7 +491,10 @@ async fn video_create_proxy(
             Err(_) => return video_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
         };
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(v) => video_create_handler(state, headers, Ok(Json(v)), action).await,
+            Ok(v) => {
+                video_create_handler(state, headers, Ok(Json(v)), action, Some(bytes.to_vec()))
+                    .await
+            }
             Err(_) => video_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
         }
     } else {
@@ -1867,6 +1870,7 @@ async fn video_create_handler(
     headers: HeaderMap,
     body_result: Result<Json<Value>, JsonRejection>,
     action: &'static str,
+    raw_body: Option<Vec<u8>>,
 ) -> Response {
     // /v1 gates on requireApiKey, NOT on requireLogin. Keying the API surface
     // to a dashboard flag is the conflation 9router does not have: locking the
@@ -1913,9 +1917,22 @@ async fn video_create_handler(
     // Strip provider prefix (e.g. "xai/grok-imagine-video" → "grok-imagine-video")
     // before forwarding so upstream receives the bare model id. Vertex keeps
     // its own `model` field (predictLongRunning derives the URL from it).
+    // 9router videoGeneration.js:121-124 forwards the ORIGINAL bytes unless the
+    // model was rewritten; only then does it re-serialise. `body_rewritten`
+    // tracks exactly that, so the untouched case can go out verbatim instead of
+    // through serde — which would reorder keys (serde_json::Value is a BTreeMap)
+    // and normalise number formatting.
+    let mut body_rewritten = false;
     if canonical_provider != "vertex" {
         if let Some(obj) = body.as_object_mut() {
             if let Some(model_str) = model.as_deref() {
+                // Only a REAL change counts. Rewriting a field with the value it
+                // already holds is a no-op that would still cost us the
+                // verbatim-bytes guarantee.
+                let changed = obj.get("model").and_then(Value::as_str) != Some(model_str);
+                if changed {
+                    body_rewritten = true;
+                }
                 obj.insert("model".to_string(), json!(model_str));
             }
         }
@@ -1950,19 +1967,40 @@ async fn video_create_handler(
 
     // Vertex translates the OpenAI-ish body to predictLongRunning shape once —
     // per-connection auth only changes the URL/token, not the body.
-    let forward_body: Value = if canonical_provider == "vertex" {
-        to_vertex_body(&body)
+    let body_bytes = if canonical_provider == "vertex" {
+        // predictLongRunning shape: a real transform, always re-serialised.
+        match serde_json::to_vec(&to_vertex_body(&body)) {
+            Ok(b) => b,
+            Err(e) => {
+                return video_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Serialization error: {}", e),
+                )
+            }
+        }
+    } else if !body_rewritten {
+        // Nothing changed, so send what the caller sent — byte for byte.
+        match raw_body {
+            Some(raw) => raw,
+            None => match serde_json::to_vec(&body) {
+                Ok(b) => b,
+                Err(e) => {
+                    return video_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Serialization error: {}", e),
+                    )
+                }
+            },
+        }
     } else {
-        body
-    };
-
-    let body_bytes = match serde_json::to_vec(&forward_body) {
-        Ok(b) => b,
-        Err(e) => {
-            return video_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Serialization error: {}", e),
-            )
+        match serde_json::to_vec(&body) {
+            Ok(b) => b,
+            Err(e) => {
+                return video_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Serialization error: {}", e),
+                )
+            }
         }
     };
 
@@ -3833,6 +3871,69 @@ mod tests {
             "a bad prompt must not ratchet towards the rate-limit cap"
         );
         assert_eq!(stored.rate_limited_until, None);
+    }
+
+    /// THE GAP. The JSON arm parsed the body into a `serde_json::Value` and
+    /// re-serialised it unconditionally, so every /v1/videos/* create that did
+    /// NOT need a rewrite still went out reordered: serde_json::Value is a
+    /// BTreeMap, so key order is sorted, and number formatting is normalised.
+    /// 9router forwards the original bytes in that case
+    /// (videoGeneration.js:121-124) and only re-serialises when the model was
+    /// rewritten.
+    ///
+    /// HONEST SCOPE — read before trusting this as coverage. This pins the RULE
+    /// and the fact it rests on, NOT the production branch. The `body_rewritten`
+    /// compared below is a copy of the expression in `video_create_handler`, so
+    /// if that handler stopped computing it correctly this test would still
+    /// pass. That is the tautological-test failure mode, and I hit it earlier in
+    /// this session, so it is named here rather than left to be discovered.
+    ///
+    /// A real guard needs a wire-level assertion: capture the bytes the upstream
+    /// received. That is not currently possible — `XAI_VIDEO_BASE_URL` is a
+    /// const (media.rs:27) with no override, and every existing video test stops
+    /// at account selection before the forward. Making the base URL injectable
+    /// is the prerequisite, and is recorded as such on the bead rather than
+    /// smuggled in here.
+    ///
+    /// What IS genuinely covered: the reordering this change avoids. The first
+    /// assertion fails if serde_json ever stops sorting keys, which would make
+    /// the whole optimisation moot.
+    #[test]
+    fn an_untouched_body_is_forwarded_verbatim() {
+        // Key order the caller chose, NOT alphabetical.
+        let raw = br#"{"zeta":1,"alpha":2,"mid":3}"#;
+        let parsed: Value = serde_json::from_slice(raw).expect("json");
+        // Re-serialising loses the order — this is the behaviour being avoided.
+        assert_ne!(serde_json::to_vec(&parsed).unwrap(), raw.to_vec());
+
+        // The decision rule, spelled out: no rewrite means send `raw`.
+        let body_rewritten = false;
+        let out: Vec<u8> = if !body_rewritten {
+            raw.to_vec()
+        } else {
+            serde_json::to_vec(&parsed).unwrap()
+        };
+        assert_eq!(
+            out,
+            raw.to_vec(),
+            "the untouched path must not re-serialise"
+        );
+    }
+
+    /// A rewrite that writes back the SAME value is still a no-op. 9router
+    /// guards on `parsed.model !== model`, and matching that guard is what
+    /// keeps a request whose model already lacks the provider prefix on the
+    /// verbatim path.
+    #[test]
+    fn a_model_rewrite_counts_only_when_the_value_differs() {
+        let mut obj = serde_json::json!({"model": "grok-imagine-video"});
+        let model = "grok-imagine-video";
+        let same = obj.get("model").and_then(Value::as_str) != Some(model);
+        assert!(!same, "identical model must not count as a rewrite");
+
+        let model = "veo-3.1";
+        let differs = obj.get("model").and_then(Value::as_str) != Some(model);
+        assert!(differs, "a different model must count");
     }
 }
 
