@@ -1917,7 +1917,20 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                 ("session_id".to_string(), "default".to_string()),
                 (
                     "User-Agent".to_string(),
-                    "codex-cli/1.0.18 (macOS; arm64)".to_string(),
+                    // 9router probes codex as `codex_cli_rs/<version>`
+                    // (testUtils.js:31, CODEX_CLI_VERSION in
+                    // registry/codex.js:5), not as a codex-cli/1.0.18 desktop
+                    // build. The UA is part of how the upstream decides what to
+                    // answer, so a probe that misidentifies itself tests a
+                    // request the real client never makes — and can call a
+                    // healthy key broken, or the reverse.
+                    //
+                    // openproxy has no CODEX_CLI_VERSION of its own; the value
+                    // is pinned to the reference so the probe keeps matching
+                    // 9router when that constant moves. The sibling
+                    // `originator: codex_cli_rs` header the executor already
+                    // sends (codex.rs:376) is what this pairs with.
+                    "codex_cli_rs/0.154.0".to_string(),
                 ),
             ],
             body: Some(PreparedBody::Json(json!({
