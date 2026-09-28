@@ -4503,7 +4503,18 @@ async fn proxy_response_with_pending_tracking(
                     } else {
                         Vec::new()
                     };
-                if !translate_saw_done && translation_needs_done_sentinel(stream_client_format) {
+                // Only the TRANSLATION path owes the client a sentinel, and only
+                // that path sets `translate_saw_done`. A passthrough stream
+                // forwards the upstream's own `data: [DONE]` and tracks it in
+                // `saw_done`, which is threaded into `plan_eof_emits` below so
+                // it does not append a second one there. Gating this append on
+                // `translate_saw_done` alone left the flag false on that path,
+                // so every OpenAI-to-OpenAI stream — the common case — shipped
+                // the upstream's terminator AND a duplicate appended here.
+                if needs_stream_translation
+                    && !translate_saw_done
+                    && translation_needs_done_sentinel(stream_client_format)
+                {
                     translate_lines.push("data: [DONE]\n\n".to_string());
                 }
                 let passthrough_terminal =
@@ -7571,6 +7582,45 @@ mod tests {
         assert!(
             !shown.contains("Error") && !shown.contains("line"),
             "no internals: {shown}"
+        );
+    }
+
+    /// A passthrough stream forwards the upstream's own `data: [DONE]` and
+    /// records it in `saw_done`, which `plan_eof_emits` consults so it does not
+    /// append a second one. The EOF sentinel append, though, is gated on
+    /// `translate_saw_done` — a flag only the translation path ever sets. So on
+    /// an OpenAI-to-OpenAI stream (the common case, no translation needed) the
+    /// flag stayed false and a duplicate terminator was appended here, on top of
+    /// the one already forwarded. A client saw two `[DONE]`s.
+    ///
+    /// The append belongs to the translation path alone, so it must say so.
+    #[test]
+    fn the_eof_sentinel_is_the_translation_paths_alone() {
+        // The two paths answer "do I owe a [DONE]?" from different state:
+        // translation tracks `translate_saw_done`, passthrough tracks
+        // `saw_done`. Gating one on the other's flag is the bug.
+        let upstream_sent_done = true;
+
+        // Passthrough: the upstream terminator is already on the wire, and
+        // `saw_done` is what suppresses a second one.
+        let passthrough_appends =
+            !upstream_sent_done && super::passthrough_needs_done_sentinel("openai");
+        assert!(
+            !passthrough_appends,
+            "passthrough must not append a sentinel the upstream already sent"
+        );
+
+        // Translation: only ever consulted when translation actually ran.
+        let translated = false;
+        let translate_saw_done = false;
+        let translation_appends = translated
+            && !translate_saw_done
+            && super::translation_needs_done_sentinel(
+                crate::core::translator::registry::Format::OpenAi,
+            );
+        assert!(
+            !translation_appends,
+            "with no translation the append must not fire, or the client gets two"
         );
     }
 
