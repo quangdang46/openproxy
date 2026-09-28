@@ -10,6 +10,7 @@ import {
   Select,
   Toggle,
 } from "@/shared/components";
+import CatalogSyncCard from "./CatalogSyncCard";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
@@ -671,6 +672,7 @@ export default function ProvidersPageClient() {
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
+      <CatalogSyncCard />
       {forceAll && (
         <div className="flex items-center gap-2 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2">
           <span className="text-sm">🧪</span>

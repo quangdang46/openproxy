@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -33,6 +33,21 @@ struct ProviderSummary {
     provider: String,
     is_active: bool,
     display_name: Option<String>,
+}
+
+/// Body for `PUT /api/media-providers/{kind}/{id}`. Every field is optional and only
+/// the ones present are applied, so a caller can rotate just the key without
+/// restating the model list.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateMediaProviderRequest {
+    name: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    enabled_models: Option<Vec<String>>,
+    is_active: Option<bool>,
+    #[serde(default)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +195,107 @@ async fn list_media_providers(
         search,
     })
     .into_response()
+}
+
+/// `PUT /api/media-providers/{kind}/{id}` — the edit counterpart to
+/// `POST /api/media-providers`. A provider is addressed by kind AND id, which
+/// is the shape the sibling GET/DELETE routes already use.
+///
+/// This route did not exist: `openproxy media providers edit --from-file` has
+/// always issued a PUT here and received 405 Method Not Allowed, so a
+/// documented CLI command could never succeed. The handler mirrors
+/// `add_media_provider`'s field handling — same keys, same
+/// `provider_specific_data` layout, same secret handling — and only the fields
+/// present in the body are touched.
+async fn update_media_provider(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    Json(body): Json<UpdateMediaProviderRequest>,
+) -> axum::response::Response {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
+        return crate::server::api::auth_error_response(e);
+    }
+
+    // `Db::update` is FnOnce -> (), so existence is settled from a snapshot
+    // rather than from a value the closure returns.
+    let exists = state
+        .db
+        .snapshot()
+        .provider_connections
+        .iter()
+        .any(|connection| {
+            connection.id == id
+                && connection
+                    .provider_specific_data
+                    .get("mediaType")
+                    .and_then(Value::as_str)
+                    .map(|media_type| media_type == kind)
+                    .unwrap_or(false)
+        });
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Media provider not found" })),
+        )
+            .into_response();
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let target_id = id.clone();
+    let updated = state
+        .db
+        .update(move |db| {
+            let Some(connection) = db
+                .provider_connections
+                .iter_mut()
+                .find(|c| c.id == target_id)
+            else {
+                return;
+            };
+            if let Some(name) = body.name {
+                connection.name = Some(name);
+            }
+            if let Some(api_key) = body.api_key {
+                connection.api_key = Some(api_key);
+            }
+            if let Some(is_active) = body.is_active {
+                connection.is_active = Some(is_active);
+            }
+            // provider_specific_data is a plain map; edit the keys add wrote.
+            if let Some(base_url) = body.base_url {
+                connection
+                    .provider_specific_data
+                    .insert("baseUrl".to_string(), Value::String(base_url));
+            }
+            if let Some(models) = body.enabled_models {
+                connection.provider_specific_data.insert(
+                    "enabledModels".to_string(),
+                    Value::Array(models.into_iter().map(Value::String).collect()),
+                );
+            }
+            for (key, value) in body.extra {
+                connection.provider_specific_data.insert(key, value);
+            }
+            connection.updated_at = Some(now);
+        })
+        .await;
+
+    match updated {
+        Ok(_) => Json(serde_json::json!({
+            "success": true,
+            "id": id,
+            "message": "Media provider updated successfully"
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to update media provider: {}", err)
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn add_media_provider(
@@ -1243,6 +1359,36 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/media-providers/{kind}/{id}",
-            get(get_provider_by_kind),
+            get(get_provider_by_kind).put(update_media_provider),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateMediaProviderRequest;
+
+    /// `openproxy media providers edit --from-file` issues a PUT to this path,
+    /// and the route did not exist — the documented command answered 405 every
+    /// time. A partial body must touch only the fields it names, so a caller
+    /// can rotate just the key without restating the model list.
+    #[test]
+    fn update_media_provider_body_is_all_optional() {
+        let empty: UpdateMediaProviderRequest =
+            serde_json::from_str("{}").expect("an empty body is valid");
+        assert!(empty.name.is_none());
+        assert!(empty.api_key.is_none());
+        assert!(empty.base_url.is_none());
+        assert!(empty.enabled_models.is_none());
+        assert!(empty.is_active.is_none());
+
+        let full: UpdateMediaProviderRequest = serde_json::from_str(
+            r#"{"name":"renamed","apiKey":"sk-new","baseUrl":"https://x/v1",
+                "enabledModels":["a","b"],"isActive":false}"#,
+        )
+        .expect("a full body parses");
+        assert_eq!(full.name.as_deref(), Some("renamed"));
+        assert_eq!(full.api_key.as_deref(), Some("sk-new"));
+        assert_eq!(full.enabled_models.as_deref().map(|m| m.len()), Some(2));
+        assert_eq!(full.is_active, Some(false));
+    }
 }

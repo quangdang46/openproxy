@@ -134,7 +134,7 @@ openproxy --robot doctor
 - `--no-open` — never spawn a browser. Required in SSH / container / CI / agent contexts.
 - Server binds `127.0.0.1:4623` by default. Change with `--port N` or `PORT=N`.
 
-To expose on LAN, set `HOSTNAME=0.0.0.0` **and** `REQUIRE_API_KEY=true` (otherwise `/v1/*` is unauthenticated). Never expose on a public interface without TLS termination at a reverse proxy.
+To expose on LAN, set `HOSTNAME=0.0.0.0` **and** turn on the `require_api_key` setting (otherwise `/v1/*` is unauthenticated). Never expose on a public interface without TLS termination at a reverse proxy.
 
 Stop / restart:
 
@@ -193,7 +193,7 @@ openproxy combo create my-stack \
   --models "openai/gpt-4o,anthropic/claude-3-5-sonnet"
 ```
 
-Combo entries are `<provider-key>/<model-id>`. For a custom provider node, the prefix is the node's **UUID** (not its name) — see the model-resolution details in `.agents/skills/testing-combo-fallback/SKILL.md`.
+Combo entries are `<provider-key>/<model-id>`. For a custom provider node, the prefix is the node's **UUID** (not its name) — see the model-resolution details in `.agents/skills/openproxy-combos/SKILL.md`.
 
 ### OAuth subscription providers (Claude Code, Codex, Copilot, Cursor, Antigravity)
 
@@ -291,13 +291,13 @@ Maintainers refresh the embedded snapshots by running
 | `HOSTNAME` | `127.0.0.1` | Bind host. `0.0.0.0` exposes on LAN. |
 | `INITIAL_PASSWORD` | _random, generated once_ | First-login password (replaced on first save). If unset, a random password is minted at first boot and printed in the startup banner; recover with `openproxy auth reset-password --show`. |
 | `JWT_SECRET` | `openproxy-default-secret-change-me` | **Change in any non-throwaway deploy.** |
-| `REQUIRE_API_KEY` | `false` | Reject `/v1/*` without a bearer. Required for any non-loopback bind. |
+| `require_api_key` (setting, not env) | `false` | Reject `/v1/*` without a bearer. Required for any non-loopback bind. There is no `REQUIRE_API_KEY` env var — the CLI help text mentions one, but no code reads it. |
 | `OPENPROXY_NO_OPEN` | _(unset)_ | Equivalent to `--no-open`. |
 | `OPENPROXY_WEB_DIR` | _(unset)_ | Serve dashboard from a directory (UI dev). |
 
 ## When _not_ to use this skill
 
-- The user has openproxy running and wants help debugging combo dispatch — use `.agents/skills/testing-combo-fallback/SKILL.md` instead.
+- The user has openproxy running and wants help debugging combo dispatch — use `.agents/skills/openproxy-combos/SKILL.md` instead.
 - The user is asking about cloud-hosted multi-tenant OpenProxy — out of scope; this skill covers the local single-binary mode only.
 - The user explicitly wants to `--from-source` build openproxy from scratch — follow the README's "Build from source" section; this skill optimizes for the prebuilt-binary path.
 
@@ -306,4 +306,4 @@ Maintainers refresh the embedded snapshots by running
 - Full README: https://github.com/quangdang46/openproxy
 - CLI reference: `openproxy --help` and `openproxy <command> --help`
 - Schema introspection: `openproxy schema list`
-- Combo-fallback / E2E skill: [`.agents/skills/testing-combo-fallback/SKILL.md`](../testing-combo-fallback/SKILL.md)
+- Combo-fallback / E2E skill: [`.agents/skills/openproxy-combos/SKILL.md`](./openproxy-combos/SKILL.md)

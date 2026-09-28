@@ -437,6 +437,27 @@ async fn run_providers_add(
     }
 }
 
+/// The media kind (tts, stt, embedding, …) of the provider with this id, read
+/// from the stored connection rather than asked for on the command line.
+async fn resolve_provider_kind(rt: &Runtime, id: &str) -> anyhow::Result<Option<String>> {
+    let list = rt.get_json("/api/providers").await?;
+    let connections = list
+        .get("connections")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(connections
+        .iter()
+        .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|c| {
+            c.get("providerSpecificData")
+                .or_else(|| c.get("provider_specific_data"))
+        })
+        .and_then(|psd| psd.get("mediaType"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
 async fn run_providers_edit(
     rt: &Runtime,
     ctx: OutputCtx,
@@ -446,7 +467,23 @@ async fn run_providers_edit(
     let raw = read_input(&from_file)?;
     let body: Value =
         serde_json::from_str(raw.trim()).map_err(|e| anyhow::anyhow!("--from-file JSON: {e}"))?;
-    let path = format!("/api/media-providers/{}", urlencoding::encode(&id));
+
+    // A media provider is addressed by kind AND id, the same shape the sibling
+    // GET/DELETE routes use. This command used to PUT to `/api/media-providers/{id}`,
+    // which is not a route at all — it answered 405, so the command could never
+    // succeed. Rather than force the caller to pass --kind (delete does, edit
+    // never did), resolve the kind from the provider itself.
+    let kind = match resolve_provider_kind(rt, &id).await? {
+        Some(kind) => kind,
+        None => {
+            return Err(anyhow::anyhow!("Media provider not found: {id}"));
+        }
+    };
+    let path = format!(
+        "/api/media-providers/{}/{}",
+        encode_kind(&kind),
+        urlencoding::encode(&id)
+    );
     match rt.put_json(&path, &body).await {
         Ok(payload) => {
             if ctx.is_robot() {

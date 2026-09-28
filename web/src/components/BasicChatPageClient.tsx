@@ -350,25 +350,45 @@ export default function BasicChatPageClient() {
           group.models.push(...staticModels);
         }
 
+        // Fetch once per DISTINCT provider, not once per connection.
+        // Whether a provider exposes a live model list is a property of the
+        // provider, so every connection of the same provider was asking the
+        // same question and getting the same answer — including the providers
+        // that answer 400 "does not support models listing". With N connections
+        // across M providers this is M requests instead of N.
+        const byProvider = new Map();
+        for (const connection of connections) {
+          const key = connection.provider || connection.id;
+          if (!byProvider.has(key)) byProvider.set(key, []);
+          byProvider.get(key).push(connection);
+        }
+
         const liveResults = await Promise.all(
-          connections.map(async (connection) => {
+          Array.from(byProvider.entries()).map(async ([providerKey, group_connections]) => {
+            const primary = group_connections[0];
             try {
-              const response = await fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" });
+              const response = await fetch(`/api/providers/${primary.id}/models`, { cache: "no-store" });
               const data = await response.json().catch(() => ({}));
-              if (!response.ok) return { connection, models: [] };
-              const models = parseProviderModelsPayload(data)
-                .map((model) => normalizeLiveModel(model, connection))
-                .filter((model) => isChatCapableModel(model));
-              return { connection, models };
+              if (!response.ok) return { providerKey, models: [] };
+              // Normalise against each connection so provider-specific fields
+              // stay attached, exactly as the per-connection loop did.
+              const models = [];
+              for (const connection of group_connections) {
+                models.push(
+                  ...parseProviderModelsPayload(data)
+                    .map((model) => normalizeLiveModel(model, connection))
+                    .filter((model) => isChatCapableModel(model))
+                );
+              }
+              return { providerKey, models };
             } catch {
-              return { connection, models: [] };
+              return { providerKey, models: [] };
             }
           })
         );
 
         for (const result of liveResults) {
-          const providerId = result.connection.provider || result.connection.id;
-          const group = providerMap.get(providerId);
+          const group = providerMap.get(result.providerKey);
           if (!group) continue;
           group.models.push(...result.models);
         }
