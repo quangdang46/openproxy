@@ -79,6 +79,22 @@ pub struct Db {
 /// SQLite's `data` column holds ciphertext. Decryption is a no-op when
 /// `OPENPROXY_ENCRYPTION_KEY` is unset (plaintext mode), and `decrypt_opt`
 /// fails-loud (clears) ciphertext that can't be decrypted.
+/// Decrypt the settings blob's credential fields alongside the connections.
+///
+/// The settings row is written with `oidc_client_secret` and
+/// `outbound_proxy_url` encrypted, but the in-memory snapshot has to hold them
+/// decrypted for the OIDC login flow and the outbound proxy client to work —
+/// the same boundary invariant `decrypt_snapshot_connections` exists for.
+fn decrypt_snapshot_settings(app_db: &mut AppDb) {
+    let key = crate::db::crypto::encryption_key().unwrap_or_default();
+    if key.is_empty() {
+        return;
+    }
+    let mut settings = app_db.settings.clone();
+    crate::db::crypto::decrypt_settings(&mut settings, &key);
+    app_db.settings = settings;
+}
+
 fn decrypt_snapshot_connections(app_db: &mut AppDb) {
     let key = crate::db::crypto::encryption_key().unwrap_or_default();
     if key.is_empty() {
@@ -212,6 +228,7 @@ impl Db {
                 // executors see real tokens (H20 boundary invariant).
                 let mut app_db = app_db;
                 decrypt_snapshot_connections(&mut app_db);
+                decrypt_snapshot_settings(&mut app_db);
                 let usage_db = sq.with_conn(|conn| -> rusqlite::Result<UsageDb> {
                     let json_val = crate::db::sqlite::export::export_usage_impl(conn)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -254,6 +271,7 @@ impl Db {
                 })
                 .map_err(|e| anyhow::anyhow!("SQLite reload failed: {e}"))?;
             decrypt_snapshot_connections(&mut app_db);
+            decrypt_snapshot_settings(&mut app_db);
             Ok(app_db)
         })
         .await
@@ -375,8 +393,15 @@ impl Db {
         let mut next = (*self.snapshot()).clone();
         updater(&mut next.settings);
         next.normalize();
-        // Persist only the settings row to SQLite.
-        let settings_str = serde_json::to_string(&next.settings)?;
+        // Persist only the settings row to SQLite, with the credential
+        // fields encrypted. `next` keeps them decrypted in memory, which is
+        // what the OIDC and proxy code paths read.
+        let mut to_store = next.settings.clone();
+        crate::db::crypto::encrypt_settings(
+            &mut to_store,
+            &crate::db::crypto::encryption_key().unwrap_or_default(),
+        );
+        let settings_str = serde_json::to_string(&to_store)?;
         let sq = self.sqlite.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             sq.with_conn(|conn| {
@@ -490,9 +515,28 @@ impl Db {
 
     /// Serialize the current `AppDb` snapshot to pretty-printed JSON bytes.
     /// Returns a useful filename hint as well.
+    ///
+    /// Goes through `finalize_db` so the secrets are encrypted and the payload
+    /// checksummed. This used to serialise the snapshot directly, and the
+    /// snapshot deliberately holds PLAINTEXT credentials (it is decrypted on
+    /// load, so the running server can use them) — so every export was a
+    /// plaintext credential dump: the hourly auto-backup, the manual backup,
+    /// the pre-restore and pre-import copies, and `openproxy db export`. On a
+    /// deployment that had correctly set `OPENPROXY_ENCRYPTION_KEY` this still
+    /// wrote every provider API key, OAuth token and dashboard bearer in the
+    /// clear, which defeated encryption for the most-copied artifact an
+    /// operator has. With no key set the output is unchanged, so plaintext-mode
+    /// installs are unaffected.
+    ///
+    /// The read side already accepts both: import tries `open_db` (decrypt +
+    /// checksum) and falls back to plain JSON, so older plaintext backups
+    /// still restore.
     pub fn export_db(&self) -> anyhow::Result<(Vec<u8>, String)> {
         let snapshot = self.snapshot.load_full();
-        let json = serde_json::to_vec_pretty(snapshot.as_ref())?;
+        let json = crate::db::crypto::finalize_db(
+            snapshot.as_ref(),
+            crate::db::crypto::encryption_key().as_deref(),
+        )?;
         let filename = format!("openproxy-db-{}.json", chrono_like_stamp());
         Ok((json, filename))
     }
@@ -596,6 +640,58 @@ fn chrono_like_stamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The in-memory snapshot deliberately holds PLAINTEXT credentials (it is
+    /// decrypted on load so the running server can use them), so an export
+    /// that serialised it directly was a plaintext credential dump — the hourly
+    /// auto-backup, manual backups, the pre-restore/pre-import copies, and
+    /// `db export` all shipped every provider API key, OAuth token and
+    /// dashboard bearer in the clear, even with `OPENPROXY_ENCRYPTION_KEY`
+    /// correctly set. `export_db` now goes through `finalize_db`.
+    #[test]
+    fn export_db_does_not_leak_plaintext_credentials() {
+        use crate::db::crypto::encryption_key;
+        use crate::types::{AppDb, ProviderConnection};
+
+        // finalize_db is what export_db now routes through; assert the
+        // property directly on the serializer it delegates to, so the test
+        // does not need a live Db (whose constructor requires a temp dir and
+        // a running sqlite handle).
+        let mut db = AppDb::default();
+        let mut conn = ProviderConnection::default();
+        conn.id = "conn-1".into();
+        conn.provider = "acme".into();
+        conn.api_key = Some("sk-PLAINTEXT-CANARY-12345".into());
+        conn.access_token = Some("at-CANARY".into());
+        conn.refresh_token = Some("rt-CANARY".into());
+        db.provider_connections.push(conn);
+
+        let key = "0123456789abcdef0123456789abcdef";
+        let bytes = crate::db::crypto::finalize_db(&db, Some(key)).expect("serialize");
+        let text = String::from_utf8(bytes).expect("utf8");
+
+        assert!(
+            !text.contains("sk-PLAINTEXT-CANARY-12345"),
+            "the API key must not appear in plaintext in an export"
+        );
+        assert!(
+            !text.contains("rt-CANARY"),
+            "the refresh token must not appear in plaintext in an export"
+        );
+        assert!(
+            text.contains("_checksum"),
+            "an export carries the finalize_db checksum"
+        );
+
+        // Backward compatibility: with no key the output is plain JSON, as
+        // every existing plaintext-mode install already has.
+        let plain = crate::db::crypto::finalize_db(&db, None).expect("serialize");
+        assert!(
+            String::from_utf8_lossy(&plain).contains("sk-PLAINTEXT-CANARY-12345"),
+            "with no key set the export is unchanged (plaintext mode)"
+        );
+        let _ = encryption_key();
+    }
+
     use super::*;
     use crate::db::sqlite::SqliteDb;
     use crate::types::AppDb;

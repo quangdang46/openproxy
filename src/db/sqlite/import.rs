@@ -104,9 +104,19 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
     }
 
-    // Settings
+    // Settings — encrypt the credential fields on the way in, matching the
+    // normal write path, so an imported config does not land as plaintext.
     if let Some(s) = payload.get("settings") {
-        let data_str = serde_json::to_string(s).unwrap_or_else(|_| "{}".into());
+        let data_str = match serde_json::from_value::<crate::types::Settings>(s.clone()) {
+            Ok(mut parsed) => {
+                crate::db::crypto::encrypt_settings(
+                    &mut parsed,
+                    &crate::db::crypto::encryption_key().unwrap_or_default(),
+                );
+                serde_json::to_string(&parsed).unwrap_or_else(|_| "{}".into())
+            }
+            Err(_) => serde_json::to_string(s).unwrap_or_else(|_| "{}".into()),
+        };
         conn.execute(
             "INSERT INTO settings(id, data) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
             rusqlite::params![data_str],

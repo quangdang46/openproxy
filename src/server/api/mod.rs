@@ -702,13 +702,17 @@ pub(crate) fn redact_provider_connection(connection: &ProviderConnection) -> Pro
         // Provider-specific secrets that live in this map, not on the struct:
         // kiro stores its OAuth client secret here and xiaomi-mimo stores
         // mimoPassToken. Both are credentials; neither was redacted before.
-        "clientSecret",
-        "client_secret",
-        "mimoPassToken",
-        "mimo_pass_token",
     ] {
         redacted.provider_specific_data.remove(secret_field);
     }
+    // The provider-specific secret fields come from the shared list, so
+    // redaction and encryption-at-rest cannot drift: whatever is redacted here
+    // is exactly what encrypt_connection encrypts on the way in.
+    for secret_field in crate::db::crypto::PROVIDER_SPECIFIC_SECRET_FIELDS {
+        redacted.provider_specific_data.remove(*secret_field);
+    }
+    // The per-connection proxy is routinely `http://user:pass@host`.
+    redacted.proxy_url = None;
 
     redacted
 }

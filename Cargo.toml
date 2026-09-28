@@ -165,5 +165,11 @@ embed-web = []
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
+# NOT `panic = "abort"`. This was set for single-binary size, but it is the
+# wrong trade for a long-running server: with abort, a panic in ANY thread —
+# including a request handler or a spawned task — kills the whole router, so
+# one malformed provider response takes the proxy down for every client. With
+# the default unwind, that panic fails one request and the server stays up.
+# `catch_unwind` is no help here either: it needs unwinding to work at all.
+# The binary is dominated by the embedded dashboard, not by panic tables.
 opt-level = "s"

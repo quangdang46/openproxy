@@ -49,10 +49,12 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 }
 
 fn require_cloud_bearer_api_key(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
-    eprintln!(
-        "CLOUDAUTH reached, auth={:?}",
-        headers.get(AUTHORIZATION_HEADER)
-    );
+    // Never log the Authorization header here. This function is the auth gate
+    // for every /api/cloud/* route, so a debug print of the header wrote the
+    // management API key in the clear to stderr — which detached mode
+    // redirects into $DATA_DIR/openproxy.log, a 0644 file the project's own bug
+    // template asks users to paste into issue reports. Say only that the gate
+    // was reached, never what it was given.
     let Some(auth_header) = headers
         .get(AUTHORIZATION_HEADER)
         .and_then(|value| value.to_str().ok())

@@ -16,6 +16,10 @@ use crate::cli::output::{emit_robot, humanln, OutputCtx};
 struct Check {
     name: &'static str,
     ok: bool,
+    /// A security-posture note: worth saying out loud, but the install is
+    /// working as designed, so it must not turn `doctor` red. A plaintext
+    /// credential store is exactly this — the default, not a failure.
+    warning: bool,
     detail: String,
 }
 
@@ -24,6 +28,7 @@ impl Check {
         Self {
             name,
             ok: true,
+            warning: false,
             detail: detail.into(),
         }
     }
@@ -31,6 +36,16 @@ impl Check {
         Self {
             name,
             ok: false,
+            warning: false,
+            detail: detail.into(),
+        }
+    }
+    /// Reported, but does not affect the exit code.
+    fn warn(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            ok: true,
+            warning: true,
             detail: detail.into(),
         }
     }
@@ -42,6 +57,7 @@ pub async fn run(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i32> {
     checks.push(check_data_dir(&cfg.data_dir));
     checks.push(check_db_file(&cfg.data_dir));
     checks.push(check_db_loadable(&cfg.data_dir).await);
+    checks.push(check_encryption_at_rest());
 
     if let Some(url) = cfg.remote_url.as_deref() {
         checks.push(check_server_reachable(url).await);
@@ -63,7 +79,13 @@ pub async fn run(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i32> {
     } else {
         humanln(ctx, "openproxy doctor:");
         for c in &checks {
-            let mark = if c.ok { "ok  " } else { "FAIL" };
+            let mark = if !c.ok {
+                "FAIL"
+            } else if c.warning {
+                "warn"
+            } else {
+                "ok  "
+            };
             humanln(ctx, format!("  [{mark}] {} — {}", c.name, c.detail));
         }
         humanln(
@@ -90,6 +112,30 @@ fn check_data_dir(dir: &Path) -> Check {
                 dir.display()
             ),
         )
+    }
+}
+
+/// Whether provider credentials are encrypted at rest.
+///
+/// `encrypt_connection` runs on the persist path, but only when
+/// `OPENPROXY_ENCRYPTION_KEY` is set. Without it the store is in plaintext mode
+/// (src/db/mod.rs): every API key, OAuth token and proxy password sits in
+/// openproxy.sqlite in the clear, and a db-backups export copies it out as-is.
+/// That is a deliberate opt-in, so it is not a failure — but an operator who
+/// does not know it is set has no reason to set it, and nothing else says so.
+fn check_encryption_at_rest() -> Check {
+    match std::env::var("OPENPROXY_ENCRYPTION_KEY") {
+        Ok(key) if !key.trim().is_empty() => Check::ok(
+            "encryption_at_rest",
+            "OPENPROXY_ENCRYPTION_KEY is set — credentials are encrypted at rest",
+        ),
+        _ => Check::warn(
+            "encryption_at_rest",
+            "OPENPROXY_ENCRYPTION_KEY is not set — provider API keys, OAuth tokens \
+             and proxy passwords are stored in plaintext in openproxy.sqlite, and \
+             db-backups exports them in the clear. Set a 32-byte hex key \
+             (OPENPROXY_ENCRYPTION_KEY) to encrypt at rest.",
+        ),
     }
 }
 

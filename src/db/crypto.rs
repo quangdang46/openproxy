@@ -313,6 +313,42 @@ pub fn encrypt_connection(conn: &mut ProviderConnection, key: &str) {
     encrypt_opt(&mut conn.refresh_token, key);
     encrypt_opt(&mut conn.id_token, key);
     encrypt_opt(&mut conn.api_key, key);
+    // The per-connection proxy, which is routinely `http://user:pass@host`.
+    encrypt_opt(&mut conn.proxy_url, key);
+    // `provider_specific_data` carries real credentials too — the redaction
+    // path in server/api/mod.rs says so in as many words ("kiro stores its
+    // OAuth client secret here and xiaomi-mimo stores mimoPassToken"). Those
+    // were redacted on the way OUT but never encrypted on the way IN, so they
+    // sat in the SQLite `data` column and in every export in the clear even
+    // with a key set. The field list is shared with the redactor so the two
+    // cannot drift apart.
+    encrypt_provider_specific_secrets(&mut conn.provider_specific_data, key);
+}
+
+/// Keys inside `provider_specific_data` whose string values are credentials.
+pub const PROVIDER_SPECIFIC_SECRET_FIELDS: &[&str] = &[
+    "clientSecret",
+    "client_secret",
+    "mimoPassToken",
+    "mimo_pass_token",
+];
+
+fn encrypt_provider_specific_secrets(
+    map: &mut std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) {
+    for field in PROVIDER_SPECIFIC_SECRET_FIELDS {
+        let Some(Value::String(plain)) = map.get(*field) else {
+            continue;
+        };
+        if plain.starts_with(ENC_PREFIX_V2) || plain.starts_with(ENC_PREFIX) {
+            continue; // already ciphertext — do not re-encrypt
+        }
+        map.insert(
+            (*field).to_string(),
+            Value::String(format!("{ENC_PREFIX_V2}{}", encrypt_value(key, plain))),
+        );
+    }
 }
 
 /// Decrypt sensitive fields of a [`ProviderConnection`] **in place** after
@@ -329,6 +365,32 @@ pub fn decrypt_connection(conn: &mut ProviderConnection, key: &str) {
     decrypt_opt(&mut conn.refresh_token, key);
     decrypt_opt(&mut conn.id_token, key);
     decrypt_opt(&mut conn.api_key, key);
+    decrypt_opt(&mut conn.proxy_url, key);
+    decrypt_provider_specific_secrets(&mut conn.provider_specific_data, key);
+}
+
+/// Mirror of [`encrypt_provider_specific_secrets`]. A field that is not
+/// ciphertext is left exactly as it is, so a plaintext-mode install round-trips
+/// unchanged.
+fn decrypt_provider_specific_secrets(
+    map: &mut std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) {
+    for field in PROVIDER_SPECIFIC_SECRET_FIELDS {
+        let Some(Value::String(cipher)) = map.get(*field).cloned() else {
+            continue;
+        };
+        let payload = if let Some(rest) = cipher.strip_prefix(ENC_PREFIX_V2) {
+            rest
+        } else if let Some(rest) = cipher.strip_prefix(ENC_PREFIX) {
+            rest
+        } else {
+            continue; // plaintext — nothing to do
+        };
+        if let Ok(plain) = decrypt_value(key, payload) {
+            map.insert((*field).to_string(), Value::String(plain));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -893,4 +955,186 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+#[cfg(test)]
+mod secret_field_tests {
+    use crate::types::ProviderConnection;
+
+    /// `provider_specific_data` and `proxy_url` were redacted on the way out but
+    /// never encrypted on the way in, so a kiro client secret, a MiMo passToken
+    /// and an `http://user:pass@host` proxy sat in the SQLite `data` column in
+    /// the clear even with a key set. They must survive a round trip.
+    #[test]
+    fn provider_specific_secrets_and_proxy_url_round_trip_encrypted() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut conn = ProviderConnection::default();
+        conn.id = "c1".into();
+        conn.api_key = Some("sk-plain".into());
+        conn.proxy_url = Some("http://user:hunter2@proxy.internal:8080".into());
+        conn.provider_specific_data
+            .insert("clientSecret".into(), "kiro-secret".into());
+        conn.provider_specific_data
+            .insert("mimoPassToken".into(), "mimo-token".into());
+        conn.provider_specific_data
+            .insert("harmless".into(), "keep-me".into());
+
+        let mut stored = conn.clone();
+        super::encrypt_connection(&mut stored, key);
+
+        let dump = serde_json::to_string(&stored.provider_specific_data).unwrap();
+        assert!(
+            !dump.contains("kiro-secret"),
+            "clientSecret must be encrypted"
+        );
+        assert!(
+            !dump.contains("mimo-token"),
+            "mimoPassToken must be encrypted"
+        );
+        assert!(
+            stored.proxy_url.as_deref().unwrap().contains("opxenc"),
+            "proxy_url must be encrypted, got {:?}",
+            stored.proxy_url
+        );
+        assert!(
+            dump.contains("keep-me"),
+            "a non-secret key must be left as plaintext, not encrypted"
+        );
+
+        let mut back = stored;
+        super::decrypt_connection(&mut back, key);
+        assert_eq!(back.api_key.as_deref(), Some("sk-plain"));
+        assert_eq!(
+            back.proxy_url.as_deref(),
+            Some("http://user:hunter2@proxy.internal:8080")
+        );
+        assert_eq!(
+            back.provider_specific_data.get("clientSecret").unwrap(),
+            "kiro-secret"
+        );
+        assert_eq!(
+            back.provider_specific_data.get("mimoPassToken").unwrap(),
+            "mimo-token"
+        );
+        assert_eq!(
+            back.provider_specific_data.get("harmless").unwrap(),
+            "keep-me"
+        );
+    }
+
+    /// A plaintext-mode install has no key; nothing may be lost or mangled.
+    #[test]
+    fn no_key_leaves_the_connection_untouched() {
+        let mut conn = ProviderConnection::default();
+        conn.provider_specific_data
+            .insert("clientSecret".into(), "plain".into());
+        let before = conn.provider_specific_data.clone();
+        super::encrypt_connection(&mut conn, "");
+        assert_eq!(conn.provider_specific_data, before);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+//
+// The settings row is one JSON blob and had no crypto on it at all, so
+// `oidc_client_secret` (an OIDC client secret) and `outbound_proxy_url`
+// (routinely `http://user:pass@host`) were persisted in the clear even with a
+// key set. The dashboard `password` field is excluded on purpose: it is a
+// bcrypt hash and is `skip_serializing`, so there is no plaintext to protect.
+
+/// Settings fields whose values are credentials.
+pub const SETTINGS_SECRET_FIELDS: &[&str] = &["oidc_client_secret", "outbound_proxy_url"];
+
+/// Encrypt the credential-bearing settings fields, in place.
+pub fn encrypt_settings(settings: &mut crate::types::Settings, key: &str) {
+    if key.is_empty() {
+        return;
+    }
+    for field in SETTINGS_SECRET_FIELDS {
+        let current = match *field {
+            "oidc_client_secret" => &mut settings.oidc_client_secret,
+            "outbound_proxy_url" => &mut settings.outbound_proxy_url,
+            _ => continue,
+        };
+        if current.is_empty()
+            || current.starts_with(ENC_PREFIX_V2)
+            || current.starts_with(ENC_PREFIX)
+        {
+            continue;
+        }
+        *current = format!("{ENC_PREFIX_V2}{}", encrypt_value(key, current));
+    }
+}
+
+/// Decrypt the credential-bearing settings fields, in place. A value that is not
+/// ciphertext is left alone, so a plaintext-mode install round-trips.
+pub fn decrypt_settings(settings: &mut crate::types::Settings, key: &str) {
+    for field in SETTINGS_SECRET_FIELDS {
+        let current = match *field {
+            "oidc_client_secret" => &mut settings.oidc_client_secret,
+            "outbound_proxy_url" => &mut settings.outbound_proxy_url,
+            _ => continue,
+        };
+        let payload = if let Some(rest) = current.strip_prefix(ENC_PREFIX_V2) {
+            rest
+        } else if let Some(rest) = current.strip_prefix(ENC_PREFIX) {
+            rest
+        } else {
+            continue;
+        };
+        if let Ok(plain) = decrypt_value(key, payload) {
+            *current = plain;
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_secret_tests {
+    /// The settings row had no crypto at all, so the OIDC client secret and the
+    /// outbound proxy URL — routinely `http://user:pass@host` — were persisted
+    /// in the clear even with a key set. They must round trip.
+    #[test]
+    fn settings_secrets_round_trip_encrypted() {
+        use crate::types::Settings;
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut settings = Settings::default();
+        settings.oidc_client_secret = "oidc-secret-canary".into();
+        settings.outbound_proxy_url = "http://user:hunter2@proxy:8080".into();
+        // A neighbouring non-secret must be untouched.
+        settings.oidc_client_id = "public-client-id".into();
+
+        let mut stored = settings.clone();
+        super::encrypt_settings(&mut stored, key);
+        assert!(
+            stored.oidc_client_secret.starts_with("opxenc2"),
+            "oidc client secret must be encrypted, got {:?}",
+            stored.oidc_client_secret
+        );
+        assert!(stored.outbound_proxy_url.starts_with("opxenc2"));
+        assert_eq!(
+            stored.oidc_client_id, "public-client-id",
+            "non-secret untouched"
+        );
+        assert!(!super::SETTINGS_SECRET_FIELDS.contains(&"oidc_client_id"));
+
+        let mut back = stored;
+        super::decrypt_settings(&mut back, key);
+        assert_eq!(back.oidc_client_secret, "oidc-secret-canary");
+        assert_eq!(back.outbound_proxy_url, "http://user:hunter2@proxy:8080");
+    }
+
+    /// Plaintext mode must round trip untouched, or every existing install
+    /// would come back with an empty OIDC secret after a restart.
+    #[test]
+    fn settings_secrets_survive_plaintext_mode() {
+        use crate::types::Settings;
+        let mut settings = Settings::default();
+        settings.oidc_client_secret = "still-plain".into();
+        let before = settings.oidc_client_secret.clone();
+        super::encrypt_settings(&mut settings, "");
+        assert_eq!(settings.oidc_client_secret, before);
+        super::decrypt_settings(&mut settings, "");
+        assert_eq!(settings.oidc_client_secret, "still-plain");
+    }
 }

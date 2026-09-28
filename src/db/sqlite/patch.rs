@@ -144,7 +144,14 @@ pub fn apply_app_db_diff(conn: &Connection, old: &AppDb, new: &AppDb) -> rusqlit
 
 /// Write a single-row `settings` upsert. Same SQL as `Db::update_settings`.
 fn settings_upsert(conn: &Connection, settings: &Settings) -> rusqlite::Result<()> {
-    let settings_str = serde_json::to_string(settings).unwrap_or_else(|_| "{}".into());
+    // Encrypt the credential-bearing fields on the way in; the snapshot load
+    // path decrypts them symmetrically.
+    let mut settings = settings.clone();
+    crate::db::crypto::encrypt_settings(
+        &mut settings,
+        &crate::db::crypto::encryption_key().unwrap_or_default(),
+    );
+    let settings_str = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".into());
     conn.execute(
         "INSERT INTO settings(id, data) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
         params![settings_str],
