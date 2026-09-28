@@ -48,7 +48,7 @@ fn persist_secret_to(path: PathBuf, secret: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, secret);
+    let _ = crate::db::crypto::write_secret_file(&path, secret.as_bytes());
 }
 
 /// Returns the HMAC secret used for API key CRC generation.

@@ -192,7 +192,7 @@ fn get_or_create_salt() -> [u8; SALT_LEN] {
     if let Some(dir) = crypto_salt_path().parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(crypto_salt_path(), salt);
+    let _ = write_secret_file(&crypto_salt_path(), &salt);
     salt
 }
 
@@ -1137,4 +1137,24 @@ mod settings_secret_tests {
         super::decrypt_settings(&mut settings, "");
         assert_eq!(settings.oidc_client_secret, "still-plain");
     }
+}
+
+/// Owner-only write for a secret file. See `core::mitm::cert::write_secret_file`
+/// for why the default 0644 is wrong here.
+#[cfg(unix)]
+pub(crate) fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }

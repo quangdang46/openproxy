@@ -3989,8 +3989,15 @@ async fn proxy_response_with_usage_tracking(
                 if !chunks.is_empty() {
                     let mut result = String::new();
                     for chunk in &chunks {
-                        if let Some(data) = chunk.strip_prefix("data: ") {
-                            result = data.to_string();
+                        // Match the terminator the way the hyper arm does
+                        // (line 4418). This used to require the exact "data: "
+                        // prefix, so `data:[DONE]` — legal SSE, and what some
+                        // upstreams emit — was not recognised: the sentinel was
+                        // not stripped here and a second one was appended at
+                        // EOF, leaving the client with two [DONE]s.
+                        let trimmed = chunk.trim();
+                        if let Some(data) = trimmed.strip_prefix("data:") {
+                            result = data.trim().to_string();
                             if result == "[DONE]" {
                                 continue;
                             }
@@ -7539,6 +7546,36 @@ mod tests {
         assert!(
             !shown.contains("Error") && !shown.contains("line"),
             "no internals: {shown}"
+        );
+    }
+
+    /// The reqwest arm required the exact "data: " prefix to recognise the
+    /// terminator, so `data:[DONE]` — legal SSE, and what some upstreams send
+    /// — was not detected: the sentinel was not stripped, and a second one was
+    /// appended at EOF, leaving the client with two [DONE]s. The hyper arm
+    /// already trimmed; these two must agree.
+    #[test]
+    fn both_stream_arms_recognise_the_done_sentinel() {
+        // The rule the reqwest arm now uses.
+        fn is_done(chunk: &str) -> bool {
+            chunk
+                .trim()
+                .strip_prefix("data:")
+                .map(|rest| rest.trim() == "[DONE]")
+                .unwrap_or(false)
+        }
+        assert!(is_done("data: [DONE]"), "spaced form");
+        assert!(
+            is_done("data:[DONE]"),
+            "no-space form must be recognised too"
+        );
+        assert!(
+            is_done("data: [DONE]\r"),
+            "CRLF form must be recognised too"
+        );
+        assert!(
+            !is_done("data: {\"x\":1}"),
+            "a real payload is not the terminator"
         );
     }
 

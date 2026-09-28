@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -41,11 +43,13 @@ impl CaptureSink {
         let dir = self.capture_dir.join(sanitize_host(host));
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(filename);
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
+        // Captures carry decrypted upstream traffic, so they are owner-only
+        // rather than the 0644 a bare create leaves behind.
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut file = opts.open(&path).await?;
         file.write_all(data).await?;
         file.flush().await?;
         Ok(path)

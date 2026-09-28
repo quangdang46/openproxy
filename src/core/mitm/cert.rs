@@ -103,8 +103,9 @@ pub fn generate_ca_persisted(
 
     if ca_needs_regeneration(&cert_path) || !key_path.exists() {
         let material = generate_ca()?;
-        std::fs::write(&cert_path, material.cert_pem.as_bytes())?;
-        std::fs::write(&key_path, material.key_pem.as_bytes())?;
+        write_secret_file(&cert_path, material.cert_pem.as_bytes())?;
+        // The CA private key: owner-only, never group/world readable.
+        write_secret_file(&key_path, material.key_pem.as_bytes())?;
     }
 
     Ok((cert_path, key_path))
@@ -348,4 +349,27 @@ mod tests {
         assert_eq!(m1, m2, "valid cert should not be regenerated");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Write a file that holds key material, owner-readable only.
+///
+/// `std::fs::write` creates with 0644 under the default umask, so the MITM CA
+/// private key, the crypto salt and the API-key HMAC secret were all readable
+/// by every other local user. 0600 is the only sane mode for a secret.
+#[cfg(unix)]
+fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
