@@ -252,7 +252,7 @@ fn test_filter_available_accounts_all_unavailable() {
 
 #[test]
 fn test_account_registry_round_robin_basic() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts = vec!["acc1".to_string(), "acc2".to_string(), "acc3".to_string()];
 
     let result0 = registry.next_in_combo("combo1", &accounts);
@@ -268,7 +268,7 @@ fn test_account_registry_round_robin_basic() {
 
 #[test]
 fn test_account_registry_round_robin_empty_accounts() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts: Vec<String> = vec![];
     let result = registry.next_in_combo("combo1", &accounts);
     assert!(result.is_none());
@@ -276,7 +276,7 @@ fn test_account_registry_round_robin_empty_accounts() {
 
 #[test]
 fn test_account_registry_round_robin_single_account() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts = vec!["acc1".to_string()];
 
     let result0 = registry.next_in_combo("combo1", &accounts);
@@ -288,7 +288,7 @@ fn test_account_registry_round_robin_single_account() {
 
 #[test]
 fn test_account_registry_round_robin_different_combos() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts = vec!["acc1".to_string(), "acc2".to_string()];
 
     let result0_a = registry.next_in_combo("combo1", &accounts);
@@ -300,7 +300,7 @@ fn test_account_registry_round_robin_different_combos() {
 
 #[test]
 fn test_account_registry_get_combo_stats() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts = vec!["acc1".to_string(), "acc2".to_string()];
 
     registry.next_in_combo("combo1", &accounts);
@@ -317,14 +317,14 @@ fn test_account_registry_get_combo_stats() {
 
 #[test]
 fn test_account_registry_get_combo_stats_nonexistent() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let stats = registry.get_combo_stats("nonexistent");
     assert!(stats.is_none());
 }
 
 #[test]
 fn test_account_registry_record_rotation() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let accounts = vec!["acc1".to_string(), "acc2".to_string(), "acc3".to_string()];
 
     registry.next_in_combo("combo1", &accounts);
@@ -341,7 +341,7 @@ fn test_account_registry_record_rotation() {
 
 #[test]
 fn test_account_registry_acquire_slot_success() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let guard = registry.acquire_slot("acc1", 10, 100, 0);
     assert!(guard.is_some());
     assert_eq!(guard.unwrap().in_flight(), 1);
@@ -349,7 +349,7 @@ fn test_account_registry_acquire_slot_success() {
 
 #[test]
 fn test_account_registry_acquire_slot_rate_limited() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let now = Utc::now().timestamp();
     let guard = registry.acquire_slot("acc1", 10, -1, now + 3600);
     assert!(guard.is_none());
@@ -357,7 +357,7 @@ fn test_account_registry_acquire_slot_rate_limited() {
 
 #[test]
 fn test_account_registry_acquire_slot_max_in_flight() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     // Acquire two slots (max_in_flight = 2), keeping them alive
     let guard1 = registry.acquire_slot("acc1", 2, 100, 0);
     assert!(guard1.is_some());
@@ -379,7 +379,7 @@ fn test_account_registry_acquire_slot_max_in_flight() {
 
 #[test]
 fn test_account_registry_in_flight_count() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     assert_eq!(registry.in_flight_count("acc1"), 0);
 
     let _guard = registry.acquire_slot("acc1", 5, 100, 0);
@@ -391,7 +391,7 @@ fn test_account_registry_in_flight_count() {
 
 #[test]
 fn test_account_registry_update_rate_limit() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     registry.update_rate_limit("acc1", 50, 100);
 
     let (remaining, reset) = registry.rate_limit_info("acc1");
@@ -401,7 +401,7 @@ fn test_account_registry_update_rate_limit() {
 
 #[test]
 fn test_account_registry_remove_account() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     registry.update_rate_limit("acc1", 50, 100);
 
     registry.remove_account("acc1");
@@ -417,7 +417,7 @@ fn test_account_registry_remove_account() {
 
 #[test]
 fn test_account_registry_lock_model() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     let result = registry.lock_model("gpt-4", "acc1", 300, None);
     assert!(result.is_ok());
 
@@ -427,7 +427,7 @@ fn test_account_registry_lock_model() {
 
 #[test]
 fn test_account_registry_lock_model_rejects_existing_lock() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     registry.lock_model("gpt-4", "acc1", 300, None).unwrap();
 
     let result = registry.lock_model("gpt-4", "acc2", 300, None);
@@ -437,7 +437,7 @@ fn test_account_registry_lock_model_rejects_existing_lock() {
 
 #[test]
 fn test_account_registry_lock_model_same_account_refreshes() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     registry.lock_model("gpt-4", "acc1", 300, None).unwrap();
 
     let result = registry.lock_model("gpt-4", "acc1", 600, None);
@@ -449,7 +449,7 @@ fn test_account_registry_lock_model_same_account_refreshes() {
 
 #[test]
 fn test_account_registry_unlock_model() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     registry.lock_model("gpt-4", "acc1", 300, None).unwrap();
 
     registry.unlock_model("gpt-4");
@@ -460,7 +460,7 @@ fn test_account_registry_unlock_model() {
 
 #[test]
 fn test_account_registry_get_locked_account_expired() {
-    let registry = AccountRegistry::default();
+    let registry = std::sync::Arc::new(AccountRegistry::default());
     // Lock with 0 TTL should expire immediately (effectively)
     registry.lock_model("gpt-4", "acc1", 0, None).unwrap();
 

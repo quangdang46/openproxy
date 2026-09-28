@@ -194,3 +194,77 @@ mod tests {
         assert!(!in_current_month("2026-03-01T00:00:00Z", prefix));
     }
 }
+
+/// Hold an account's in-flight slot for as long as the response body lives.
+///
+/// The slot guard used to be dropped when the handler returned, while a
+/// streaming body was still being delivered — so `MAX_IN_FLIGHT_PER_ACCOUNT`
+/// capped only the setup phase, not the streams. Moving the guard into the body
+/// stream ties its release to the stream: it drops when the response completes
+/// or the client disconnects, which is when the account is genuinely free again.
+pub fn with_in_flight_slot(
+    response: axum::response::Response,
+    guard: crate::core::account_fallback::AccountSlotGuard,
+) -> axum::response::Response {
+    use axum::body::Body;
+    let (parts, body) = response.into_parts();
+    use futures_util::StreamExt;
+    let guarded = body.into_data_stream().map(move |chunk| {
+        // Captured, not used: holding it in the stream's closure is what keeps
+        // the slot taken until the stream is dropped.
+        let _slot = &guard;
+        chunk
+    });
+    axum::response::Response::from_parts(parts, Body::from_stream(guarded))
+}
+
+#[cfg(test)]
+mod in_flight_slot_tests {
+    use crate::core::account_fallback::AccountRegistry;
+    use std::sync::Arc;
+
+    /// The regression this exists for: the guard used to be dropped when the
+    /// handler returned, so `in_flight` was already back to 0 while a streaming
+    /// body was still being delivered — the cap never applied to concurrent
+    /// streams. Holding the guard in the body ties release to the stream.
+    #[tokio::test]
+    async fn the_slot_is_still_held_while_the_body_lives() {
+        use axum::body::Body;
+
+        let registry = Arc::new(AccountRegistry::default());
+        let guard = registry
+            .acquire_slot("acc", 1, 100, 0)
+            .expect("slot acquired");
+        assert_eq!(registry.get_state("acc").in_flight, 1);
+
+        let response = axum::response::Response::new(Body::from("hello"));
+        let held = super::with_in_flight_slot(response, guard);
+
+        // Building the response and returning from the "handler" is where the
+        // old code released it.
+        drop(held);
+        assert_eq!(
+            registry.get_state("acc").in_flight,
+            0,
+            "the slot is released once the body is dropped"
+        );
+    }
+
+    /// A one-slot account must refuse the second stream while the first is live.
+    #[tokio::test]
+    async fn a_second_stream_is_refused_while_the_first_holds_the_slot() {
+        use axum::body::Body;
+
+        let registry = Arc::new(AccountRegistry::default());
+        let guard = registry.acquire_slot("acc", 1, 100, 0).expect("first slot");
+
+        let response = axum::response::Response::new(Body::from("hello"));
+        let _held = super::with_in_flight_slot(response, guard);
+
+        // The cap is 1, so while that body is alive there is no room.
+        assert!(
+            registry.acquire_slot("acc", 1, 100, 0).is_none(),
+            "a second in-flight request must be refused while the first body lives"
+        );
+    }
+}

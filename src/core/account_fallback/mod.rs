@@ -48,13 +48,21 @@ pub struct ModelLockState {
     pub combo_id: Option<String>,
 }
 
+/// Held for as long as a request is using an account — including the whole
+/// life of a streaming response body.
+///
+/// It owns an `Arc<AccountRegistry>` rather than borrowing one. That is what
+/// lets the guard be moved into the stream itself: a borrowing guard would be
+/// dropped when the handler returned, releasing the in-flight slot while the
+/// upstream was still streaming to the client, so `MAX_IN_FLIGHT_PER_ACCOUNT`
+/// capped only the setup phase and not concurrent streams.
 #[derive(Debug)]
-pub struct AccountSlotGuard<'a> {
-    registry: &'a AccountRegistry,
+pub struct AccountSlotGuard {
+    registry: std::sync::Arc<AccountRegistry>,
     account_id: String,
 }
 
-impl Drop for AccountSlotGuard<'_> {
+impl Drop for AccountSlotGuard {
     fn drop(&mut self) {
         let mut states = self.registry.states.write();
         if let Some(state) = states.get_mut(&self.account_id) {
@@ -63,7 +71,7 @@ impl Drop for AccountSlotGuard<'_> {
     }
 }
 
-impl<'a> AccountSlotGuard<'a> {
+impl AccountSlotGuard {
     pub fn in_flight(&self) -> usize {
         self.registry.get_state(&self.account_id).in_flight
     }
@@ -86,12 +94,12 @@ impl AccountRegistry {
     }
 
     pub fn acquire_slot(
-        &self,
+        self: &std::sync::Arc<Self>,
         account_id: &str,
         max_in_flight: usize,
         rate_limit_remaining: i64,
         rate_limit_reset: i64,
-    ) -> Option<AccountSlotGuard<'_>> {
+    ) -> Option<AccountSlotGuard> {
         if rate_limit_remaining <= 0 {
             let now = Utc::now().timestamp();
             if rate_limit_reset > now {
@@ -103,10 +111,10 @@ impl AccountRegistry {
     }
 
     fn acquire_slot_internal(
-        &self,
+        self: &std::sync::Arc<Self>,
         account_id: &str,
         max_in_flight: usize,
-    ) -> Option<AccountSlotGuard<'_>> {
+    ) -> Option<AccountSlotGuard> {
         let mut states = self.states.write();
         let state = states.entry(account_id.to_string()).or_default();
 
@@ -116,7 +124,7 @@ impl AccountRegistry {
 
         state.in_flight += 1;
         Some(AccountSlotGuard {
-            registry: self,
+            registry: self.clone(),
             account_id: account_id.to_string(),
         })
     }

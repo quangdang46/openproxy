@@ -494,6 +494,17 @@ async fn chat_completions_impl(
     let is_cacheable_route = resolved.route_kind == ModelRouteKind::Direct;
 
     if is_cacheable_route && !is_sse_response && !sim_controlled {
+        // A cache hit returned here before the monthly budget was ever checked
+        // — that check lives further down, in the fallback path, which a hit
+        // never reaches. So a key whose budget is exhausted kept being served
+        // from cache until the entry expired, which contradicts the cap being
+        // a hard block. The hit costs nothing upstream, but "hard-blocked"
+        // has to mean hard-blocked.
+        if let Err(response) =
+            crate::server::api::budget_guard::enforce_budget(&state, presented_api_key.as_deref())
+        {
+            return response;
+        }
         if let Some((cached, ttl_remaining)) = state.response_cache.get_with_ttl(&body) {
             let mut resp = Response::new(Body::from(cached));
             resp.headers_mut().insert(
@@ -1743,7 +1754,9 @@ async fn forward_with_provider_fallback(
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
     let mut reloaded = false;
-    let registry = &state.account_registry;
+    // Held as an Arc, not a borrow of its contents: the in-flight slot guard
+    // owns the registry so it can ride along inside a streaming body.
+    let registry = state.account_registry.clone();
 
     // Bead openproxy-i8fi: connections whose OAuth token was already refreshed
     // during THIS request. Guards the refresh arm from re-refreshing a
@@ -1860,7 +1873,7 @@ async fn forward_with_provider_fallback(
         let stub: Option<ProviderConnection> = if !excluded
             .iter()
             .any(|id| id == &format!("sim-stub-{provider}"))
-            && select_connection(&snapshot, provider, model, &excluded, Some(registry)).is_none()
+            && select_connection(&snapshot, provider, model, &excluded, Some(&registry)).is_none()
         {
             let settings_force = snapshot.settings.dev_mock_all;
             let is_mock = state.db.sqlite.with_conn(|conn| {
@@ -1885,7 +1898,7 @@ async fn forward_with_provider_fallback(
             None
         };
         let Some(mut connection) = stub
-            .or_else(|| select_connection(&snapshot, provider, model, &excluded, Some(registry)))
+            .or_else(|| select_connection(&snapshot, provider, model, &excluded, Some(&registry)))
         else {
             let retry_after = earliest_retry_after(&snapshot, provider, model, &excluded);
             if let Some(mut error) = last_error {
@@ -2937,9 +2950,12 @@ async fn forward_with_provider_fallback(
                             compression.clone(),
                         )
                         .await;
-                        return Ok(crate::server::api::budget_guard::with_budget_header(
-                            response,
-                            budget_remaining,
+                        return Ok(crate::server::api::budget_guard::with_in_flight_slot(
+                            crate::server::api::budget_guard::with_budget_header(
+                                response,
+                                budget_remaining,
+                            ),
+                            _slot,
                         ));
                     }
                     // forceStream + client non-stream → collect SSE → JSON (9router)
@@ -2962,9 +2978,12 @@ async fn forward_with_provider_fallback(
                             compression.clone(),
                         )
                         .await;
-                        return Ok(crate::server::api::budget_guard::with_budget_header(
-                            response,
-                            budget_remaining,
+                        return Ok(crate::server::api::budget_guard::with_in_flight_slot(
+                            crate::server::api::budget_guard::with_budget_header(
+                                response,
+                                budget_remaining,
+                            ),
+                            _slot,
                         ));
                     }
                     if !stream {
@@ -2981,9 +3000,12 @@ async fn forward_with_provider_fallback(
                             compression.clone(),
                         )
                         .await;
-                        return Ok(crate::server::api::budget_guard::with_budget_header(
-                            response,
-                            budget_remaining,
+                        return Ok(crate::server::api::budget_guard::with_in_flight_slot(
+                            crate::server::api::budget_guard::with_budget_header(
+                                response,
+                                budget_remaining,
+                            ),
+                            _slot,
                         ));
                     }
                     let normalize_for_dashboard =
@@ -3007,9 +3029,12 @@ async fn forward_with_provider_fallback(
                         request_body.clone(),
                     )
                     .await;
-                    return Ok(crate::server::api::budget_guard::with_budget_header(
-                        response,
-                        budget_remaining,
+                    return Ok(crate::server::api::budget_guard::with_in_flight_slot(
+                        crate::server::api::budget_guard::with_budget_header(
+                            response,
+                            budget_remaining,
+                        ),
+                        _slot,
                     ));
                 }
 

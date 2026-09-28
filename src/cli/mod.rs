@@ -1640,7 +1640,8 @@ async fn run_route(
     json: bool,
 ) -> anyhow::Result<()> {
     let pool = Arc::new(ClientPool::new());
-    let registry = AccountRegistry::default();
+    // Arc, so the slot guard can own it (see AccountSlotGuard).
+    let registry = std::sync::Arc::new(AccountRegistry::default());
 
     if let (Some(model_str), None) = (&model, &combo) {
         run_direct_route(pool, registry, model_str, &prompt, stream, json).await
@@ -1662,7 +1663,7 @@ async fn run_route(
 
 async fn run_direct_route(
     pool: Arc<ClientPool>,
-    registry: AccountRegistry,
+    registry: std::sync::Arc<AccountRegistry>,
     model_str: &str,
     prompt: &str,
     stream: bool,
@@ -1833,7 +1834,7 @@ async fn run_direct_route(
 
 async fn run_combo_route(
     pool: Arc<ClientPool>,
-    registry: AccountRegistry,
+    registry: std::sync::Arc<AccountRegistry>,
     combo_name: &str,
     prompt: &str,
     stream: bool,

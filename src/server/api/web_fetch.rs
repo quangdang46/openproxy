@@ -241,7 +241,9 @@ async fn execute_single_fetch(
 
     // Get credentials for this provider (with fallback loop)
     let mut excluded = HashSet::new();
-    let registry = &state.account_registry;
+    // Held as an Arc, not a borrow of its contents: the in-flight slot guard
+    // owns the registry so it can ride along inside a streaming body.
+    let registry = state.account_registry.clone();
 
     loop {
         let connection = select_fetch_connection(&snapshot, &provider_id, &excluded);
