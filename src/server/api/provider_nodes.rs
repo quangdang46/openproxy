@@ -98,6 +98,30 @@ pub struct CreateProviderNodeRequest {
     pub r#type: Option<String>,
 }
 
+/// The provider key a node of `node_type` is stored under.
+///
+/// 9router parity (provider-nodes/route.js:52-90): the id is prefixed with the
+/// type, and the openai-compatible arm also carries the api type, e.g.
+/// `openai-compatible-chat-<id>`. Every consumer keys off that prefix, so the
+/// id cannot be a bare uuid.
+fn compatible_node_id(node_type: &str, api_type: Option<&str>) -> String {
+    let unique = uuid::Uuid::new_v4().to_string();
+    match node_type {
+        "openai-compatible" => {
+            let api = api_type.map(str::trim).filter(|a| !a.is_empty());
+            match api {
+                Some(api) => format!("openai-compatible-{api}-{unique}"),
+                None => format!("openai-compatible-{unique}"),
+            }
+        }
+        "anthropic-compatible" => format!("anthropic-compatible-{unique}"),
+        "custom-embedding" => format!("custom-embedding-{unique}"),
+        // Unknown types keep a plain id; they are not compatible nodes and are
+        // validated by name elsewhere.
+        _ => unique,
+    }
+}
+
 // POST /api/provider-nodes - Create node
 async fn create_provider_node(
     State(state): State<AppState>,
@@ -108,12 +132,19 @@ async fn create_provider_node(
         return response;
     }
 
-    let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let node_type = req
         .r#type
         .unwrap_or_else(|| "openai-compatible".to_string());
+
+    // The id is the node's provider key, and the whole compatible-provider
+    // chain keys off its prefix: is_valid_provider only accepts
+    // `*-compatible-` ids (mod.rs:3362), and resolve_compatible_node then
+    // matches `provider == node.id`. 9router therefore *derives* the id from
+    // the type at creation (provider-nodes/route.js:52-90) — a bare uuid here
+    // produced a node whose connections could never be created or resolved.
+    let id = compatible_node_id(&node_type, req.api_type.as_deref());
     // 9router normalises on create too (provider-nodes/route.js:66-86): a node
     // that is never edited still has to store a URL the executor can suffix.
     let base_url = req
@@ -334,7 +365,58 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[cfg(test)]
-mod tests {
+mod node_id_tests {
+    use super::compatible_node_id;
+
+    /// The node id IS the node's provider key. `is_valid_provider` accepts only
+    /// `*-compatible-` ids and `resolve_compatible_node` matches
+    /// `provider == node.id`, so a bare uuid makes the node's connections
+    /// impossible to create. 9router derives the id from the type
+    /// (provider-nodes/route.js:52-90); this pins that shape.
+    #[test]
+    fn a_compatible_node_id_carries_its_type_prefix() {
+        let id = compatible_node_id("openai-compatible", Some("chat"));
+        assert!(
+            id.starts_with("openai-compatible-chat-"),
+            "openai-compatible carries the api type: {id}"
+        );
+
+        let id = compatible_node_id("openai-compatible", None);
+        assert!(id.starts_with("openai-compatible-"), "{id}");
+
+        let id = compatible_node_id("anthropic-compatible", None);
+        assert!(id.starts_with("anthropic-compatible-"), "{id}");
+
+        let id = compatible_node_id("custom-embedding", None);
+        assert!(id.starts_with("custom-embedding-"), "{id}");
+    }
+
+    /// Whatever the type, the id must satisfy the validator that gates
+    /// connection creation — otherwise the node exists but is unusable.
+    #[test]
+    fn a_compatible_node_id_passes_provider_validation() {
+        for (node_type, api) in [
+            ("openai-compatible", Some("chat")),
+            ("openai-compatible", Some("responses")),
+            ("anthropic-compatible", None),
+            ("custom-embedding", None),
+        ] {
+            let id = compatible_node_id(node_type, api);
+            assert!(
+                crate::server::api::is_compatible_provider(&id),
+                "{node_type} id {id} would be rejected by is_valid_provider"
+            );
+        }
+    }
+
+    /// A blank api type must not produce a double separator.
+    #[test]
+    fn a_blank_api_type_does_not_produce_a_dash_run() {
+        let id = compatible_node_id("openai-compatible", Some("   "));
+        assert!(!id.contains("--"), "{id}");
+        assert!(id.starts_with("openai-compatible-"), "{id}");
+    }
+
     use super::*;
     use crate::db::Db;
     use crate::server::state::AppState;

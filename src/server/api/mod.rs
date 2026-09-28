@@ -3365,7 +3365,7 @@ fn is_valid_provider(provider: &str) -> bool {
         || is_compatible_provider(provider)
 }
 
-fn is_compatible_provider(provider: &str) -> bool {
+pub(crate) fn is_compatible_provider(provider: &str) -> bool {
     provider.starts_with(OPENAI_COMPATIBLE_PREFIX)
         || provider.starts_with(ANTHROPIC_COMPATIBLE_PREFIX)
         || provider.starts_with(CUSTOM_EMBEDDING_PREFIX)
