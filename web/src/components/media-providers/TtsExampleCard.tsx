@@ -224,7 +224,7 @@ export function TtsExampleCard({ providerId }: { providerId: string }) {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-      const url = `/api/v1/audio/speech${responseFormat === "json" ? "?response_format=json" : ""}`;
+      const url = `/v1/audio/speech${responseFormat === "json" ? "?response_format=json" : ""}`;
       const res = await fetch(url, {
         method: "POST",
         headers,

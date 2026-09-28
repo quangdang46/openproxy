@@ -213,7 +213,29 @@ async fn get_usage_stats(
 ///
 /// Aggregates RTK compression savings recorded on `usageHistory`
 /// (rows where `bytesSaved > 0`) and returns the dashboard's expected shape.
-async fn compression_stats(State(state): State<AppState>, _query: Query<StatsQuery>) -> Response {
+async fn compression_stats(
+    State(state): State<AppState>,
+    Query(query): Query<StatsQuery>,
+) -> Response {
+    // The page offers a period selector and refetches on change, so the value
+    // has to mean something: every period used to return identical lifetime
+    // totals, which made the selector a no-op the user could not trust.
+    let period = match query.period.as_deref().unwrap_or("today") {
+        value @ ("today" | "24h" | "7d" | "30d" | "60d" | "all") => {
+            UsagePeriod::parse(value).expect("validated usage period must parse")
+        }
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Invalid period. Use one of: today, 24h, 7d, 30d, 60d, all"
+                })),
+            )
+                .into_response()
+        }
+    };
+    let cutoff = usage_period_cutoff(period);
+
     let aggregates = state.db.sqlite.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT COUNT(*),
@@ -222,9 +244,9 @@ async fn compression_stats(State(state): State<AppState>, _query: Query<StatsQue
                     COALESCE(SUM(promptTokens), 0),
                     COALESCE(SUM(completionTokens), 0),
                     COALESCE(SUM(imagePrompts), 0)
-             FROM usageHistory WHERE bytesSaved > 0",
+             FROM usageHistory WHERE bytesSaved > 0 AND (?1 IS NULL OR timestamp >= ?1)",
         )?;
-        stmt.query_row(rusqlite::params![], |row| {
+        stmt.query_row(rusqlite::params![cutoff], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -349,6 +371,23 @@ async fn stream_usage_stats(State(state): State<AppState>, headers: HeaderMap) -
         body,
     )
         .into_response()
+}
+
+/// The oldest `usageHistory.timestamp` a period should include, or `None` for
+/// `All`. RFC3339 sorts lexicographically, so the string compares directly
+/// against the stored column (the same trick the retention pruner uses).
+fn usage_period_cutoff(period: UsagePeriod) -> Option<String> {
+    use chrono::Datelike;
+    let now = chrono::Utc::now();
+    let start = match period {
+        UsagePeriod::Today => now.date_naive().and_hms_opt(0, 0, 0)?.and_utc(),
+        UsagePeriod::Last24Hours => now - chrono::Duration::hours(24),
+        UsagePeriod::Last7Days => now - chrono::Duration::days(7),
+        UsagePeriod::Last30Days => now - chrono::Duration::days(30),
+        UsagePeriod::Last60Days => now - chrono::Duration::days(60),
+        UsagePeriod::All => return None,
+    };
+    Some(start.to_rfc3339())
 }
 
 async fn build_dashboard_usage_stats(state: &AppState, period: UsagePeriod) -> UsageStatsPayload {
@@ -1844,6 +1883,32 @@ fn usage_completion_tokens(entry: &UsageEntry) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The Compression page renders a period selector and refetches on change.
+    /// Every period returning identical lifetime totals made that selector a
+    /// no-op the user could not trust, so each period must produce a distinct
+    /// window — and "all" must be the unbounded one.
+    #[test]
+    fn each_usage_period_maps_to_a_distinct_cutoff() {
+        use super::usage_period_cutoff;
+        use crate::server::usage_stream::UsagePeriod;
+
+        let all = usage_period_cutoff(UsagePeriod::All);
+        assert!(all.is_none(), "all must stay unbounded");
+
+        let today = usage_period_cutoff(UsagePeriod::Today).expect("today has a cutoff");
+        let h24 = usage_period_cutoff(UsagePeriod::Last24Hours).expect("24h has a cutoff");
+        let d7 = usage_period_cutoff(UsagePeriod::Last7Days).expect("7d has a cutoff");
+        let d30 = usage_period_cutoff(UsagePeriod::Last30Days).expect("30d has a cutoff");
+        let d60 = usage_period_cutoff(UsagePeriod::Last60Days).expect("60d has a cutoff");
+
+        // Cutoffs are RFC3339, so they order lexicographically; later windows
+        // must start strictly earlier.
+        assert!(today > h24, "today starts after 24h");
+        assert!(h24 > d7, "24h starts after 7d");
+        assert!(d7 > d30, "7d starts after 30d");
+        assert!(d30 > d60, "30d starts after 60d");
+    }
+
     use super::*;
 
     #[test]

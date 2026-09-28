@@ -73,7 +73,7 @@ export function EmbeddingExampleCard({ providerId, customAlias }: { providerId: 
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-      const res = await fetch("/api/v1/embeddings", { method: "POST", headers, body: JSON.stringify(buildBody()) });
+      const res = await fetch("/v1/embeddings", { method: "POST", headers, body: JSON.stringify(buildBody()) });
       const latencyMs = Date.now() - start;
       const data = await res.json();
       if (!res.ok) { setError(data?.error?.message || data?.error || `HTTP ${res.status}`); return; }

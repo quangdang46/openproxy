@@ -193,7 +193,9 @@ export default function UsageAnalyticsGrid({ period = "30d" }: { period?: string
       fetch(`/api/usage/daily`).then((r) => (r.ok ? r.json() : null)),
       fetch(`/api/providers`).then((r) => (r.ok ? r.json() : null)),
       fetch(`/api/keys`).then((r) => (r.ok ? r.json() : null)),
-      fetch(`/api/provider-models`).then((r) => (r.ok ? r.json() : null)),
+      // /api/provider-models is not a route; /v1/models is the served model
+      // list and already matches the `.data` shape read below.
+      fetch(`/v1/models`).then((r) => (r.ok ? r.json() : null)),
     ])
       .then(([s, d, p, k, m]) => {
         if (cancelled) return;

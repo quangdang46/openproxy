@@ -138,7 +138,7 @@ export function GenericExampleCard({ providerId, kind }: { providerId: string; k
       if (pinnedConnectionId) headers["x-connection-id"] = pinnedConnectionId;
       if (useStreaming) headers["Accept"] = "text/event-stream";
       const body = { ...requestBody, model: modelFull };
-      const res = await fetch(`/api${apiPathWithQuery}`, { method: kindConfig.endpoint.method, headers, body: JSON.stringify(body) });
+      const res = await fetch(apiPathWithQuery, { method: kindConfig.endpoint.method, headers, body: JSON.stringify(body) });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data?.error?.message || data?.error || `HTTP ${res.status}`);
