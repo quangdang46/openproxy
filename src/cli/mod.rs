@@ -75,8 +75,15 @@ pub mod tests;
 )]
 pub struct Cli {
     /// Bind host. Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0`
-    /// to expose on the LAN — only do this together with
-    /// `REQUIRE_API_KEY=true` and a strong `INITIAL_PASSWORD`.
+    /// to expose on the LAN — only do this together with a strong
+    /// `INITIAL_PASSWORD`.
+    ///
+    /// `/v1/*` already requires an API key on a fresh install
+    /// (`require_api_key` defaults to true), so binding to `0.0.0.0` does not
+    /// open it up. There is no `REQUIRE_API_KEY` environment variable: the
+    /// gate is the `requireApiKey` setting (Settings in the dashboard, or
+    /// `PATCH /api/settings`), which this text previously named wrongly.
+    ///
     /// Honors `$HOSTNAME` (preferred, matches Docker / README) or the legacy
     /// `$HOST` env var.
     #[arg(long, env = "HOSTNAME", default_value = "127.0.0.1")]
