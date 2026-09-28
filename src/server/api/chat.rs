@@ -2065,7 +2065,7 @@ async fn forward_with_provider_fallback(
                 let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Kiro executor creation failed: {:?}", e),
+                        message: format!("Kiro executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2080,7 +2080,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Kiro execution failed: {:?}", e),
+                        message: format!("Kiro execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })
@@ -2088,7 +2088,7 @@ async fn forward_with_provider_fallback(
                 let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Vertex executor creation failed: {:?}", e),
+                        message: format!("Vertex executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2103,7 +2103,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Vertex execution failed: {:?}", e),
+                        message: format!("Vertex execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2118,7 +2118,7 @@ async fn forward_with_provider_fallback(
                 let executor = CodexExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Codex executor creation failed: {:?}", e),
+                        message: format!("Codex executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2133,7 +2133,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Codex execution failed: {:?}", e),
+                        message: format!("Codex execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2148,7 +2148,7 @@ async fn forward_with_provider_fallback(
                 let executor = CursorExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Cursor executor creation failed: {:?}", e),
+                        message: format!("Cursor executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2163,7 +2163,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Cursor execution failed: {:?}", e),
+                        message: format!("Cursor execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2178,7 +2178,7 @@ async fn forward_with_provider_fallback(
                 let executor = GithubExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Github executor creation failed: {:?}", e),
+                        message: format!("Github executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2193,7 +2193,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Github execution failed: {:?}", e),
+                        message: format!("Github execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2208,7 +2208,7 @@ async fn forward_with_provider_fallback(
                 let executor = AzureExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Azure executor creation failed: {:?}", e),
+                        message: format!("Azure executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2223,7 +2223,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Azure execution failed: {:?}", e),
+                        message: format!("Azure execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2238,7 +2238,7 @@ async fn forward_with_provider_fallback(
                 let executor = QwenExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Qwen executor creation failed: {:?}", e),
+                        message: format!("Qwen executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2253,7 +2253,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Qwen execution failed: {:?}", e),
+                        message: format!("Qwen execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2273,7 +2273,7 @@ async fn forward_with_provider_fallback(
                     XaiExecutor::new(state.client_pool.clone(), provider_node).map_err(|e| {
                         ComboAttemptError {
                             status: 500,
-                            message: format!("Xai executor creation failed: {:?}", e),
+                            message: format!("Xai executor creation failed: {}", e),
                             retry_after: None,
                             upstream_body: None,
                         }
@@ -2289,7 +2289,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Xai execution failed: {:?}", e),
+                        message: format!("Xai execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2304,7 +2304,7 @@ async fn forward_with_provider_fallback(
                 let executor = IFlowExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("IFlow executor creation failed: {:?}", e),
+                        message: format!("IFlow executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2319,7 +2319,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("IFlow execution failed: {:?}", e),
+                        message: format!("IFlow execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2334,7 +2334,7 @@ async fn forward_with_provider_fallback(
                 let executor = GeminiCliExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("GeminiCli executor creation failed: {:?}", e),
+                        message: format!("GeminiCli executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2349,7 +2349,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("GeminiCli execution failed: {:?}", e),
+                        message: format!("GeminiCli execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2364,7 +2364,7 @@ async fn forward_with_provider_fallback(
                 let executor = OpenCodeExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("OpenCode executor creation failed: {:?}", e),
+                        message: format!("OpenCode executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2380,7 +2380,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("OpenCode execution failed: {:?}", e),
+                        message: format!("OpenCode execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2395,7 +2395,7 @@ async fn forward_with_provider_fallback(
                 let executor = OpenCodeGoExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("OpenCodeGo executor creation failed: {:?}", e),
+                        message: format!("OpenCodeGo executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2411,7 +2411,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("OpenCodeGo execution failed: {:?}", e),
+                        message: format!("OpenCodeGo execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2426,7 +2426,7 @@ async fn forward_with_provider_fallback(
                 let executor = QoderExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Qoder executor creation failed: {:?}", e),
+                        message: format!("Qoder executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2441,7 +2441,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Qoder execution failed: {:?}", e),
+                        message: format!("Qoder execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2456,7 +2456,7 @@ async fn forward_with_provider_fallback(
                 let executor = CommandCodeExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                     status: 500,
-                    message: format!("CommandCode executor creation failed: {:?}", e),
+                    message: format!("CommandCode executor creation failed: {}", e),
                     retry_after: None,
                     upstream_body: None,
                 })?;
@@ -2471,7 +2471,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("CommandCode execution failed: {:?}", e),
+                        message: format!("CommandCode execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2486,7 +2486,7 @@ async fn forward_with_provider_fallback(
                 let executor = AntigravityExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                     status: 500,
-                    message: format!("Antigravity executor creation failed: {:?}", e),
+                    message: format!("Antigravity executor creation failed: {}", e),
                     retry_after: None,
                     upstream_body: None,
                 })?;
@@ -2501,7 +2501,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Antigravity execution failed: {:?}", e),
+                        message: format!("Antigravity execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2525,7 +2525,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("GrokWeb execution failed: {:?}", e),
+                        message: format!("GrokWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2549,7 +2549,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("PerplexityWeb execution failed: {:?}", e),
+                        message: format!("PerplexityWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2574,7 +2574,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("DeepSeekWeb execution failed: {:?}", e),
+                        message: format!("DeepSeekWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2598,7 +2598,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Windsurf execution failed: {:?}", e),
+                        message: format!("Windsurf execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2648,7 +2648,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Trae execution failed: {:?}", e),
+                        message: format!("Trae execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2666,7 +2666,7 @@ async fn forward_with_provider_fallback(
                 let executor = DevinCliExecutor::new(state.client_pool.clone()).map_err(|e| {
                     ComboAttemptError {
                         status: 500,
-                        message: format!("Devin executor init failed: {:?}", e),
+                        message: format!("Devin executor init failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     }
@@ -2707,7 +2707,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Kimchi execution failed: {:?}", e),
+                        message: format!("Kimchi execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2736,7 +2736,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("CodeBuddy CN execution failed: {:?}", e),
+                        message: format!("CodeBuddy CN execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2765,7 +2765,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("CodeBuddy intl execution failed: {:?}", e),
+                        message: format!("CodeBuddy intl execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2790,7 +2790,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Ollama execution failed: {:?}", e),
+                        message: format!("Ollama execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2815,7 +2815,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("MimoFree execution failed: {:?}", e),
+                        message: format!("MimoFree execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2835,7 +2835,7 @@ async fn forward_with_provider_fallback(
                 let executor = GrokCliExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("GrokCli executor creation failed: {:?}", e),
+                        message: format!("GrokCli executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2850,7 +2850,7 @@ async fn forward_with_provider_fallback(
                     .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("GrokCli execution failed: {:?}", e),
+                        message: format!("GrokCli execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -7482,6 +7482,63 @@ mod tests {
         assert_eq!(
             selected.id, "by-id",
             "the id match must win, not the name fallback"
+        );
+    }
+
+    /// The regression this whole change exists for.
+    ///
+    /// `EndpointStatus` carries both a client-safe `message` and an internal
+    /// `url`. `Display` must surface the message and drop the url, and must
+    /// never surface the error's internal structure — the old `{:?}` dumped
+    /// `reqwest::Error { kind, url, source }` into a client-visible body.
+    #[test]
+    fn executor_error_display_drops_the_url_and_keeps_the_message() {
+        use crate::core::executor::KiroExecutorError;
+
+        let e = KiroExecutorError::EndpointStatus {
+            status: 500,
+            url: "https://internal.example/private/chat".into(),
+            message: "upstream said no".into(),
+        };
+        let shown = e.to_string();
+        assert!(
+            shown.contains("upstream said no"),
+            "the useful part survives: {shown}"
+        );
+        assert!(
+            !shown.contains("internal.example") && !shown.contains("http"),
+            "Display must not surface the internal url: {shown}"
+        );
+        assert!(
+            !shown.contains("EndpointStatus")
+                && !shown.contains("kind:")
+                && !shown.contains("reqwest"),
+            "Display must not surface the error's internal structure: {shown}"
+        );
+
+        // A message-carrying variant keeps its text.
+        let msg = KiroExecutorError::MissingCredentials("no API key".into()).to_string();
+        assert!(msg.contains("no API key"), "{msg}");
+    }
+
+    /// The opaque transport variants — the ones whose `Debug` used to carry the
+    /// upstream url and the OS error — must render as a bare kind.
+    #[test]
+    fn opaque_transport_variants_display_as_a_bare_kind() {
+        use crate::core::executor::{AzureExecutorError, GithubExecutorError};
+
+        // RequestFailed(String) is client-safe: our own text, echoed.
+        let safe = GithubExecutorError::RequestFailed("upstream rejected the key".into());
+        assert!(safe.to_string().contains("upstream rejected the key"));
+
+        // An encoding failure — one of the shared transport-arm variants — is
+        // reduced to a bare kind, never its internals.
+        let bad = AzureExecutorError::Serialize(serde_json::from_str::<i32>("x").unwrap_err());
+        let shown = bad.to_string();
+        assert_eq!(shown, "upstream request failed");
+        assert!(
+            !shown.contains("Error") && !shown.contains("line"),
+            "no internals: {shown}"
         );
     }
 

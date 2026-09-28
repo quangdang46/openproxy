@@ -1037,7 +1037,7 @@ async fn execute_media_provider_on_connection(
         Err(e) => {
             return json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Executor error: {:?}", e),
+                &format!("Executor error: {}", e),
             )
         }
     };
@@ -1059,7 +1059,7 @@ async fn execute_media_provider_on_connection(
         Err(e) => {
             return json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Client error: {:?}", e),
+                &format!("Client error: {}", e),
             )
         }
     };
@@ -2096,7 +2096,7 @@ async fn video_create_handler(
             Err(e) => {
                 last_error = Some(video_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Client error: {:?}", e),
+                    &format!("Client error: {}", e),
                 ));
                 continue;
             }
@@ -2301,7 +2301,7 @@ async fn video_get_handler_with_query(
         Err(e) => {
             return video_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Client error: {:?}", e),
+                &format!("Client error: {}", e),
             )
         }
     };
@@ -3056,7 +3056,7 @@ async fn video_vertex_poll(
         Err(e) => {
             return video_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Client error: {:?}", e),
+                &format!("Client error: {}", e),
             )
         }
     };

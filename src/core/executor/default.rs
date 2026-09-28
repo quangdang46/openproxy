@@ -753,18 +753,44 @@ impl ExecutorError {
             // when in fact we could not reach upstream. 9router maps fetch
             // exceptions through the 502 bucket for the same reason
             // (base.js:174).
+            //
+            // The message names the failure and stops. `Request`/`Hyper` are
+            // opaque reqwest/hyper wrappers whose `Debug` carries the upstream
+            // url and the OS error, and this path serves every custom and
+            // providerNode connection — so that dump reached clients verbatim.
             Self::Request(_) | Self::Hyper(_) | Self::HyperClientInit(_) => ComboAttemptError {
                 status: 502,
-                message: format!("Upstream request failed: {self:?}"),
+                message: "Upstream request failed".to_string(),
                 retry_after: None,
                 upstream_body: None,
             },
+            // The remaining variants carry a client-safe message or a status;
+            // their `Debug` is fine to surface.
             other => ComboAttemptError {
                 status: 500,
                 message: format!("Execution failed: {other:?}"),
                 retry_after: None,
                 upstream_body: None,
             },
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Transport and encoding failures wrap reqwest/hyper internals:
+            // `Debug` carries the upstream url and the OS error. Report the
+            // kind only, matching 9router's terse `connection failed`.
+            Self::Request(_)
+            | Self::Hyper(_)
+            | Self::HyperClientInit(_)
+            | Self::InvalidHeader(_)
+            | Self::InvalidUri(_)
+            | Self::InvalidRequest(_)
+            | Self::Serialize(_) => f.write_str("upstream request failed"),
+            // Message- and status-carrying variants are already client-safe.
+            other => write!(f, "{other:?}"),
         }
     }
 }

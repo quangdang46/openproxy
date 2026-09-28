@@ -331,6 +331,26 @@ impl QwenExecutor {
     }
 }
 
+impl std::fmt::Display for QwenExecutorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Transport and encoding failures are opaque wrappers around
+            // reqwest/hyper internals: their `Debug` carries the upstream url
+            // and the OS error, which must never reach a client. Report the
+            // kind only, matching 9router's terse `connection failed`.
+            Self::Request(_)
+            | Self::Hyper(_)
+            | Self::HyperClientInit(_)
+            | Self::InvalidHeader(_)
+            | Self::Serialize(_) => f.write_str("upstream request failed"),
+            Self::InvalidUri(_) => f.write_str("invalid request URI"),
+            // Every remaining variant carries a plain `String` message that
+            // is already client-safe, so its `Debug` is fine to surface.
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
