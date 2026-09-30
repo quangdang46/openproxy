@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time;
 
-use crate::server::auth::require_api_key_with_reload;
 use crate::server::console_logs::ConsoleLogEvent;
 use crate::server::state::AppState;
 
@@ -38,8 +37,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn get_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
-        return auth_error_response(error);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let logs = state.console_logs.get_logs().await;
@@ -52,8 +51,8 @@ async fn get_logs(State(state): State<AppState>, headers: HeaderMap) -> Response
 }
 
 async fn stream_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
-        return auth_error_response(error);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let mut receiver = state.console_logs.subscribe();
@@ -109,8 +108,8 @@ async fn stream_logs(State(state): State<AppState>, headers: HeaderMap) -> Respo
 }
 
 async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
-        return auth_error_response(error);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let logs = state.console_logs.get_logs().await;
@@ -126,8 +125,8 @@ async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
 }
 
 async fn clear_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
-        return auth_error_response(error);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     state.console_logs.clear().await;

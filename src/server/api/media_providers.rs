@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::server::api::require_dashboard_or_management_api_key;
-use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -160,8 +159,8 @@ async fn list_media_providers(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let snapshot = state.db.snapshot();
@@ -213,8 +212,8 @@ async fn update_media_provider(
     Path((kind, id)): Path<(String, String)>,
     Json(body): Json<UpdateMediaProviderRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     // `Db::update` is FnOnce -> (), so existence is settled from a snapshot
@@ -303,8 +302,8 @@ async fn add_media_provider(
     headers: axum::http::HeaderMap,
     Json(body): Json<AddMediaProviderRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let valid_types = ["tts", "stt", "embedding", "image", "search"];
@@ -400,8 +399,8 @@ async fn delete_media_provider(
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let snapshot = state.db.snapshot();
@@ -452,8 +451,8 @@ async fn get_deepgram_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
     let snapshot = state.db.snapshot();
     let api_key = snapshot
@@ -573,8 +572,8 @@ async fn get_inworld_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
     let snapshot = state.db.snapshot();
     let api_key = snapshot
@@ -826,8 +825,8 @@ async fn get_minimax_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<MinimaxVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let provider = match query.provider.as_deref() {
@@ -1074,8 +1073,8 @@ async fn get_elevenlabs_voices(
     // Reads the stored ElevenLabs API key from the DB — require auth like the
     // sibling voice handlers (get_tts_voices / get_minimax_voices /
     // get_inworld_voices). Previously unauthenticated (audit H13).
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
     let snapshot = state.db.snapshot();
     let api_key = snapshot
