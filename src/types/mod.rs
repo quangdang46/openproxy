@@ -65,8 +65,38 @@ impl AppDb {
                 self.extra.remove(key);
             }
         }
-        if matches!(self.extra.get("disabledModels"), Some(Value::Array(a)) if a.is_empty()) {
-            self.extra.remove("disabledModels");
+        // `disabledModels` is a flat `(provider, model)` pairs table in SQLite,
+        // and `export_all` flattens it into an array of `{provider, model}`
+        // rows. The in-memory model wants `{"provider": ["model", ...]}`.
+        //
+        // Fold the rows back into the map here, before any reader sees it.
+        // Otherwise every restart silently drops the operator's disabled
+        // models: the rows survive in SQLite, but a reader that deserializes
+        // the array as a map fails and falls back to an empty set — the models
+        // come back enabled with no error anywhere. The empty-array and
+        // empty-object cases both land in the same `folded.is_empty()` branch.
+        if let Some(Value::Array(rows)) = self.extra.get("disabledModels") {
+            let mut folded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for row in rows {
+                let (Some(provider), Some(model)) = (
+                    row.get("provider").and_then(Value::as_str),
+                    row.get("model").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                let entry = folded.entry(provider.to_string()).or_default();
+                if !entry.iter().any(|existing| existing == model) {
+                    entry.push(model.to_string());
+                }
+            }
+            if folded.is_empty() {
+                self.extra.remove("disabledModels");
+            } else {
+                self.extra.insert(
+                    "disabledModels".to_string(),
+                    serde_json::to_value(&folded).unwrap_or(Value::Object(Default::default())),
+                );
+            }
         }
         if let Some(Value::Object(obj)) = self.extra.get("disabledModels") {
             if obj.is_empty() {
