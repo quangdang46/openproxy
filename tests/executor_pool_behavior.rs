@@ -2118,6 +2118,26 @@ async fn real_branch_no_fault_passthrough() {
 /// - MOCK branch: fault pre-empts ALL (even validation failures).
 /// - REAL branch: fault decorates SUCCESS only; upstream non-2xx flows into
 ///   the normal error path (no fault envelope).
+// The simulation engine is compiled out of a default build, and this module
+// asserts the simulated path. It is gated at runtime rather than with
+// `required-features` because the rest of this file covers real fallback
+// behaviour that must keep running in every build — 48 other tests would be
+// lost to skip the whole target.
+#[cfg(not(feature = "simulation"))]
+macro_rules! requires_simulation {
+    () => {
+        eprintln!(
+            "skipped: this build has no `simulation` feature, so the simulated \
+             path is unreachable — run `cargo test --features simulation`"
+        );
+        return;
+    };
+}
+#[cfg(feature = "simulation")]
+macro_rules! requires_simulation {
+    () => {};
+}
+
 mod sim_fallback {
     use super::*;
     use openproxy::core::combo::check_fallback_error;
@@ -2224,6 +2244,7 @@ mod sim_fallback {
     /// (a) mock→mock: openai-MOCK 429 falls over to gemini-MOCK 200.
     #[tokio::test]
     async fn fallback_mock_to_mock() {
+        requires_simulation!();
         let members = [openai_mock_429(), gemini_mock_ok()];
         let (served, body) = drive(&members, &Default::default()).await;
         assert_eq!(served, "gemini");
@@ -2236,6 +2257,7 @@ mod sim_fallback {
     /// (b) mock→real: openai-MOCK 429 falls over to wiremock-backed 200.
     #[tokio::test]
     async fn fallback_mock_to_real() {
+        requires_simulation!();
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
@@ -2313,6 +2335,7 @@ mod sim_fallback {
     /// (c) real→mock: wiremock-200 + fault 429 falls over to gemini-MOCK 200.
     #[tokio::test]
     async fn fallback_real_to_mock() {
+        requires_simulation!();
         let upstream = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))

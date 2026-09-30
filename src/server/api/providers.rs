@@ -1392,7 +1392,13 @@ async fn get_mock_status(State(state): State<AppState>, headers: HeaderMap) -> R
     });
     match modes {
         Ok(providers) => Json(json!({
-            "forcedAll": env_force || settings_force,
+            // Additive: tells the dashboard the engine is not compiled in, so
+            // it hides the Mock toggle rather than offering one that silently
+            // does nothing. `forcedAll` is the *effective* force, not the
+            // stored setting — a `devMockAll` left on from an earlier build is
+            // inert, and reporting it as active would be a lie the UI acts on.
+            "simulationEnabled": crate::core::simulation::ENABLED,
+            "forcedAll": crate::core::simulation::ENABLED && (env_force || settings_force),
             "envForce": env_force,
             "settingsForce": settings_force,
             "providers": providers,

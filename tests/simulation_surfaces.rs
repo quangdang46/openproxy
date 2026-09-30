@@ -142,6 +142,9 @@ async fn mock_status_lists_providers_with_modes() {
     assert_eq!(json["providers"]["openai"]["simulationSupported"], true);
 }
 
+// Needs the engine compiled in: this asserts the simulated path, which a
+// default build (gate closed) deliberately does not reach.
+#[cfg(feature = "simulation")]
 #[tokio::test]
 async fn provider_mode_roundtrip_via_put() {
     let (state, _temp) = app_state().await;
@@ -173,6 +176,9 @@ async fn provider_mode_roundtrip_via_put() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// Needs the engine compiled in: this asserts the simulated path, which a
+// default build (gate closed) deliberately does not reach.
+#[cfg(feature = "simulation")]
 #[tokio::test]
 async fn mock_status_forced_all_via_settings() {
     let (state, temp) = app_state().await;
@@ -190,6 +196,9 @@ async fn mock_status_forced_all_via_settings() {
     assert_eq!(json["providers"]["openai"]["reason"], "settings-force");
 }
 
+// Needs the engine compiled in: this asserts the simulated path, which a
+// default build (gate closed) deliberately does not reach.
+#[cfg(feature = "simulation")]
 #[tokio::test]
 async fn provider_mode_survives_restart() {
     // sim-19 review gap: mode must survive binary rebuilds/restarts (Core
@@ -214,4 +223,38 @@ async fn provider_mode_survives_restart() {
     assert_eq!(modes.effective.to_string(), "mock");
     // `temp` kept alive by binding: dir survives until end of test.
     let _ = temp.path();
+}
+
+/// A default build has the engine compiled out, and this is the assertion
+/// that pins it at the HTTP surface rather than only in the unit tests.
+///
+/// It runs in *every* feature combination, and asserts the other direction
+/// when the engine is present: `simulationSupported` describes the engine
+/// (true either way), while `simulationEnabled` and `effective` describe this
+/// build. The dashboard gates its Mock toggle on the former being false only
+/// when it is not available, so getting this pair backwards would show an
+/// inert toggle.
+#[tokio::test]
+async fn mock_status_reports_whether_this_build_can_simulate() {
+    let (state, _temp) = app_state().await;
+    let app = openproxy::build_app(state);
+    let (status, json) = get_json(app, "/api/mock/status").await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        json["simulationEnabled"],
+        openproxy::core::simulation::ENABLED,
+        "`simulationEnabled` must report the build's own gate, or the \
+         Providers page offers a Mock toggle that silently does nothing"
+    );
+    assert_eq!(
+        json["providers"]["openai"]["simulationSupported"], true,
+        "`simulationSupported` describes the engine, not the build — the \
+         Providers page needs it to stay true so the toggle can be hidden on \
+         capability rather than on build flavour"
+    );
+    assert_eq!(
+        json["providers"]["openai"]["effective"], "real",
+        "no stored setting may promote a provider while the gate is closed"
+    );
 }

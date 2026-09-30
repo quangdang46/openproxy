@@ -72,7 +72,13 @@ pub fn all_provider_modes(
 
 /// `OPENPROXY_DEV_MOCK` env force — the safety boundary (plan §3.2).
 /// Truthy values: `1`, `true`, `yes` (case-insensitive). Never persisted.
+///
+/// Gated: a build without the `simulation` feature ignores the variable
+/// entirely, so exporting it cannot switch a released binary into mock.
 pub fn env_force_all() -> bool {
+    if !crate::core::simulation::ENABLED {
+        return false;
+    }
     match std::env::var("OPENPROXY_DEV_MOCK") {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
         Err(_) => false,
@@ -152,6 +158,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn env_force_parsing() {
         // Save/restore to avoid leaking env into other tests (serial by mutex
         // in practice; values chosen to not collide with CI).

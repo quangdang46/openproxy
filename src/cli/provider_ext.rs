@@ -1032,6 +1032,9 @@ mod tests {
 
     /// sim-19: mode set/show roundtrip through the real Db (tempdir SQLite).
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn sim_mode_set_show_roundtrip() {
         use crate::core::simulation::{status_for, ProviderExecutionMode};
         let tmp = tempfile::tempdir().unwrap();

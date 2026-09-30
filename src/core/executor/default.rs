@@ -1028,25 +1028,30 @@ impl DefaultExecutor {
 
     /// Whether simulation mock mode is active for this request.
     ///
-    /// Active iff: global env force is set, the per-request `x-openproxy-sim:
-    /// mock` header is present, or `force_mock` was set by a dispatch site
-    /// that already performed the DB lookup (resolver-wiring follow-up
-    /// openproxy-1ycq: chat stub gate, CLI stub gate). The executor itself
-    /// stays DB-free (hot path) — resolution happens once at dispatch.
-    /// Format support is enforced at dispatch (bead sim-06+).
+    /// Active iff: the build has the `simulation` feature, AND (global env
+    /// force is set, the per-request `x-openproxy-sim: mock` header is present,
+    /// or `force_mock` was set by a dispatch site that already performed the DB
+    /// lookup (resolver-wiring follow-up openproxy-1ycq: chat stub gate, CLI
+    /// stub gate)). The executor itself stays DB-free (hot path) — resolution
+    /// happens once at dispatch. Format support is enforced at dispatch
+    /// (bead sim-06+).
+    ///
+    /// The gate is first so a released binary — which never enables the
+    /// feature — cannot be pushed onto the mock branch by any of the three
+    /// signals, including a `sim-stub-` connection id.
     fn simulation_active(request: &ExecutionRequest) -> bool {
-        use crate::core::simulation::SIM_HEADER;
-        if env_force_all() {
-            return true;
-        }
-        if request.force_mock {
-            return true;
-        }
-        request
+        use crate::core::simulation::{should_simulate, SIM_HEADER};
+        let header_mock = request
             .sim_headers
             .get(SIM_HEADER)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("mock"))
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("mock"));
+        should_simulate(
+            crate::core::simulation::ENABLED,
+            env_force_all(),
+            request.force_mock,
+            header_mock,
+        )
     }
 
     /// Resolve the simulation [`ProviderFormat`] for this executor.
@@ -2785,6 +2790,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_tool_echo_e2e() {
         // sim-08: tools in body -> tool_calls + finish_reason tool_calls.
         let req = ExecutionRequest {
@@ -2812,6 +2820,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_text_non_stream() {
         // sim-14 §5.1.1: plain string -> message content (suppresses echo).
         let req = ExecutionRequest {
@@ -2849,6 +2860,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_json_verbatim_non_stream() {
         // sim-14 §5.1.1: JSON object + non-stream → verbatim body.
         let req = ExecutionRequest {
@@ -2875,6 +2889,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_text_stream_chunks() {
         // sim-14 §5.1.1: stream value replaces content payload ONLY — framing
         // stays simulator-generated (chunks + [DONE], no raw injection).
@@ -2905,6 +2922,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_malformed_400() {
         // sim-14 §5.1.1: malformed JSON-looking value → provider-correct 400.
         let req = ExecutionRequest {
@@ -2931,6 +2951,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_disconnect_truncates_stream() {
         // sim-14: disconnect-after-N keeps frame boundaries, drops [DONE],
         // client sees a cut stream (no hang — body completes, just short).
@@ -2966,6 +2989,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_tool_non_stream_no_leak() {
         // sim-14 fix (reviewer): tool override replaces echo AND leaves no
         // sim_* internals in the client-visible body.
@@ -3004,6 +3030,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_override_tool_anthropic_stream() {
         // sim-14 fix (reviewer): Anthropic stream override renders the override
         // tool name (not the echo) through named events.
@@ -3040,6 +3069,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_unknown_model_renders_404() {
         // sim-08: Validation renders as HTTP 404 + envelope, not Err/500.
         let req = ExecutionRequest {
@@ -3063,6 +3095,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_status_fault_429_e2e() {
         // sim-12: x-openproxy-sim-status:429 short-circuits with provider-correct
         // 429 envelope; Retry-After visible on BOTH sidecar headers and body.
@@ -3093,6 +3128,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_status_fault_invalid_ignored() {
         // sim-12: non-allowlisted status is ignored -> normal echo path.
         let req = ExecutionRequest {
@@ -3117,6 +3155,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_fault_beats_validation_precedence() {
         // sim-12 review lock: fault status wins over validation — unknown model
         // + fault 429 renders 429 (not 404). Covers non-stream and stream.
@@ -3151,6 +3192,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_latency_delays_first_byte() {
         // sim-13: latency header delays every mock outcome (echo path here).
         let req = ExecutionRequest {
@@ -3182,6 +3226,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_latency_wraps_fault_path() {
         // sim-13 (reviewer sim-12 note): latency wraps the fault-error path too
         // (fault 429 + latency → delay, then 429).
@@ -3215,6 +3262,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_force_mock_without_header() {
         // Resolver-wiring (follow-up openproxy-1ycq): configured-mode mock
         // activates via force_mock even with no header and no credentials.
@@ -3252,6 +3302,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_hostile_credentials_still_mock() {
         // sim-16 (plan §4 normative): mock branch NEVER touches credentials.
         // Expired OAuth + garbage key + garbage tokens -> 200 in all 3 formats.
@@ -3324,6 +3377,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_gemini_non_stream_e2e() {
         // sim-10: gemini provider + header -> candidates envelope, no creds.
         let req = ExecutionRequest {
@@ -3350,6 +3406,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_gemini_stream_e2e() {
         // sim-10: Gemini-shape SSE chunks flow through the real path.
         let req = ExecutionRequest {
@@ -3373,6 +3432,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_stream_mode_validation_rejected() {
         // sim-10 (reviewer sim-08 nit): stream + unknown model -> JSON error,
         // not SSE. Covers the stream-mode validation gap for OpenAI path.
@@ -3400,6 +3462,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_anthropic_non_stream_e2e() {
         // sim-09: anthropic provider + header -> message envelope, no creds.
         let req = ExecutionRequest {
@@ -3425,6 +3490,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_anthropic_stream_e2e() {
         // sim-09: named SSE events flow through the real downstream path.
         let req = ExecutionRequest {
@@ -3449,6 +3517,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_execute_non_stream_e2e() {
         // sim-07: execute() with sim header takes the MOCK branch end-to-end
         // (no network, no credentials) and returns a well-formed envelope.
@@ -3478,6 +3549,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     async fn simulated_execute_stream_e2e() {
         // sim-07: stream=true returns SSE body with frames + [DONE].
         let req = ExecutionRequest {

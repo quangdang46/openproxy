@@ -160,6 +160,21 @@ path = "src/main.rs"
 default = ["embed-web"]
 # Embed `web/dist/` into the release binary. Disable for headless / sidecar-proxy builds.
 embed-web = []
+# Compile the simulation ("mock") engine into an executable state.
+#
+# OFF by default: `cargo build`, `cargo install` and a release binary never
+# simulate, so a model listed in `/v1/models` always routes to a real
+# provider. The engine itself is still compiled — this is a gate, not a
+# deletion — so `--features simulation` and its tests keep working.
+simulation = []
+
+# Simulation dispatch arms: the whole file asserts the simulated path, which a
+# build without the `simulation` feature cannot reach. `required-features`
+# skips compiling the target at all, so the tests are absent rather than
+# passing vacuously.
+[[test]]
+name = "sim_dispatch_arms"
+required-features = ["simulation"]
 
 [profile.release]
 lto = "fat"

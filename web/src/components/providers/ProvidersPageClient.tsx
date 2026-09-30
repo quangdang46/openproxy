@@ -142,6 +142,10 @@ export default function ProvidersPageClient() {
   // threaded to cards (same source as detail toggle + modal).
   const [mockById, setMockById] = useState({});
   const [forceAll, setForceAll] = useState(false);
+  // The simulation engine is compiled out of a default build, so the Mock
+  // toggles are hidden rather than shown inert — see the `simulationEnabled`
+  // field on /api/mock/status.
+  const [simAvailable, setSimAvailable] = useState(false);
   const [forceSaving, setForceSaving] = useState(false);
   // Confirm guard (reviewer sim-20 retro): enabling force-all is a global
   // behavior change — require explicit confirmation. Disabling applies
@@ -188,6 +192,7 @@ export default function ProvidersPageClient() {
           setProxyPools(proxyPoolsData.proxyPools || []);
         if (mockRes.ok) {
           const mockData = await mockRes.json().catch(() => ({}));
+          setSimAvailable(!!mockData?.simulationEnabled);
           const map: Record<string, boolean> = {};
           for (const [name, entry] of Object.entries(mockData?.providers || {})) {
             if (entry?.effective === "mock") map[name] = true;
@@ -673,7 +678,7 @@ export default function ProvidersPageClient() {
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
       <CatalogSyncCard />
-      {forceAll && (
+      {simAvailable && forceAll && (
         <div className="flex items-center gap-2 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2">
           <span className="text-sm">🧪</span>
           <p className="min-w-0 flex-1 text-xs text-purple-700 dark:text-purple-300">
@@ -691,7 +696,7 @@ export default function ProvidersPageClient() {
         </div>
       )}
       <ConfirmModal
-        isOpen={pendingForceOn}
+        isOpen={simAvailable && pendingForceOn}
         onClose={() => setPendingForceOn(false)}
         onConfirm={async () => {
           await setForceAllMode(true);
@@ -710,6 +715,7 @@ export default function ProvidersPageClient() {
         loading={forceSaving}
       />
       <div className="flex items-center justify-end gap-2">
+        {simAvailable && (
         <label className="flex items-center gap-1.5 text-xs text-text-muted" title="Force all supported providers to mock (dev only). Same as OPENPROXY_DEV_MOCK=1.">
           <input
             type="checkbox"
@@ -725,6 +731,7 @@ export default function ProvidersPageClient() {
           />
           Dev: mock all
         </label>
+        )}
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}

@@ -15,6 +15,8 @@ interface SimMode {
   effective: string;
   reason: string;
   simulationSupported: boolean;
+  /** Whether THIS build compiled the engine in. A default build did not. */
+  available: boolean;
 }
 
 interface SimulationModeToggleProps {
@@ -39,6 +41,7 @@ export function useSimulationMode(providerId: string) {
           effective: entry.effective ?? "real",
           reason: entry.reason ?? "default",
           simulationSupported: entry.simulationSupported ?? false,
+          available: data?.simulationEnabled === true,
         });
       }
     } finally {
@@ -81,7 +84,10 @@ export default function SimulationModeToggle({ providerId, connectionId, onChang
   };
 
   if (loading || !mode) return null;
-  if (!mode.simulationSupported) return null;
+  // `simulationSupported` describes the engine; `available` describes this
+  // build. Both must hold — a default build has the code compiled out, and a
+  // toggle that cannot change anything should not be offered.
+  if (!mode.simulationSupported || !mode.available) return null;
 
   const showBanner = mode.configured !== mode.effective;
 

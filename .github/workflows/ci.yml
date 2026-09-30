@@ -129,6 +129,16 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --lib --all-features
 
+      - name: cargo test (default features — simulation gate closed)
+        # The run above enables every feature, which compiles the simulation
+        # engine *in* — so `the_default_build_cannot_simulate` is skipped by
+        # construction and the gate is never actually asserted. This run uses
+        # the default feature set, which is what `cargo build`, `cargo install`
+        # and every release binary use, and is the only one that can catch
+        # `simulation` being added to `default` by accident.
+        if: runner.os == 'Linux'
+        run: cargo test --lib
+
       - name: cargo test — SAML live round-trip (Linux only)
         # Explicitly wired in (issue #461 follow-up): this integration test
         # is not covered by `--lib` above and would otherwise never run in

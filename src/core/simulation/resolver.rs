@@ -82,6 +82,18 @@ impl<'a> ResolveInput<'a> {
 pub fn resolve_effective_mode(input: &ResolveInput<'_>) -> Result<ResolvedMode, SimulationError> {
     let configured = get_provider_mode(input.conn, input.provider);
 
+    // Gate first, so nothing below can return Mock in a build without the
+    // `simulation` feature — not the env force, not the stored setting, not a
+    // per-request header. `configured` still reports what the operator set,
+    // so the UI can show it without the router acting on it.
+    if !super::ENABLED {
+        return Ok(ResolvedMode {
+            mode: ProviderExecutionMode::Real,
+            configured,
+            reason: EffectiveReason::Default,
+        });
+    }
+
     // 1. Global force — safety boundary. Header cannot override.
     if input.env_force_all {
         return require_supported(input, configured, EffectiveReason::EnvForce);
@@ -164,7 +176,13 @@ pub fn status_for(
     let format = provider_sim_format(provider, &config_format);
     let supported = is_format_supported(format);
     let env_force = env_force_all();
-    let (effective, reason) = if (env_force || settings_force_all) && supported {
+    // `simulation_supported` describes the engine, not this build, so it stays
+    // true even when the gate is closed — the Providers page uses it to decide
+    // whether to offer a Mock toggle that would do anything. `effective` is
+    // what the router will actually do, so it reports Real while gated.
+    let (effective, reason) = if !super::ENABLED {
+        (ProviderExecutionMode::Real, EffectiveReason::Default)
+    } else if (env_force || settings_force_all) && supported {
         (ProviderExecutionMode::Mock, {
             if env_force {
                 EffectiveReason::EnvForce
@@ -251,6 +269,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn configured_mock_wins() {
         let db = SqliteDb::open_in_memory().unwrap();
         db.with_transaction(|tx| set_provider_mode(tx, "openai", ProviderExecutionMode::Mock))
@@ -268,6 +289,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn request_header_selects_mock() {
         let db = SqliteDb::open_in_memory().unwrap();
         let h = headers_with(&[(SIM_HEADER, "mock")]);
@@ -283,6 +307,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn no_header_can_force_real() {
         // configured mock + garbage/another header value → stays mock.
         // There is simply no code path from header → Real.
@@ -302,6 +329,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn env_force_cannot_be_bypassed_by_headers() {
         // Safety boundary: with OPENPROXY_DEV_MOCK=1 the resolver must return
         // Mock regardless of headers, and no header value may select Real.
@@ -332,6 +362,9 @@ mod tests {
     }
 
     #[test]
+    // Needs the engine compiled in: this asserts the simulated path, which
+    // a default build (gate closed) deliberately does not reach.
+    #[cfg(feature = "simulation")]
     fn settings_force_overrides_to_mock() {
         let db = SqliteDb::open_in_memory().unwrap();
         let h = HeaderMap::new();

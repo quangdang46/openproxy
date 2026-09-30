@@ -1686,6 +1686,12 @@ pub fn attach_client_raw_headers(
 /// documents but cannot see); pass `None` when absent.
 fn effective_mock_for(state: &AppState, provider: &str, sim_header_value: Option<&str>) -> bool {
     use crate::core::simulation::ProviderExecutionMode;
+    // The dispatch ladder short-circuits to the simulator on this answer, so
+    // the gate has to be consulted here too — not only in the executor. A
+    // released binary has no `simulation` feature and never short-circuits.
+    if !crate::core::simulation::ENABLED {
+        return false;
+    }
     let settings_force = state.db.snapshot().settings.dev_mock_all;
     let configured_mock = state
         .db
