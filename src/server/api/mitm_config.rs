@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::core::mitm;
-use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 
 // ── GET /api/mitm-config ──────────────────────────────────────────────
@@ -55,8 +54,8 @@ async fn get_config(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let snapshot = state.db.snapshot();
@@ -168,8 +167,8 @@ async fn update_config(
     headers: axum::http::HeaderMap,
     Json(body): Json<UpdateMitmConfigRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     match state
@@ -234,8 +233,8 @@ async fn generate_cert(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let ca_dir = state.db.data_dir.join("mitm");
@@ -344,8 +343,8 @@ async fn start_mitm(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let snapshot = state.db.snapshot();
@@ -495,8 +494,8 @@ async fn stop_mitm(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let stopped_port = {
