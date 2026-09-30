@@ -156,3 +156,34 @@ async fn gate_is_inert_when_login_is_disabled() {
         "requireLogin=false must not be overridden by the dashboard gate"
     );
 }
+
+/// Build output must not be behind the session gate.
+///
+/// The gate redirects a sessionless request to `/login`, so a gated
+/// `/_astro/*.js` came back as the HTML shell. The browser enforces strict
+/// MIME checking on module scripts, so the island never hydrated — and since
+/// `/login` is itself hydrated from `/_astro/*`, the login page rendered a
+/// blank with no password field. Nobody could log in at all.
+///
+/// These are hashed bundles, icons and translations: no user data, so gating
+/// them bought no privacy and cost a working login form.
+#[tokio::test]
+async fn build_assets_are_not_gated() {
+    let app = openproxy::build_app(app(true).await);
+    for uri in [
+        "/_astro/LoginPageClient.js",
+        "/_astro/index.css",
+        "/icons/logo.svg",
+        "/i18n/en.json",
+        "/favicon.svg",
+        "/sw.js",
+    ] {
+        let status = get(app.clone(), uri).await;
+        assert_ne!(
+            status,
+            StatusCode::TEMPORARY_REDIRECT,
+            "{uri} was redirected to the login page; a module script served as \
+             text/html fails the browser's strict MIME check and the island never hydrates"
+        );
+    }
+}

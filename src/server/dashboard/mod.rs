@@ -53,6 +53,21 @@ fn is_public_page(path: &str) -> bool {
     matches!(path, "/" | "/login" | "/callback" | "/landing")
 }
 
+/// Build output served from the embedded `web/dist` tree: hashed bundles,
+/// icons, translations, the service worker.
+///
+/// These carry no user data, so requiring a session for them exposes nothing
+/// while breaking login itself. Astro hydrates `/login` from `/_astro/*`, and a
+/// 307 to `/login` in place of a module script trips the browser's strict MIME
+/// check — the island never hydrates, the form never renders, and the operator
+/// is left with a blank page and no way to type the password. The same bite
+/// hits any static asset a logged-out visitor or an expired session fetches.
+fn is_static_asset(path: &str) -> bool {
+    const PREFIXES: [&str; 3] = ["/_astro/", "/icons/", "/i18n/"];
+    const FILES: [&str; 3] = ["/favicon.svg", "/globe.svg", "/sw.js"];
+    PREFIXES.iter().any(|p| path.starts_with(p)) || FILES.contains(&path)
+}
+
 /// Gate the dashboard shell.
 ///
 /// The shell was served for ANY unauthenticated `/dashboard/*` deep link, so a
@@ -81,9 +96,13 @@ async fn dashboard_access_gate(
 
     if let Err(error) = require_dashboard_session(request.headers(), &state.db) {
         // Without a session there is nothing to show but the login form, and
-        // a redirect is what a browser follows and a crawler records.
-        let _ = error;
-        return Ok(axum::response::Redirect::temporary("/login").into_response());
+        // a redirect is what a browser follows and a crawler records. Static
+        // build output is exempt: gating it is what made the login page unable
+        // to load the script that renders its own form.
+        if !is_static_asset(&path) {
+            let _ = error;
+            return Ok(axum::response::Redirect::temporary("/login").into_response());
+        }
     }
 
     if is_tunnel_host(request.headers(), settings) && !settings.tunnel_dashboard_access {
