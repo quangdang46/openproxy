@@ -3782,7 +3782,15 @@ async fn authorize_oauth_compat(
                 redirect_uri,
             )
         }
-        _ => internal_error_response(format!("Unknown provider: {provider}")),
+        // Unknown provider is a client error. `/start`, `/device-code` and
+        // `/poll-status` answer 400 here; returning 500 made this pair of OAuth
+        // endpoints the only ones that 500 on a bad provider name.
+        _ => make_error_response(
+            StatusCode::BAD_REQUEST,
+            "Unknown provider",
+            "unknown_provider",
+            &provider,
+        ),
     }
 }
 
@@ -4763,7 +4771,14 @@ async fn exchange_oauth_compat(
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
-        _ => return internal_error_response(format!("Unknown provider: {provider}")),
+        _ => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
     let saved = match create_imported_oauth_connection(&state.db, connection).await {
