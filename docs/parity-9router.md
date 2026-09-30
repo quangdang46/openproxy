@@ -5,7 +5,7 @@ Evidence-based parity against 9router v0.5.55 (`decolua/9router` @ 699edac). Bea
 
 ## 2026-08-22 deep-audit pass (8-agent swarm vs v0.5.55)
 
-Fixed (commits e839d283, 9ef44223):
+Fixed (commits 00e0c23f, 80213da7):
 
 | Gap | Fix |
 |-----|-----|

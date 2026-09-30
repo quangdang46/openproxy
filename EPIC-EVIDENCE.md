@@ -15,28 +15,28 @@ python3 -c "import json; rows=[json.loads(l) for l in open('.beads/issues.jsonl'
 
 | Bead | Plan § | Commit(s) | Review (openproxy-97) | Tests |
 |---|---|---|---|---|
-| sim-01 types | §2.5, §3.1 | 96121055 | PASS | 2 unit, fmt+clippy |
-| sim-02 persistence | §3.4 | 3d93eb9f | PASS (kv-scope deviation confirmed) | 6 |
-| sim-03 resolver | §3.2 | f8fa09ff, b5af832a, e1a56fba(note) | PASS (retro-confirm; close-reason self-reviewed superseded by bead comment + note) | 17 (x3 @8 threads) |
-| sim-04 interception | §4 | 39a5f122, 09436afb(fixes) | NEEDS-FIX→fixed→PASS (comment on bead) | 82 (sim17/gate1/pool43/loop6/parity15) |
-| sim-05 error | §3.6 | e79e50f8 | PASS (nits) | 2 |
-| sim-06 engine+openai | §2.1, §5 | 09436afb | PASS (+SHA-256 rec→applied) | 26 |
-| sim-07 SSE | §5 | fe82cc07 | PASS | 26 sim+21 exec+43 pool+15 parity |
-| sim-08 tools+errors | §5 | 0ea468ee | PASS (+Retry-After bug→fixed) | 31+23 |
-| sim-09 anthropic | §5 | ad186794 | PASS | 38+23 |
-| sim-10 gemini | §5 | 12f34f7e | PASS | 44+28 |
-| sim-11 models | §10 Q5 | e9d5d4fa | PASS | 48+28 |
-| sim-12 fault spec | §2.4, §5.1 | da6cea72 | PASS | 53+30 |
-| sim-13 latency | §2.4, §5.1 | d6d5394d | PASS | 53+34 |
-| sim-14 override | §5.1.1 | bb502f81, 76091c94 | NEEDS-FIX→fixed→re-PASS | 56+39 |
-| sim-15 REAL fault | §2.4 | 1f5555a8 | PASS | 45 pool+56 sim+40 exec |
-| sim-16 credbypass | §4 | 322795fd | PASS | 41+56 |
-| sim-17 fallback | §6 | 0a5c5a63 | PASS | 50 pool (5 matrix) |
-| sim-18 compat | §5.2 | 4619a421, 701bdc7e | PASS (+SSE-oracle bug→fixed) | 2 contract |
-| sim-19 CLI/API | §3.3, §3.5 | cad93b53, c381d4dd | PASS (+restart test) | surfaces 4, robot 18 |
-| sim-20 dashboard | §3.5 | 5e7fd362, 8635fc2a | retro PASS (+guard follow-up) | astro -12 net |
-| sim-21 docs+gate | §11 | 1f8bea5a | PASS | lib 2197, sim suites |
-| follow-up live-E2E | — | 22d08df8 | PASS ("Epic COMPLETE + live-verified") | live T1–T9 9/9 |
+| sim-01 types | §2.5, §3.1 | 76dad78c | PASS | 2 unit, fmt+clippy |
+| sim-02 persistence | §3.4 | 6b271ef5 | PASS (kv-scope deviation confirmed) | 6 |
+| sim-03 resolver | §3.2 | 7a6b89a2, e56426a6, aa447b1a(note) | PASS (retro-confirm; close-reason self-reviewed superseded by bead comment + note) | 17 (x3 @8 threads) |
+| sim-04 interception | §4 | 1db6dee1, b288163e(fixes) | NEEDS-FIX→fixed→PASS (comment on bead) | 82 (sim17/gate1/pool43/loop6/parity15) |
+| sim-05 error | §3.6 | 3bd2523e | PASS (nits) | 2 |
+| sim-06 engine+openai | §2.1, §5 | b288163e | PASS (+SHA-256 rec→applied) | 26 |
+| sim-07 SSE | §5 | 7b7fa0a0 | PASS | 26 sim+21 exec+43 pool+15 parity |
+| sim-08 tools+errors | §5 | 6abba2b9 | PASS (+Retry-After bug→fixed) | 31+23 |
+| sim-09 anthropic | §5 | 1b300fd6 | PASS | 38+23 |
+| sim-10 gemini | §5 | 4f4f0af3 | PASS | 44+28 |
+| sim-11 models | §10 Q5 | c4c6b1a9 | PASS | 48+28 |
+| sim-12 fault spec | §2.4, §5.1 | 2b7031ed | PASS | 53+30 |
+| sim-13 latency | §2.4, §5.1 | 25aded3f | PASS | 53+34 |
+| sim-14 override | §5.1.1 | 310aaaf0, 74dbe2b9 | NEEDS-FIX→fixed→re-PASS | 56+39 |
+| sim-15 REAL fault | §2.4 | ca9bb333 | PASS | 45 pool+56 sim+40 exec |
+| sim-16 credbypass | §4 | 41b2c286 | PASS | 41+56 |
+| sim-17 fallback | §6 | bb546acb | PASS | 50 pool (5 matrix) |
+| sim-18 compat | §5.2 | 06478838, 174c9ff8 | PASS (+SSE-oracle bug→fixed) | 2 contract |
+| sim-19 CLI/API | §3.3, §3.5 | 892be49c, 9f943af1 | PASS (+restart test) | surfaces 4, robot 18 |
+| sim-20 dashboard | §3.5 | b0852761, 96d45389 | retro PASS (+guard follow-up) | astro -12 net |
+| sim-21 docs+gate | §11 | 9545d194 | PASS | lib 2197, sim suites |
+| follow-up live-E2E | — | 8559610e | PASS ("Epic COMPLETE + live-verified") | live T1–T9 9/9 |
 
 Full hashes: `git log --oneline --grep="sim-"` (28 lines).
 
