@@ -198,6 +198,18 @@ impl Runtime {
         decode_json(res).await
     }
 
+    /// DELETE with a JSON body, for handlers that extract `Json<T>` and so
+    /// reject a bodyless request with 415 before they ever look at it.
+    pub async fn delete_json_body(&self, path: &str, body: &Value) -> Result<Value, RuntimeError> {
+        let res = self
+            .request(Method::DELETE, path)
+            .json(body)
+            .send()
+            .await
+            .map_err(map_err)?;
+        decode_json(res).await
+    }
+
     /// POST a JSON body and return the raw response bytes + content-type.
     /// Used by `media tts speak`, which writes audio bytes to stdout.
     pub async fn post_json_bytes(

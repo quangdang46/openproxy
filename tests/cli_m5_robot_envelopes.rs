@@ -598,3 +598,134 @@ async fn media_combo_create_normalizes_embed_kind_to_embedding() {
     let env = parse_robot(&out.stdout);
     assert_eq!(env["schema"], "openproxy.v1.media.combo.create");
 }
+
+// ─── antigravity-mitm ──────────────────────────────────────────────────────
+//
+// `POST /api/cli-tools/antigravity-mitm` and its DELETE twin both extract
+// `Json<StartMitmRequest>` / `Json<StopMitmRequest>`. The CLI sent them with
+// no body at all, so axum rejected every call with 415 before the handler
+// ran — `tool antigravity-mitm enable` could never succeed.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn antigravity_mitm_enable_sends_a_json_body() {
+    use wiremock::matchers::{body_json, method, path};
+
+    let server = boot_server().await;
+    Mock::given(method("POST"))
+        .and(path("/api/cli-tools/antigravity-mitm"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": true,
+            "message": "antigravity MITM enabled",
+        })))
+        .mount(&server)
+        .await;
+
+    let out = op(&server, &["--robot", "tool", "antigravity-mitm", "enable"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.tool.antigravity.enable");
+    assert_eq!(env["data"]["enabled"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn antigravity_mitm_disable_sends_a_json_body() {
+    use wiremock::matchers::{body_json, method, path};
+
+    let server = boot_server().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/cli-tools/antigravity-mitm"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": false,
+            "message": "antigravity MITM disabled",
+        })))
+        .mount(&server)
+        .await;
+
+    let out = op(&server, &["--robot", "tool", "antigravity-mitm", "disable"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.tool.antigravity.disable");
+    assert_eq!(env["data"]["enabled"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn antigravity_mitm_alias_set_and_delete_send_json_bodies() {
+    use wiremock::matchers::{body_json, method, path};
+
+    let server = boot_server().await;
+    // The alias endpoint takes `{tool, mappings}` — not a bare `alias` field.
+    // It used to 422 with "missing field `tool`" on every `--alias` call.
+    Mock::given(method("PUT"))
+        .and(path("/api/cli-tools/antigravity-mitm/alias"))
+        .and(body_json(
+            json!({ "tool": "antigravity", "mappings": { "ag": "ag" } }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/cli-tools/antigravity-mitm/alias"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .mount(&server)
+        .await;
+    // Both core toggles must succeed first, or the alias step is never reached.
+    Mock::given(method("POST"))
+        .and(path("/api/cli-tools/antigravity-mitm"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "enabled": true })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/cli-tools/antigravity-mitm"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "enabled": false })))
+        .mount(&server)
+        .await;
+
+    let out = op(
+        &server,
+        &[
+            "--robot",
+            "tool",
+            "antigravity-mitm",
+            "enable",
+            "--alias",
+            "ag",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.tool.antigravity.enable");
+    assert_eq!(env["data"]["alias"]["success"], true);
+
+    let out = op(
+        &server,
+        &[
+            "--robot",
+            "tool",
+            "antigravity-mitm",
+            "disable",
+            "--alias",
+            "ag",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.tool.antigravity.disable");
+}

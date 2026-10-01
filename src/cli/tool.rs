@@ -382,17 +382,42 @@ async fn run_antigravity(
     enable: bool,
     alias: Option<String>,
 ) -> anyhow::Result<i32> {
-    let (alias_method, alias_body) = match (&alias, enable) {
-        (Some(name), true) => (Some("put"), json!({"alias": name})),
-        (Some(_), false) => (Some("delete"), Value::Null),
-        (None, _) => (None, Value::Null),
+    // The alias endpoint is shaped `{tool, mappings}` — `tool` names which CLI
+    // the aliases belong to and `mappings` is a `alias -> model` map (the same
+    // contract the dashboard's MitmToolCard.tsx posts). This used to send a
+    // bare `{"alias": name}`, which matched neither field and came back 422
+    // "missing field `tool`", so `tool antigravity-mitm enable --alias <name>`
+    // always failed after the MITM toggle itself had already succeeded.
+    //
+    // `DELETE` takes `?tool=` on the query string instead, and defaults to
+    // "antigravity" when omitted — the same default the server applies.
+    let (alias_method, alias_path, alias_body) = match (&alias, enable) {
+        (Some(name), true) => (
+            Some("put"),
+            "/api/cli-tools/antigravity-mitm/alias".to_string(),
+            json!({"tool": "antigravity", "mappings": {name: name}}),
+        ),
+        (Some(_), false) => (
+            Some("delete"),
+            "/api/cli-tools/antigravity-mitm/alias?tool=antigravity".to_string(),
+            Value::Null,
+        ),
+        (None, _) => (None, String::new(), Value::Null),
     };
 
     // First, toggle the underlying integration.
+    //
+    // Both handlers extract `Json<StartMitmRequest>` / `Json<StopMitmRequest>`,
+    // so a bodyless POST/DELETE is rejected with 415 before the handler runs.
+    // Every field in those two structs is `Option`, so `{}` is the correct
+    // body — sending it explicitly (and thereby the JSON content type) is what
+    // makes the call succeed.
     let core_result = if enable {
-        rt.post_empty("/api/cli-tools/antigravity-mitm").await
+        rt.post_json("/api/cli-tools/antigravity-mitm", &json!({}))
+            .await
     } else {
-        rt.delete_json("/api/cli-tools/antigravity-mitm").await
+        rt.delete_json_body("/api/cli-tools/antigravity-mitm", &json!({}))
+            .await
     };
     let core_payload = match core_result {
         Ok(v) => v,
@@ -401,17 +426,11 @@ async fn run_antigravity(
 
     // Then, optionally adjust the alias.
     let alias_payload = match alias_method {
-        Some("put") => match rt
-            .put_json("/api/cli-tools/antigravity-mitm/alias", &alias_body)
-            .await
-        {
+        Some("put") => match rt.put_json(&alias_path, &alias_body).await {
             Ok(v) => Some(v),
             Err(e) => return rt_error_to_exit(ctx, e),
         },
-        Some("delete") => match rt
-            .delete_json("/api/cli-tools/antigravity-mitm/alias")
-            .await
-        {
+        Some("delete") => match rt.delete_json(&alias_path).await {
             Ok(v) => Some(v),
             Err(e) => return rt_error_to_exit(ctx, e),
         },
