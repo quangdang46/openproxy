@@ -952,15 +952,20 @@ fn generate_api_key_secret() -> String {
 }
 
 /// Try to install a freshly minted API key via the running server's
-/// `/api/keys` HTTP endpoint, falling back to a direct `db.json` write
-/// when the server is not reachable. Returns `true` if the HTTP path
-/// succeeded.
+/// `/api/keys` HTTP endpoint, falling back to a direct DB write when the
+/// server is not reachable. Returns `true` if the HTTP path succeeded.
 ///
-/// Bug #13: writing directly to `db.json` while the server is running
-/// races against `db::watcher::spawn_watcher`'s file-watcher reload.
-/// Calling `/api/keys` makes the server install the key into its
-/// in-memory snapshot synchronously, so subsequent `/v1/*` calls see it
-/// immediately.
+/// Writing straight to the database while the server is running leaves the
+/// server's in-memory `AppDb` snapshot stale: the new key is on disk but the
+/// auth middleware still resolves against the old set, so the key 401s until
+/// the server restarts. Posting to `/api/keys` makes the server install the
+/// key into its snapshot synchronously, so the very next `/v1/*` call sees it.
+///
+/// Authentication for that POST needs an already-existing key. The
+/// authoritative store is SQLite (see `Db::load_from` — "SQLite is the sole
+/// runtime store"); `db.json` no longer exists, so reading credentials from
+/// it made this function return `false` on every modern data dir and silently
+/// drop the CLI onto the stale-snapshot path this function exists to avoid.
 async fn try_add_key_via_http(key: &ApiKey) -> bool {
     use crate::cli::server::{read_endpoint, read_pid};
 
@@ -985,20 +990,19 @@ async fn try_add_key_via_http(key: &ApiKey) -> bool {
         host
     };
 
-    // Find an existing admin key to authenticate the call.
-    let admin_key: Option<String> = {
-        let snap_path = dir.join("db.json");
-        std::fs::read(&snap_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| {
-                value.get("apiKeys")?.as_array()?.iter().find_map(|entry| {
-                    entry
-                        .get("key")
-                        .and_then(|s| s.as_str())
-                        .map(str::to_string)
-                })
-            })
+    // Borrow an existing key to authenticate the call. Read through the same
+    // `Db` loader the server uses so this sees SQLite, not a legacy JSON file.
+    // An active key is preferred: a disabled one would authenticate the
+    // connection check but fail `require_api_key` server-side.
+    let admin_key: Option<String> = match Db::load_from(&dir).await {
+        Ok(db) => {
+            let keys = &db.snapshot().api_keys;
+            keys.iter()
+                .find(|k| k.is_active.unwrap_or(true) && !k.key.is_empty())
+                .or_else(|| keys.iter().find(|k| !k.key.is_empty()))
+                .map(|k| k.key.clone())
+        }
+        Err(_) => None,
     };
     let Some(admin) = admin_key else {
         return false;

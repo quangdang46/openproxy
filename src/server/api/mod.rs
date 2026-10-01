@@ -1813,6 +1813,18 @@ async fn list_keys_api(State(state): State<AppState>, headers: HeaderMap) -> Res
 #[derive(Debug, Deserialize)]
 struct CreateKeyRequest {
     name: Option<String>,
+    /// Pre-generated secret, used only by the local CLI.
+    ///
+    /// The dashboard leaves this unset and lets the server mint the secret, so
+    /// the secret is never sent over the wire in that flow. `openproxy key add`
+    /// mints locally with `--auto` and must install *that* exact value: the
+    /// server used to ignore this field and always generate its own, so the
+    /// CLI's key was never stored and authenticated 401 against a server
+    /// holding a different secret. Only `sk-`/`op-` forms this build's parser
+    /// accepts are honoured; anything else is rejected rather than stored
+    /// unusable.
+    #[serde(default)]
+    key: Option<String>,
     #[serde(default)]
     monthly_budget_usd: Option<f64>,
 }
@@ -1848,14 +1860,56 @@ async fn create_key_api(
 
     let id = Uuid::new_v4().to_string();
     let machine_id = consistent_machine_id();
-    let key = crate::core::auth::generate_api_key_with_machine(&machine_id);
     let now = chrono::Utc::now().to_rfc3339();
+
+    // Honour a caller-supplied secret (CLI path) or mint one (dashboard path).
+    //
+    // Deliberately NOT validated with `core::auth::parse_api_key`: request-time
+    // auth resolves keys by plaintext lookup in `snapshot.api_key_map`, not by
+    // parsing them, so a stored `op-…` secret authenticates fine. Gating on the
+    // parser here (which only understands the `sk-` wire form) would reject the
+    // very keys the CLI mints. The shape check below only rejects input that
+    // could never be a usable secret, not a format mismatch.
+    let (key, key_machine_id) = match req.key.as_deref().map(str::trim) {
+        Some(supplied) if !supplied.is_empty() => {
+            // Prefix alone is not enough: `op-` with no body, or a bare `sk-`,
+            // would pass a starts_with check and be stored as a secret that can
+            // never authenticate. Require actual material after the marker.
+            let is_op = supplied.strip_prefix("op-").is_some_and(|body| {
+                body.len() >= 16 && body.bytes().all(|b| b.is_ascii_hexdigit())
+            });
+            let is_sk = supplied
+                .strip_prefix("sk-")
+                .is_some_and(|body| !body.is_empty() && !body.contains(char::is_whitespace));
+            if !is_op && !is_sk {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "key must be a non-empty 'sk-…' or 'op-<hex>' secret"
+                    })),
+                )
+                    .into_response();
+            }
+            // `op-…` keys carry no machine segment; `sk-<machine>-…` does.
+            let machine = supplied
+                .strip_prefix("sk-")
+                .and_then(|rest| rest.split('-').next())
+                .filter(|m| !m.is_empty())
+                .unwrap_or(machine_id.as_str())
+                .to_string();
+            (supplied.to_string(), machine)
+        }
+        _ => (
+            crate::core::auth::generate_api_key_with_machine(&machine_id),
+            machine_id.clone(),
+        ),
+    };
 
     let api_key = ApiKey {
         id,
         name: name.to_string(),
         key,
-        machine_id: Some(machine_id),
+        machine_id: Some(key_machine_id),
         is_active: Some(true),
         created_at: Some(now),
         monthly_budget_usd: req.monthly_budget_usd,
