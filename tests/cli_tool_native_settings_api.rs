@@ -271,6 +271,58 @@ async fn claude_settings_post_get_and_delete_match_openproxy_behavior() {
     assert!(reset["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
 }
 
+/// `openproxy tool apply claude --model X` writes `ANTHROPIC_MODEL`, so
+/// `tool revert claude` has to strip it. It used to leave the model pinned
+/// after the operator had asked to be un-wired: `save` persists whatever
+/// `env` the caller sends, but `reset` only removed a fixed list that did not
+/// include this key.
+#[tokio::test]
+async fn claude_settings_delete_clears_anthropic_model() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let settings_path = claude_settings_path(home.path());
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&json!({
+            "env": {
+                "KEEP": "1",
+                "ANTHROPIC_MODEL": "ocg/glm-5.2",
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:4623/v1",
+                "ANTHROPIC_AUTH_TOKEN": "token-123"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let delete = app
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/claude-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, _json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert!(
+        reset["env"].get("ANTHROPIC_MODEL").is_none(),
+        "revert left ANTHROPIC_MODEL behind: {reset}"
+    );
+    assert!(reset["env"].get("ANTHROPIC_BASE_URL").is_none());
+    assert!(reset["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+    assert_eq!(reset["env"]["KEEP"], "1", "unrelated env keys must survive");
+}
+
 #[tokio::test]
 async fn hermes_settings_get_reports_not_installed_without_binary_or_config() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

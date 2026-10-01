@@ -15,9 +15,18 @@ use tokio::{fs, process::Command};
 
 use crate::server::state::AppState;
 
+/// Env keys `DELETE /api/cli-tools/claude-settings` strips.
+///
+/// This has to stay in sync with what `POST` can write. `save` persists the
+/// caller's whole `env` object, so any key the dashboard or `openproxy tool
+/// apply claude --model` sends must be listed here or `revert` silently leaves
+/// it behind. `ANTHROPIC_MODEL` was missing: apply wrote it and reset kept it,
+/// so Claude Code stayed pinned to the OpenProxy model after the operator had
+/// asked to be un-wired.
 const RESET_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
