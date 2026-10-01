@@ -512,3 +512,103 @@ async fn schema_list_includes_namespace_and_stability() {
     assert_eq!(v["data"]["stability"], "stable");
     assert!(!v["data"]["resources"].as_array().unwrap().is_empty());
 }
+
+// ─── pxpipe ───────────────────────────────────────────────────────────────
+//
+// `/api/pxpipe/*` answers with a *flat* payload (that is what the dashboard
+// reads directly). The CLI used to re-wrap it in a second `{ok, data, error}`
+// envelope, so `--robot` emitted `.data.data.<field>` and no agent could read
+// a single value. These tests pin both the flat `.data` and the per-action
+// schema name.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pxpipe_status_emits_flat_payload_under_its_own_schema() {
+    let server = boot_server().await;
+    Mock::given(method("GET"))
+        .and(path("/api/pxpipe/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": "NOT_INSTALLED",
+            "installed": false,
+            "running": false,
+            "mode": "library",
+        })))
+        .mount(&server)
+        .await;
+
+    let out = op(&server, &["--robot", "pxpipe", "status"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = parse_robot(&out.stdout);
+    assert_eq!(v["schema"], "openproxy.v1.pxpipe.status");
+    assert_eq!(v["ok"], true);
+    // The payload sits directly under `.data`, exactly as the dashboard reads
+    // it — no second envelope.
+    assert_eq!(v["data"]["installed"], false);
+    assert_eq!(v["data"]["code"], "NOT_INSTALLED");
+    assert!(
+        v["data"].get("data").is_none(),
+        "pxpipe re-wrapped the server payload in a nested envelope: {}",
+        v["data"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pxpipe_health_stats_logs_each_carry_their_own_schema() {
+    let server = boot_server().await;
+    Mock::given(method("GET"))
+        .and(path("/api/pxpipe/health"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "healthy": false, "checks": [] })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/pxpipe/stats"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "windows": {}, "recent": [] })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/pxpipe/logs"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "installLog": "", "events": [] })),
+        )
+        .mount(&server)
+        .await;
+
+    for (args, schema, probe) in [
+        (
+            vec!["--robot", "pxpipe", "health"],
+            "openproxy.v1.pxpipe.health",
+            "healthy",
+        ),
+        (
+            vec!["--robot", "pxpipe", "stats"],
+            "openproxy.v1.pxpipe.stats",
+            "windows",
+        ),
+        (
+            vec!["--robot", "pxpipe", "logs"],
+            "openproxy.v1.pxpipe.logs",
+            "installLog",
+        ),
+    ] {
+        let out = op(&server, &args);
+        assert!(
+            out.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v = parse_robot(&out.stdout);
+        assert_eq!(v["schema"], schema, "wrong schema for {args:?}");
+        assert!(
+            v["data"].get(probe).is_some(),
+            "{args:?} payload is not flat — `{probe}` missing under .data: {}",
+            v["data"]
+        );
+    }
+}

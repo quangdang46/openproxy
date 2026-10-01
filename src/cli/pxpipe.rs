@@ -38,12 +38,22 @@ pub async fn run(cmd: PxpipeCmd, cfg: &ResolvedConfig, ctx: OutputCtx) -> anyhow
     }
 }
 
+/// One row per subcommand: the `<action>` segment of its `openproxy.v1.pxpipe.*`
+/// schema. Every other robot-emitting CLI command carries `<area>.<action>`
+/// (quota.list, settings.get, db.export) — pxpipe used to emit the bare
+/// `openproxy.v1.pxpipe` for all four, so an agent could not tell a status
+/// report from a health report without sniffing the payload.
+const ACTION_STATUS: &str = "openproxy.v1.pxpipe.status";
+const ACTION_HEALTH: &str = "openproxy.v1.pxpipe.health";
+const ACTION_STATS: &str = "openproxy.v1.pxpipe.stats";
+const ACTION_LOGS: &str = "openproxy.v1.pxpipe.logs";
+
 async fn run_status(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
     let value = match rt.get_json("/api/pxpipe/status").await {
         Ok(v) => v,
         Err(e) => return rt_error_to_exit(ctx, e),
     };
-    print_json_value(ctx, &value);
+    print_json_value(ctx, ACTION_STATUS, &value);
     Ok(0)
 }
 
@@ -52,7 +62,7 @@ async fn run_health(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
         Ok(v) => v,
         Err(e) => return rt_error_to_exit(ctx, e),
     };
-    print_json_value(ctx, &value);
+    print_json_value(ctx, ACTION_HEALTH, &value);
     Ok(0)
 }
 
@@ -61,7 +71,7 @@ async fn run_stats(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
         Ok(v) => v,
         Err(e) => return rt_error_to_exit(ctx, e),
     };
-    print_json_value(ctx, &value);
+    print_json_value(ctx, ACTION_STATS, &value);
     Ok(0)
 }
 
@@ -75,20 +85,21 @@ async fn run_logs(rt: &Runtime, ctx: OutputCtx, limit: Option<usize>) -> anyhow:
         Ok(v) => v,
         Err(e) => return rt_error_to_exit(ctx, e),
     };
-    print_json_value(ctx, &value);
+    print_json_value(ctx, ACTION_LOGS, &value);
     Ok(0)
 }
 
-fn print_json_value(ctx: OutputCtx, value: &Value) {
+/// `/api/pxpipe/*` answers with the payload *flat* (`{installed, running, …}`),
+/// the same shape the dashboard consumes directly — see
+/// `PxpipePageClient.tsx`, which reads `status.installed` and `stats.windows`.
+///
+/// This used to wrap that payload in a second `{ok, data, error}` envelope, so
+/// `--robot` produced `.data.data.installed` and no agent following the
+/// documented `openproxy.v1.*` contract could read a single field. `.data` is
+/// now the payload itself, matching quota.list / settings.get.
+fn print_json_value(ctx: OutputCtx, schema: &str, value: &Value) {
     if ctx.is_robot() {
-        let _ = emit_robot(
-            "openproxy.v1.pxpipe",
-            json!({
-                "ok": true,
-                "data": value,
-                "error": null,
-            }),
-        );
+        let _ = emit_robot(schema, value.clone());
     } else {
         humanln(
             ctx,

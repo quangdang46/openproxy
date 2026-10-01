@@ -468,3 +468,133 @@ async fn media_web_fetch_emits_envelope() {
     assert_eq!(env["schema"], "openproxy.v1.media.web.fetch");
     assert_eq!(env["data"]["content"], "# Page title\n");
 }
+
+// ─── media combos ──────────────────────────────────────────────────────────
+//
+// `/api/combos` holds *every* combo — LLM fallback chains included. `media
+// combo list` has to narrow that to the media modalities, and `media combo
+// create` has to send the field `CreateComboRequest` actually reads.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_combo_list_excludes_llm_combos() {
+    let server = boot_server().await;
+    Mock::given(method("GET"))
+        .and(path("/api/combos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "combos": [
+                { "id": "1", "name": "chat-fallback", "kind": null,   "models": ["openai/gpt-4o"] },
+                { "id": "2", "name": "code-fallback", "kind": "llm",  "models": ["anthropic/claude"] },
+                { "id": "3", "name": "tts-fallback",  "kind": "tts",  "models": ["elevenlabs/s1"] },
+                { "id": "4", "name": "img-fallback",  "kind": "image","models": ["fal/flux"] },
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let out = op(&server, &["--robot", "media", "combo", "list"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.media.combo.list");
+
+    let names: Vec<&str> = env["data"]["combos"]
+        .as_array()
+        .expect("combos array")
+        .iter()
+        .map(|c| c["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["tts-fallback", "img-fallback"],
+        "media combo list leaked non-media combos (an LLM chain with kind:null \
+         or kind:\"llm\" is a chat combo, not a media one)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_combo_create_posts_members_as_models() {
+    use wiremock::matchers::body_partial_json;
+
+    let server = boot_server().await;
+    Mock::given(method("POST"))
+        .and(path("/api/combos"))
+        .and(body_partial_json(json!({
+            "name": "voice-fallback",
+            "kind": "tts",
+            "models": ["elevenlabs/s1", "openai/tts-1"],
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "combo-1",
+            "name": "voice-fallback",
+            "kind": "tts",
+            "models": ["elevenlabs/s1", "openai/tts-1"],
+        })))
+        .mount(&server)
+        .await;
+
+    let out = op(
+        &server,
+        &[
+            "--robot",
+            "media",
+            "combo",
+            "create",
+            "--kind",
+            "tts",
+            "--name",
+            "voice-fallback",
+            "--members",
+            "elevenlabs/s1,openai/tts-1",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.media.combo.create");
+    // The mock only matches a body carrying `models`, so reaching this assert
+    // already proves the members were sent. --members used to be posted as
+    // `providers`, which `CreateComboRequest` drops, creating an empty combo.
+    assert_eq!(env["data"]["models"][0], "elevenlabs/s1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_combo_create_normalizes_embed_kind_to_embedding() {
+    use wiremock::matchers::body_partial_json;
+
+    let server = boot_server().await;
+    Mock::given(method("POST"))
+        .and(path("/api/combos"))
+        .and(body_partial_json(json!({ "kind": "embedding" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": "c" })))
+        .mount(&server)
+        .await;
+
+    let out = op(
+        &server,
+        &[
+            "--robot",
+            "media",
+            "combo",
+            "create",
+            "--kind",
+            "embed",
+            "--name",
+            "vec-fallback",
+            "--members",
+            "voyage/voyage-3",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = parse_robot(&out.stdout);
+    assert_eq!(env["schema"], "openproxy.v1.media.combo.create");
+}

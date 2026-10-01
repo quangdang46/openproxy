@@ -526,14 +526,36 @@ async fn run_providers_delete(
 
 async fn run_combo_list(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
     // No dedicated list endpoint; use `/api/combos` filtered to media kinds.
+    //
+    // The filter is not optional: `/api/combos` returns *every* combo, so
+    // without it this command listed the LLM fallback chains alongside the
+    // media ones — the exact opposite of what `media combo list` promises.
+    // The dashboard applies the same predicate
+    // (`MediaProvidersKindPageClient.tsx`: `combos.filter(c => c.kind === kind)`).
     match rt.get_json("/api/combos").await {
         Ok(payload) => {
+            let combos = payload
+                .get("combos")
+                .and_then(Value::as_array)
+                .map(|all| {
+                    all.iter()
+                        .filter(|c| {
+                            c.get("kind")
+                                .and_then(Value::as_str)
+                                .map(|k| !k.is_empty() && k != "llm")
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let filtered = json!({ "combos": combos });
             if ctx.is_robot() {
-                emit_robot("openproxy.v1.media.combo.list", payload)?;
+                emit_robot("openproxy.v1.media.combo.list", filtered)?;
             } else {
                 humanln(
                     ctx,
-                    serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    serde_json::to_string_pretty(&filtered).unwrap_or_default(),
                 );
             }
             Ok(0)
@@ -549,10 +571,16 @@ async fn run_combo_create(
     name: String,
     members: Vec<String>,
 ) -> anyhow::Result<i32> {
+    // `models` is the field `CreateComboRequest` reads. It used to post
+    // `providers`, which the struct does not deserialise, so `--members` was
+    // dropped on the floor and every media combo was created empty — the
+    // operator saw a 201 with the name they asked for and no members at all.
+    // `kind` carries the media modality, which is what `media combo list`
+    // and the dashboard filter on.
     let body = json!({
         "name": name,
         "kind": server_kind(&kind),
-        "providers": members,
+        "models": members,
         "strategy": "fallback",
     });
     match rt.post_json("/api/combos", &body).await {
