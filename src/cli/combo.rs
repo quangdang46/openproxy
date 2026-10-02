@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::cli::apply::{into_items, load_document, ApplyDiff};
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
+use crate::cli::runtime::reload_running_server;
 use crate::core::model::resolve_provider_alias;
 use crate::db::Db;
 use crate::types::Combo;
@@ -197,6 +198,9 @@ async fn run_create(
     };
 
     db.update(|db| db.combos.push(combo.clone())).await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     if ctx.is_robot() {
         emit_robot("openproxy.v1.combo.create", serde_json::to_value(&combo)?)?;
@@ -231,6 +235,9 @@ async fn run_edit(
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let combo = updated.expect("combo existed before update");
     if ctx.is_robot() {
@@ -259,6 +266,9 @@ async fn run_delete(db: &Db, ctx: OutputCtx, name: &str, strict: bool) -> anyhow
     }
 
     db.update(|db| db.combos.retain(|c| c.name != name)).await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     if ctx.is_robot() {
         emit_robot(
@@ -285,6 +295,9 @@ async fn run_set_active(db: &Db, ctx: OutputCtx, name: &str, active: bool) -> an
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let combo = updated.expect("combo existed");
     let schema = if active {
@@ -475,6 +488,9 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let summary = diff.summary();
     if ctx.is_robot() {

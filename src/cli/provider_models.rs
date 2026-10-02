@@ -11,6 +11,7 @@ use clap::Subcommand;
 use serde_json::{json, Value};
 
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
+use crate::cli::runtime::reload_running_server;
 use crate::db::Db;
 use crate::types::{CustomModel, ModelAliasTarget, ProviderConnection, ProviderModelRef};
 
@@ -252,6 +253,9 @@ async fn run_alias(db: &Db, ctx: OutputCtx, cmd: AliasCmd) -> anyhow::Result<()>
                 app.model_aliases.insert(alias.clone(), target.clone());
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
 
             let payload = json!({
                 "alias": alias,
@@ -281,6 +285,9 @@ async fn run_alias(db: &Db, ctx: OutputCtx, cmd: AliasCmd) -> anyhow::Result<()>
                 app.model_aliases.remove(&alias);
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
             if ctx.is_robot() {
                 emit_robot(
                     "openproxy.v1.provider-models.alias.unset",
@@ -319,6 +326,9 @@ async fn run_set_disabled(
         write_disabled_map(&mut app.extra, &map);
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let schema = if disable {
         "openproxy.v1.provider-models.disable"
@@ -401,6 +411,9 @@ async fn run_custom(db: &Db, ctx: OutputCtx, cmd: CustomCmd) -> anyhow::Result<(
             };
             db.update(|app| app.custom_models.push(entry.clone()))
                 .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
             if ctx.is_robot() {
                 emit_robot(
                     "openproxy.v1.provider-models.custom.add",
@@ -437,6 +450,9 @@ async fn run_custom(db: &Db, ctx: OutputCtx, cmd: CustomCmd) -> anyhow::Result<(
                     .retain(|m| !(m.provider_alias == provider && m.id == model));
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
             if ctx.is_robot() {
                 emit_robot(
                     "openproxy.v1.provider-models.custom.remove",

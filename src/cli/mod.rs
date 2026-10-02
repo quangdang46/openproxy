@@ -6,6 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use serde_json::Value;
 
+use crate::cli::runtime::reload_running_server;
 use crate::core::account_fallback::AccountRegistry;
 use crate::core::combo::{
     get_combo_models_from_data, sort_models_by_cost, sort_models_by_latency, strategy_for_combo,
@@ -1127,6 +1128,9 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
                 db.provider_connections.push(new_conn.clone());
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
 
             if ctx.is_robot() {
                 output::emit_robot(
@@ -1422,6 +1426,9 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                     db.api_keys.push(new_key.clone());
                 })
                 .await?;
+                // The server holds its own snapshot; without this the write is invisible
+                // to `GET /api/<resource>` until it is restarted.
+                reload_running_server(db).await;
             }
 
             if ctx.is_robot() {
@@ -1556,6 +1563,9 @@ pub async fn run_pool(cmd: PoolCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::
                 db.proxy_pools.push(new_pool.clone());
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
 
             if ctx.is_robot() {
                 output::emit_robot("openproxy.v1.pool.create", serde_json::to_value(&new_pool)?)?;
@@ -1579,6 +1589,9 @@ pub async fn run_pool(cmd: PoolCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::
                 db.proxy_pools.retain(|p| p.name != name);
             })
             .await?;
+            // The server holds its own snapshot; without this the write is invisible
+            // to `GET /api/<resource>` until it is restarted.
+            reload_running_server(db).await;
 
             if ctx.is_robot() {
                 output::emit_robot(

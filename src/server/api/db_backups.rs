@@ -25,6 +25,43 @@ pub fn routes() -> Router<AppState> {
         .route("/api/db-backups/export", get(export_handler))
         .route("/api/db-backups/import", post(import_handler))
         .route("/api/db-backups/{id}", delete(delete_one_handler))
+        .route("/api/db/reload", post(reload_handler))
+}
+
+/// `POST /api/db/reload` — re-read the SQLite file into the in-memory snapshot.
+///
+/// Several CLI commands (`provider apply`, `pool apply`, `combo apply`,
+/// `key apply`, `provider models alias set/unset`) write through `Db::update`,
+/// which lands in SQLite. A *running server* keeps its own `ArcSwap` `AppDb`
+/// and only re-reads on the handful of paths that already call
+/// `reload_snapshot()` (auth, the OAuth device poll, the chat dispatcher).
+/// So a CLI apply reported success while `GET /api/providers` — and therefore
+/// the dashboard — kept serving the pre-apply list until the server was
+/// restarted. This endpoint is the general escape hatch: the CLI calls it after
+/// a local write and the change is immediately visible.
+///
+/// Additive in the `openproxy.v1.*` sense — a new route, no existing field
+/// renamed or removed.
+async fn reload_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    match state.db.reload_snapshot().await {
+        Ok(snapshot) => Json(json!({
+            "reloaded": true,
+            "providers": snapshot.provider_connections.len(),
+            "nodes": snapshot.provider_nodes.len(),
+            "combos": snapshot.combos.len(),
+            "proxyPools": snapshot.proxy_pools.len(),
+            "apiKeys": snapshot.api_keys.len(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "reloaded": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 fn manager(state: &AppState) -> BackupManager {

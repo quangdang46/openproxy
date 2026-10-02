@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::cli::apply::{into_items, load_document, ApplyDiff};
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
+use crate::cli::runtime::reload_running_server;
 use crate::db::Db;
 use crate::types::{AppDb, ProviderConnection};
 
@@ -616,6 +617,12 @@ async fn run_apply(
         let snap = db.snapshot();
         let mut phantom = (*snap).clone();
         apply_items(&mut phantom, &items, &names_in_doc, &mut diff, &now, prune);
+    }
+
+    // The server holds its own snapshot; without this the apply is invisible
+    // to `GET /api/providers` until it is restarted.
+    if !dry_run {
+        reload_running_server(db).await;
     }
 
     let summary = diff.summary();

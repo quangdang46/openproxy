@@ -451,6 +451,20 @@ async fn main() -> anyhow::Result<()> {
     let bound = listener.local_addr().ok();
     let bound_port = bound.map(|a| a.port()).unwrap_or(cli.port);
 
+    // Record where we actually bound. `server start` wrote this itself, but
+    // the bare `openproxy` / `openproxy --port N` path — the one the README
+    // documents — never did, so `read_endpoint` returned `None` and every
+    // CLI command that resolves the server from the sidecar fell back to
+    // `http://127.0.0.1:4623`. On a non-default port that is the wrong server
+    // entirely, which is how a CLI write could land in the right database
+    // while `POST /api/db/reload` went to a different process. Write it at the
+    // bind site so every launch path records it.
+    if let Err(e) =
+        openproxy::cli::server::write_endpoint(&state.db.data_dir, &cli.host, bound_port)
+    {
+        tracing::warn!(error = %e, "could not write endpoint sidecar");
+    }
+
     // Resume tunnel/tailscale if settings say they were enabled last session.
     // Process supervision lives in Rust — not the browser tab.
     openproxy::server::api::quota_auto_ping::spawn_boot_resume(state.clone(), bound_port);

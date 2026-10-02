@@ -82,7 +82,7 @@ fn write_pid(data_dir: &Path, pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_endpoint(data_dir: &Path, host: &str, port: u16) -> anyhow::Result<()> {
+pub fn write_endpoint(data_dir: &Path, host: &str, port: u16) -> anyhow::Result<()> {
     std::fs::write(data_dir.join(PORT_FILE), format!("{host}:{port}"))
         .with_context(|| format!("write endpoint file in {}", data_dir.display()))?;
     Ok(())

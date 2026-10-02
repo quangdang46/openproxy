@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::cli::apply::{into_items, load_document, ApplyDiff};
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
+use crate::cli::runtime::reload_running_server;
 use crate::db::Db;
 use crate::types::ProxyPool;
 
@@ -143,6 +144,9 @@ async fn run_edit(
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
     let pool = updated.expect("pool existed");
     if ctx.is_robot() {
         emit_robot("openproxy.v1.pool.edit", serde_json::to_value(&pool)?)?;
@@ -168,6 +172,9 @@ async fn run_set_active(db: &Db, ctx: OutputCtx, name: &str, active: bool) -> an
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
     let schema = if active {
         "openproxy.v1.pool.enable"
     } else {
@@ -240,6 +247,9 @@ async fn run_test(db: &Db, ctx: OutputCtx, name: &str, target: &str) -> anyhow::
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let payload = json!({
         "name": pool.name,
@@ -410,6 +420,13 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
         }
     })
     .await?;
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
+
+    // The server holds its own snapshot; without this the write is invisible
+    // to `GET /api/<resource>` until it is restarted.
+    reload_running_server(db).await;
 
     let summary = diff.summary();
     if ctx.is_robot() {

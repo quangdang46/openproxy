@@ -166,6 +166,42 @@ impl Runtime {
         decode_json(res).await
     }
 
+    /// Build a runtime client from a data dir alone, for the local-DB write
+    /// commands that never see a `ResolvedConfig`.
+    ///
+    /// Used by `reload_running_server`, which only needs to poke the local
+    /// server — never a `--url` override. Kept separate from
+    /// [`Runtime::from_config`] so those commands stay free of config
+    /// plumbing.
+    async fn from_data_dir(db: &Db) -> anyhow::Result<Self> {
+        let base_url = match read_endpoint(&db.data_dir) {
+            Some((host, port)) => {
+                let dial_host = if host == "0.0.0.0" || host == "::" || host.is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    host
+                };
+                format!("http://{dial_host}:{port}")
+            }
+            None => format!("http://127.0.0.1:{DEFAULT_LOCAL_PORT}"),
+        };
+        let api_key = db
+            .snapshot()
+            .api_keys
+            .iter()
+            .find(|k| k.is_active())
+            .map(|k| k.key.clone());
+        let client = Client::builder()
+            .timeout(HEALTH_TIMEOUT)
+            .build()
+            .context("build runtime http client")?;
+        Ok(Self {
+            client,
+            base_url,
+            api_key,
+        })
+    }
+
     /// PUT a JSON body and decode the JSON response.
     pub async fn put_json(&self, path: &str, body: &Value) -> Result<Value, RuntimeError> {
         let res = self
@@ -615,6 +651,35 @@ pub async fn require_runtime(cfg: &ResolvedConfig) -> Result<Runtime, RuntimeErr
         .map_err(|e| RuntimeError::Network(e.to_string()))?;
     rt.ensure_alive().await?;
     Ok(rt)
+}
+
+/// Ask the *running* server to re-read SQLite into its in-memory snapshot.
+///
+/// The `*_apply` commands and `provider models alias set/unset` write through
+/// `Db::update`, which lands in SQLite. A running server holds its own
+/// `ArcSwap` `AppDb` and only re-reads on the paths that already call
+/// `reload_snapshot()` (auth, the OAuth device poll, the chat dispatcher), so
+/// without this the CLI reports success while `GET /api/providers` — and the
+/// dashboard — keep serving the pre-write list until the server restarts.
+///
+/// Best-effort by design: the write has already committed to SQLite, so a
+/// server that is down, or a reload that fails, must not turn a successful
+/// apply into a failed one. The caller logs and carries on.
+pub async fn reload_running_server(db: &Db) {
+    let rt = match Runtime::from_data_dir(db).await {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not build runtime to reload server snapshot");
+            return;
+        }
+    };
+    match rt.post_empty("/api/db/reload").await {
+        Ok(_) => tracing::debug!("reloaded running server snapshot after local DB write"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "running server did not reload its snapshot; restart it to see the change"
+        ),
+    }
 }
 
 #[cfg(test)]
