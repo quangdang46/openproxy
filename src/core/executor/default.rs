@@ -1728,6 +1728,18 @@ impl DefaultExecutor {
             return Ok(format!("{}?beta=true", self.config.base_url));
         }
 
+        // An operator-configured `baseUrl` overrides the provider's baked-in
+        // default. It used to be honoured only for `openai-compatible` /
+        // `anthropic-compatible` *nodes*, so a plain provider connection pointed
+        // at a self-hosted gateway, a mock, or a corporate proxy was still
+        // dialled at the hardcoded origin with the user's key attached — the same
+        // class of bug the embedding adapters had. `runtime_transport.baseUrl`
+        // and the region/template branches above still win, since they carry
+        // path or host logic this override does not.
+        if let Some(base) = compatible_value(credentials.provider_specific_data.get("baseUrl")) {
+            return Ok(base.to_string());
+        }
+
         Ok(self.config.base_url.clone())
     }
 
@@ -3664,6 +3676,47 @@ mod tests {
     }
 
     #[test]
+    /// A plain provider connection carries its endpoint override in
+    /// `provider_specific_data["baseUrl"]`, but `build_url` only consulted that
+    /// for `openai-compatible` / `anthropic-compatible` *nodes* — so a
+    /// connection pointed at a self-hosted gateway, a mock, or a corporate proxy
+    /// was still dialled at the provider's hardcoded origin with the user's key
+    /// attached. The media and TTS paths already honoured the same field.
+    #[test]
+    fn configured_base_url_overrides_the_provider_default() {
+        let mut creds = ProviderConnection::default();
+        creds.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://127.0.0.1:45997/v1"),
+        );
+        let executor = DefaultExecutor::new(
+            "openai".to_string(),
+            std::sync::Arc::new(crate::core::executor::ClientPool::new()),
+            None,
+        )
+        .expect("openai executor");
+        let url = executor.build_url("mock", false, &creds).unwrap();
+        assert_eq!(
+            url, "http://127.0.0.1:45997/v1",
+            "configured baseUrl must win over the provider default"
+        );
+    }
+
+    /// Without the override the provider's own default still applies.
+    #[test]
+    fn provider_default_applies_when_no_base_url_is_configured() {
+        let executor = DefaultExecutor::new(
+            "openai".to_string(),
+            std::sync::Arc::new(crate::core::executor::ClientPool::new()),
+            None,
+        )
+        .expect("openai executor");
+        let url = executor
+            .build_url("mock", false, &ProviderConnection::default())
+            .unwrap();
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
     fn test_default_opencode_go_base_url() {
         // 9router parity: opencode-go base URL must include the /go segment
         // (JS open-sse/executors/opencode-go.js BASE = "https://opencode.ai/zen/go/v1").
