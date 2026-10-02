@@ -868,8 +868,44 @@ async fn generic_media_handler(
         return json_error_response(StatusCode::BAD_REQUEST, "Missing model");
     };
 
+    // `body["provider"]` is authoritative when present. The CLI's
+    // `media image generate --provider X` / `media embed --provider X` /
+    // `media search --provider X` send it, and the dashboard's media skills
+    // build `provider/model` model strings — but the two disagree the moment a
+    // provider has more than one connection, because `get_model_info` resolves
+    // the provider purely from the model string and then
+    // `select_media_connections` picks the first active one. That is how
+    // `media image generate --provider MockFalImage` ended up sending
+    // `MockOpenAIEmb`'s API key to fal.ai: the caller named the account, the
+    // server ignored the name and used whichever connection sorted first.
+    //
+    // Only a bare model name (no `/`) is left to the model-string path — that
+    // is the alias/lookup shape, and it has no provider to honour.
+    let explicit_provider = body
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
     let snapshot = state.db.snapshot();
-    let resolved = get_model_info(model_str, &snapshot);
+    let resolved = match explicit_provider {
+        Some(provider) if !model_str.contains('/') => {
+            // A connection *name* has to become its provider id: the executor
+            // dispatches on the id, so passing the display name through fails
+            // with `UnsupportedProvider("<display name>")`. An id is already the
+            // right value and is left alone.
+            let provider_id = snapshot
+                .provider_connections
+                .iter()
+                .find(|c| c.name.as_deref().map(str::trim) == Some(provider))
+                .map(|c| c.provider.clone())
+                .unwrap_or_else(|| provider.to_string());
+            let mut resolved = get_model_info(model_str, &snapshot);
+            resolved.provider = Some(provider_id);
+            resolved
+        }
+        _ => get_model_info(model_str, &snapshot),
+    };
 
     match resolved.route_kind {
         ModelRouteKind::Combo if combo_expands(route_kind) => {
@@ -1234,7 +1270,14 @@ fn select_media_connections(
         .provider_connections
         .iter()
         .filter(|connection| {
-            connection.provider == provider
+            // Match on either the provider id or the connection's display
+            // name: `media image generate --provider <name>` names an account,
+            // and a provider id would silently select whichever account sorted
+            // first. An exact provider-id match still wins when both are
+            // present, so the id form is unchanged.
+            let matches = connection.provider == provider
+                || connection.name.as_deref().map(str::trim) == Some(provider);
+            matches
                 && connection.is_active()
                 && connection_has_credentials(connection)
                 && !crate::core::account_fallback::is_account_unavailable(connection, now)
