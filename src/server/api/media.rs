@@ -9,7 +9,7 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
-use crate::core::model::{get_model_info, ModelRouteKind};
+use crate::core::model::{get_model_info, ModelRouteKind, ResolvedModel};
 use crate::core::proxy::resolve_proxy_target;
 use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
@@ -879,8 +879,14 @@ async fn generic_media_handler(
     // `MockOpenAIEmb`'s API key to fal.ai: the caller named the account, the
     // server ignored the name and used whichever connection sorted first.
     //
-    // Only a bare model name (no `/`) is left to the model-string path — that
-    // is the alias/lookup shape, and it has no provider to honour.
+    // Presence of the field is the signal, not the model's shape. The
+    // dashboard's media skills build `provider/model` strings and send no
+    // `provider` field at all, so they keep resolving through the model string;
+    // the CLI is the only caller that names a provider explicitly, and it wins.
+    // (An earlier revision also required the model to carry no `/`, which
+    // silently skipped the override for `media search` — that command sends
+    // `<provider>/search` as the model precisely so `parse_model` resolves the
+    // provider.)
     let explicit_provider = body
         .get("provider")
         .and_then(Value::as_str)
@@ -889,7 +895,7 @@ async fn generic_media_handler(
 
     let snapshot = state.db.snapshot();
     let resolved = match explicit_provider {
-        Some(provider) if !model_str.contains('/') => {
+        Some(provider) => {
             // A connection *name* has to become its provider id: the executor
             // dispatches on the id, so passing the display name through fails
             // with `UnsupportedProvider("<display name>")`. An id is already the
@@ -900,11 +906,23 @@ async fn generic_media_handler(
                 .find(|c| c.name.as_deref().map(str::trim) == Some(provider))
                 .map(|c| c.provider.clone())
                 .unwrap_or_else(|| provider.to_string());
-            let mut resolved = get_model_info(model_str, &snapshot);
-            resolved.provider = Some(provider_id);
-            resolved
+            // The CLI echoes the provider back as the model's `<provider>/…`
+            // prefix; drop it so the upstream model name is the bare id.
+            let bare_model = model_str
+                .strip_prefix(&format!("{provider}/"))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    crate::core::model::parse_model(model_str)
+                        .model
+                        .unwrap_or_else(|| model_str.to_string())
+                });
+            ResolvedModel {
+                provider: Some(provider_id),
+                model: bare_model,
+                route_kind: ModelRouteKind::Direct,
+            }
         }
-        _ => get_model_info(model_str, &snapshot),
+        None => get_model_info(model_str, &snapshot),
     };
 
     match resolved.route_kind {

@@ -169,8 +169,48 @@ pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = OpenAiCompatAdapter {
 
 #[async_trait]
 impl EmbeddingAdapter for OpenAiCompatAdapter {
-    fn build_url(&self, _: &EmbeddingRequest<'_>) -> Result<String, String> {
-        Ok(self.endpoint.to_string())
+    /// A connection-level `baseUrl` overrides the baked-in endpoint.
+    ///
+    /// `self.endpoint` is a compile-time constant, so a provider configured to
+    /// point somewhere else — a self-hosted OpenAI-compatible gateway, a mock,
+    /// a corporate proxy — was still dialled at `api.openai.com` with the
+    /// user's key attached. That is both a broken configuration and a
+    /// credential-disclosure path. `tts/openai.rs` has always honoured
+    /// `baseUrl`; this brings the embedding adapters in line.
+    ///
+    /// The stored value is a base, not a full endpoint, so the adapter's own
+    /// path suffix is reapplied. An explicit `/embeddings` on the configured
+    /// value is tolerated rather than doubled.
+    fn build_url(&self, request: &EmbeddingRequest<'_>) -> Result<String, String> {
+        let Some(configured) = request
+            .credentials
+            .provider_specific_data
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(self.endpoint.to_string());
+        };
+        let base = configured.trim_end_matches('/');
+        if base.ends_with("/embeddings") {
+            return Ok(base.to_string());
+        }
+        // The baked-in endpoints carry the API prefix (`/v1/embeddings`), so
+        // reattach the suffix the connection's base URL left off.
+        let suffix = self
+            .endpoint
+            .strip_prefix("https://api.openai.com/v1")
+            .map(|rest| rest.to_string())
+            .unwrap_or_else(|| {
+                // Non-OpenAI providers bake in a different origin; keep their
+                // path and only swap the origin for the configured one.
+                self.endpoint
+                    .split_once("/v1")
+                    .map(|(_, rest)| format!("/v1{rest}"))
+                    .unwrap_or_else(|| "/embeddings".to_string())
+            });
+        Ok(format!("{base}{suffix}"))
     }
 
     fn build_headers(&self, request: &EmbeddingRequest<'_>) -> Result<HeaderMap, String> {
@@ -427,6 +467,46 @@ mod tests {
         };
         let url = OPENAI.build_url(&req).unwrap();
         assert_eq!(url, "https://api.openai.com/v1/embeddings");
+    }
+
+    /// The plain OpenAI adapter used to return its compile-time `endpoint`
+    /// unconditionally, so a connection configured with a `baseUrl` — a
+    /// self-hosted OpenAI-compatible gateway, a mock, a corporate proxy — was
+    /// still dialled at `api.openai.com` with the user's key attached. That is
+    /// both a broken configuration and a credential-disclosure path.
+    #[test]
+    fn openai_compat_honours_a_configured_base_url() {
+        let body = json!({"input": "hello"});
+        let mut creds = ProviderConnection::default();
+        creds
+            .provider_specific_data
+            .insert("baseUrl".to_string(), json!("http://127.0.0.1:45998/v1"));
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "text-embedding-3-small",
+            credentials: &creds,
+        };
+        let url = OPENAI.build_url(&req).unwrap();
+        assert_eq!(url, "http://127.0.0.1:45998/v1/embeddings");
+    }
+
+    /// A configured base that already carries the path suffix must not get it
+    /// doubled.
+    #[test]
+    fn openai_compat_tolerates_a_base_url_that_already_has_the_suffix() {
+        let body = json!({"input": "hello"});
+        let mut creds = ProviderConnection::default();
+        creds.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            json!("http://127.0.0.1:45998/v1/embeddings"),
+        );
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "text-embedding-3-small",
+            credentials: &creds,
+        };
+        let url = OPENAI.build_url(&req).unwrap();
+        assert_eq!(url, "http://127.0.0.1:45998/v1/embeddings");
     }
 
     #[test]

@@ -263,6 +263,21 @@ pub async fn handle_search_completions(
         .or_else(|| provider_field.and_then(resolve_search_provider))
         .unwrap_or("serper");
 
+    // A connection *name* has to become its provider id before dispatch: the
+    // search registry is keyed by id, so a display name fails with
+    // `UnsupportedProvider("<name>")`. `media search --provider <name>` names an
+    // account, and silently falling through to the default ("serper") would
+    // send the request to a provider the operator never asked for.
+    let provider = state
+        .db
+        .snapshot()
+        .provider_connections
+        .iter()
+        .find(|c| c.name.as_deref().map(str::trim) == Some(provider))
+        .map(|c| c.provider.clone())
+        .unwrap_or_else(|| provider.to_string());
+    let provider = provider.as_str();
+
     // -- Extract query --
     let query = match extract_query(&body) {
         Some(q) => q,

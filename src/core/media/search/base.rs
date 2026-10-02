@@ -701,13 +701,41 @@ pub async fn fetch_public(
 /// accepted (private/loopback/metadata addresses rejected). The provider's own
 /// configured baseUrl is trusted as-is (admin-controlled).
 pub fn resolve_base_url(default: &str, request: &SearchRequest<'_>) -> Result<String, String> {
-    if let Some(override_url) = get_provider_setting(request, "baseUrl") {
-        // SSRF guard: client-supplied base URLs must be public http(s) only.
+    // Two different sources, two different trust levels.
+    //
+    // `provider_options` arrives in the caller's request body — that is
+    // untrusted, so it is SSRF-checked. `provider_specific_data` is the
+    // operator's own saved connection config and is trusted as-is; running the
+    // guard over it as well contradicts this function's own doc comment and
+    // made a self-hosted search provider impossible to configure at all —
+    // searxng's documented default is `http://localhost:8888/search`, which
+    // `assert_public_url` rejects as an internal host. `get_provider_setting`
+    // preferred `provider_options` when both were set, so the single lookup
+    // could not tell them apart.
+    let client_override = request
+        .provider_options
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(override_url) = client_override {
         assert_public_url(&override_url)?;
-        Ok(override_url.trim_end_matches('/').to_string())
-    } else {
-        Ok(default.trim_end_matches('/').to_string())
+        return Ok(override_url.trim_end_matches('/').to_string());
     }
+
+    if let Some(configured) = request
+        .provider_specific_data
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(configured.trim_end_matches('/').to_string());
+    }
+
+    Ok(default.trim_end_matches('/').to_string())
 }
 
 /// Build a unified [`SearchResult`].
@@ -886,6 +914,41 @@ mod tests {
     #[test]
     fn resolve_base_url_uses_override_when_provided() {
         let mut req = make_request("test");
+        req.provider_options.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("https://custom.api.com/search"),
+        );
+        let url = resolve_base_url("https://api.example.com/v1", &req).unwrap();
+        assert_eq!(url, "https://custom.api.com/search");
+    }
+
+    /// The operator's own saved `baseUrl` is admin-controlled and must be
+    /// honoured even when it points at a loopback address. searxng's documented
+    /// default is `http://localhost:8888/search`; running the SSRF guard over the
+    /// configured value made a self-hosted search provider impossible to
+    /// configure at all.
+    #[test]
+    fn resolve_base_url_trusts_the_operators_own_loopback_base_url() {
+        let mut req = make_request("test");
+        req.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://127.0.0.1:8888/search"),
+        );
+        let url = resolve_base_url("https://api.example.com/v1", &req).unwrap();
+        assert_eq!(url, "http://127.0.0.1:8888/search");
+    }
+
+    /// A client-supplied override wins over the operator's own `baseUrl`, so the
+    /// two are never conflated. `assert_public_url` is stubbed in test mode
+    /// (see the note above), so this pins the *selection* — the property that
+    /// actually matters — rather than the guard's verdict.
+    #[test]
+    fn resolve_base_url_prefers_the_client_override_over_the_configured_one() {
+        let mut req = make_request("test");
+        req.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://127.0.0.1:8888/search"),
+        );
         req.provider_options.insert(
             "baseUrl".to_string(),
             serde_json::json!("https://custom.api.com/search"),

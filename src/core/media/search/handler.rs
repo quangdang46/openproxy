@@ -117,7 +117,22 @@ async fn fetch_upstream_body(
     // the admin default was never the bypass). Note the plain path below
     // inherits the caller's redirect policy — only the client-supplied
     // override path is redirect-hardened.
-    let res = if get_provider_setting(request, "baseUrl").is_some() {
+    // Only a *client-supplied* override is re-validated. `get_provider_setting`
+    // prefers `provider_options` over `provider_specific_data`, so asking it
+    // here treated the operator's own saved `baseUrl` as untrusted input and
+    // ran the DNS-resolving SSRF check over it — which rejects searxng's
+    // documented `http://localhost:8888/search` default and made a self-hosted
+    // search provider impossible to configure. The two sources are checked
+    // explicitly so the admin's config keeps the plain path.
+    let client_override = request
+        .provider_options
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+
+    let res = if client_override {
         fetch_public(
             client,
             provider.method(),
