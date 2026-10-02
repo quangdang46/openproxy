@@ -144,6 +144,14 @@ pub(super) async fn import_provider_models(
         }
     }
 
+    // A failed fetch is NOT a successful sync. This used to answer
+    // `{"imported": 0, "skipped": <existing rows>, "total": <existing rows>}`,
+    // which reads as "I looked upstream and found nothing new" when the upstream
+    // was never reached at all. The operator then believes the catalog is
+    // current while it has drifted from the provider — the dashboard keeps
+    // offering models the provider no longer serves, and the real cause is
+    // invisible. Report the failure, and say plainly how many rows are merely
+    // local.
     let Ok(payload) = fetch_provider_models_response(&state, &connection).await else {
         let snapshot = state.db.snapshot();
         let existing = snapshot
@@ -155,8 +163,11 @@ pub(super) async fn import_provider_models(
             "provider": provider,
             "connectionId": connection.id,
             "imported": 0,
-            "skipped": existing,
-            "total": existing,
+            "skipped": 0,
+            "total": 0,
+            "synced": false,
+            "localRows": existing,
+            "error": "Could not reach the upstream model listing; the local catalog was left unchanged",
         }))
         .into_response();
     };
@@ -334,6 +345,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "openai"
                 | "openrouter"
                 | "opencode-zen"
+                | "opencode-go"
                 | "alicode"
                 | "alicode-intl"
                 | "volcengine-ark"
@@ -512,7 +524,11 @@ async fn fetch_provider_models_response(
         "openrouter" => {
             fetch_openrouter_models(connection, "https://openrouter.ai/api/v1/models").await
         }
-        "opencode-zen" => {
+        // opencode-go and opencode-zen are the same upstream (`/zen/v1`), just
+        // different plans. opencode-go was missing here entirely, so its
+        // connection reported "does not support models listing" and
+        // `import-models` silently no-opped on its catalog.
+        "opencode-zen" | "opencode-go" => {
             fetch_public_openai_style_models(connection, "https://opencode.ai/zen/v1/models").await
         }
         "alicode" => {
@@ -2127,6 +2143,12 @@ mod tests {
     #[test]
     fn supports_models_discovery_covers_builtin_and_compatible_providers() {
         assert!(supports_models_discovery("opencode-zen"));
+        // opencode-go and opencode-zen are the same upstream (/zen/v1) on
+        // different plans. opencode-go was missing here, so its connection
+        // answered "does not support models listing" and `import-models`
+        // silently no-opped on its catalog — the dashboard kept offering a
+        // stale model list while the provider had moved on.
+        assert!(supports_models_discovery("opencode-go"));
         assert!(supports_models_discovery("nvidia"));
         assert!(supports_models_discovery("openrouter"));
         assert!(supports_models_discovery("kilocode"));
