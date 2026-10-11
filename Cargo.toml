@@ -115,7 +115,7 @@ x509-parser = "0.16"
 aes = "0.8"
 cbc = "0.1"
 # AES-GCM (authenticated encryption) — new credential cipher (H20)
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # Argon2id KDF — credential key derivation (H20)
 argon2 = "0.5"
 md-5 = "0.10"
