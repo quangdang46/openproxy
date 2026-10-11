@@ -128,7 +128,7 @@ whoami = "2"
 # CLI: file system watcher for hot-reload of db.json from CLI writes
 notify = "8"
 # CLI: cross-platform user config directory resolution
-directories = "5"
+directories = "6"
 
 # Embedded web dashboard (Astro static output) + cross-platform browser-open.
 # `compression` requires the rust-embed `folder` to be a relative path at the
