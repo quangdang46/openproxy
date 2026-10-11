@@ -21,7 +21,7 @@
     "@astrojs/tailwind": "^6.0.2",
     "@monaco-editor/react": "^4.7.0",
     "@xyflow/react": "^12.11.3",
-    "astro": "^5.18.1",
+    "astro": "^5.18.2",
     "bcryptjs": "^3.0.3",
     "confbox": "^0.2.4",
     "express": "^5.2.1",
