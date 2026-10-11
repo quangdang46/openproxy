@@ -43,7 +43,7 @@
     "react-is": "^19.2.7",
     "recharts": "^3.7.0",
     "selfsigned": "^5.5.0",
-    "socks-proxy-agent": "^10.0.0",
+    "socks-proxy-agent": "^10.1.0",
     "sql.js": "^1.14.1",
     "undici": "^7.19.2",
     "uuid": "^14.0.2",
