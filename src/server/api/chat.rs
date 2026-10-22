@@ -1744,6 +1744,40 @@ fn client_raw_header_map(
         .unwrap_or_default()
 }
 
+/// The error a deprecated provider's connection cannot be served with, if any.
+///
+/// `qwen` is the deprecated alias of `alims-intl`: upstream 9router retired the
+/// standalone provider (`accf2c5`, 2026-09-10) because its API-key transport
+/// duplicated `alims-intl` exactly, after the Qwen OAuth flow had already died
+/// upstream (`dcdd4628b`, 2026-08-05). openproxy keeps the id routable, so a
+/// Qwen **API-key** connection now rides the `alims-intl` DashScope transport.
+///
+/// A Qwen **OAuth** connection is different: it holds a portal.qwen.ai token,
+/// not a DashScope API key, so there is no upstream that can serve it. Report
+/// that as a client-side configuration error instead of letting the token fail
+/// as an opaque 401 against DashScope.
+fn deprecated_provider_error(
+    provider: &str,
+    connection: &ProviderConnection,
+) -> Option<ComboAttemptError> {
+    if provider != "qwen" {
+        return None;
+    }
+    let has_api_key = connection
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty());
+    if has_api_key {
+        return None;
+    }
+    Some(ComboAttemptError::new(
+        400,
+        "Provider 'qwen' OAuth is no longer supported upstream. Supply a \
+         DashScope API key under provider 'alims-intl' instead.",
+    ))
+}
+
 async fn forward_with_provider_fallback(
     state: &AppState,
     provider: &str,
@@ -2038,10 +2072,9 @@ async fn forward_with_provider_fallback(
             KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
             OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
             PerplexityWebExecutionRequest, PerplexityWebExecutor, ProviderExecutionRequest,
-            ProviderExecutor, QoderExecutionRequest, QoderExecutor, QwenExecutionRequest,
-            QwenExecutor, TraeExecutionRequest, TraeExecutor, VertexExecutionRequest,
-            VertexExecutor, WindsurfExecutionRequest, WindsurfExecutor, XaiExecutionRequest,
-            XaiExecutor,
+            ProviderExecutor, QoderExecutionRequest, QoderExecutor, TraeExecutionRequest,
+            TraeExecutor, VertexExecutionRequest, VertexExecutor, WindsurfExecutionRequest,
+            WindsurfExecutor, XaiExecutionRequest, XaiExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -2080,6 +2113,8 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if let Some(error) = deprecated_provider_error(provider, &connection) {
+                Err(error)
             } else if provider == "kiro" {
                 let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
@@ -2243,36 +2278,6 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("Azure execution failed: {}", e),
-                        retry_after: None,
-                        upstream_body: None,
-                    })?;
-                Ok(KiroExecutorResponse {
-                    response: result.response,
-                    url: result.url,
-                    headers: result.headers,
-                    transformed_body: result.transformed_body,
-                    transport: result.transport,
-                })
-            } else if provider == "qwen" {
-                let executor = QwenExecutor::new(state.client_pool.clone(), provider_node)
-                    .map_err(|e| ComboAttemptError {
-                        status: 500,
-                        message: format!("Qwen executor creation failed: {}", e),
-                        retry_after: None,
-                        upstream_body: None,
-                    })?;
-                let result = executor
-                    .execute_request(QwenExecutionRequest {
-                        model: model.to_string(),
-                        body: request_body.clone(),
-                        stream,
-                        credentials: connection.clone(),
-                        proxy,
-                    })
-                    .await
-                    .map_err(|e| ComboAttemptError {
-                        status: 500,
-                        message: format!("Qwen execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -6684,8 +6689,8 @@ mod tests {
 
     use super::{
         build_dashboard_sse_response, build_proxied_response, check_fallback_error,
-        cooling_down_last_error, earliest_retry_after, is_no_auth_provider, is_tts_request,
-        select_connection,
+        cooling_down_last_error, deprecated_provider_error, earliest_retry_after,
+        is_no_auth_provider, is_tts_request, select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -6728,6 +6733,48 @@ mod tests {
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn deprecated_qwen_oauth_connection_is_rejected_with_an_actionable_error() {
+        // A Qwen OAuth connection holds a portal.qwen.ai token, not a DashScope
+        // API key, so it cannot ride the `alims-intl` transport the API-key
+        // path now uses. It must fail as a client-side configuration error
+        // naming the replacement, not as an opaque 401 from DashScope.
+        let mut conn = connection("qwen-oauth", 1);
+        conn.provider = "qwen".into();
+        conn.api_key = None;
+        conn.access_token = Some("portal-token".into());
+
+        let error = deprecated_provider_error("qwen", &conn)
+            .expect("a Qwen OAuth connection must be rejected");
+        assert_eq!(error.status, 400);
+        assert!(
+            error.message.contains("alims-intl"),
+            "the error must name the replacement provider, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn deprecated_qwen_api_key_connection_is_served() {
+        // A Qwen API-key connection keeps working — it rides the `alims-intl`
+        // DashScope transport, which is what the deprecation converges on.
+        let mut conn = connection("qwen-apikey", 1);
+        conn.provider = "qwen".into();
+        conn.api_key = Some("sk-dashscope".into());
+
+        assert!(deprecated_provider_error("qwen", &conn).is_none());
+    }
+
+    #[test]
+    fn other_providers_are_never_rejected_as_deprecated() {
+        let mut conn = connection("claude", 1);
+        conn.provider = "claude".into();
+        conn.api_key = None;
+
+        assert!(deprecated_provider_error("claude", &conn).is_none());
+        assert!(deprecated_provider_error("alims-intl", &conn).is_none());
     }
 
     #[test]

@@ -85,9 +85,12 @@ fn test_refresh_lead_iflow_is_1_day() {
 }
 
 #[test]
-fn test_refresh_lead_qwen_is_20_minutes() {
+fn test_refresh_lead_qwen_is_gone_with_the_retired_oauth_flow() {
+    // Upstream 9router dropped the standalone `qwen` provider (`accf2c5`,
+    // 2026-09-10) after the Qwen OAuth flow died upstream (`dcdd4628b`), so
+    // there is no Qwen token to refresh any more.
     let lead = crate::core::config::app_constants::refresh_lead("qwen");
-    assert_eq!(lead, Some(Duration::from_secs(20 * 60)));
+    assert_eq!(lead, None);
 }
 
 #[test]

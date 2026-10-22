@@ -171,20 +171,6 @@ pub fn kiro() -> OAuthProviderConfig {
     }
 }
 
-/// Qwen — device-code flow (authorize_url is the device-code endpoint).
-pub fn qwen() -> OAuthProviderConfig {
-    OAuthProviderConfig {
-        id: "qwen",
-        client_id: "f0304373b74a44d2b584a3fb70ca9e56",
-        authorize_url: "https://chat.qwen.ai/api/v1/oauth2/device/code",
-        token_url: "https://chat.qwen.ai/api/v1/oauth2/token",
-        scopes: &["openid", "profile", "email", "model.completion"],
-        uses_pkce: false,
-        extra_params: &[],
-        refresh_lead_ms: 0,
-    }
-}
-
 /// iflow — standard OAuth with client_secret (no PKCE).
 pub fn iflow() -> OAuthProviderConfig {
     OAuthProviderConfig {
@@ -570,7 +556,6 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "codex" => Some(codex()),
         "github" => Some(github()),
         "kiro" => Some(kiro()),
-        "qwen" => Some(qwen()),
         "iflow" => Some(iflow()),
         "kimi" => Some(kimi()),
         "kimi-coding" => Some(kimi_coding()),
@@ -635,7 +620,6 @@ mod device_code_registry {
             "codebuddy-intl",
             "qoder",
             "grok-cli",
-            "qwen",
         ] {
             assert!(
                 get_config(provider).is_some(),

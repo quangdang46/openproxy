@@ -165,7 +165,6 @@ pub const REFRESH_LEAD_CODEX_MS: u64 = 5 * 24 * 60 * 60 * 1000; // 5 days
 pub const REFRESH_LEAD_OPENAI_MS: u64 = 5 * 24 * 60 * 60 * 1000; // 5 days
 pub const REFRESH_LEAD_CLAUDE_MS: u64 = 4 * 60 * 60 * 1000; // 4 hours
 pub const REFRESH_LEAD_IFLOW_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
-pub const REFRESH_LEAD_QWEN_MS: u64 = 20 * 60 * 1000; // 20 minutes
 pub const REFRESH_LEAD_KIMI_CODING_MS: u64 = 5 * 60 * 1000; // 5 minutes
 pub const REFRESH_LEAD_ANTIGRAVITY_MS: u64 = 5 * 60 * 1000; // 5 minutes
 pub const REFRESH_LEAD_XAI_MS: u64 = 5 * 60 * 1000; // 5 minutes
@@ -192,9 +191,6 @@ const ANTIGRAVITY_CLIENT_ID: &str =
 
 const IFLOW_CLIENT_ID: &str = "10009311001";
 const IFLOW_TOKEN_URL: &str = "https://iflow.cn/oauth/token";
-
-const QWEN_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";
-const QWEN_TOKEN_URL: &str = "https://chat.qwen.ai/api/v1/oauth2/token";
 
 const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 
@@ -455,32 +451,6 @@ pub async fn refresh_google_token(
         ],
     )
     .await
-}
-
-/// Refresh a Qwen access token.
-pub async fn refresh_qwen_token(refresh_token: &str) -> Result<RefreshResult, String> {
-    refresh_form_token(
-        &qwen_token_url(),
-        vec![
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", QWEN_CLIENT_ID),
-        ],
-    )
-    .await
-}
-
-/// Resolve the qwen token URL (allows env-override).
-///
-/// The env seam exists because `QwenExecutor` is the only executor that hands
-/// the dispatch loop a raw upstream 401, and the loop's 401 refresh arm is
-/// otherwise unobservable from a test: without it a refresh would call the real
-/// Qwen IdP. `codex_token_url` is the same seam for the same reason.
-fn qwen_token_url() -> String {
-    std::env::var("OPENPROXY_QWEN_TOKEN_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| QWEN_TOKEN_URL.to_string())
 }
 
 /// Refresh an iFlow access token (uses Basic Auth).
@@ -1145,14 +1115,6 @@ pub async fn dispatch_oauth_refresh(
             })
             .await
         }
-        "qwen" => {
-            let rt = refresh_token.to_string();
-            dedup_refresh(provider, refresh_token, move || {
-                let rt = rt.clone();
-                async move { refresh_qwen_token(&rt).await }
-            })
-            .await
-        }
         "xai" => {
             let rt = refresh_token.to_string();
             dedup_refresh(provider, refresh_token, move || {
@@ -1470,31 +1432,6 @@ mod tests {
         assert_eq!(body["refreshToken"], serde_json::json!("cline-old"));
         assert_eq!(body["grantType"], serde_json::json!("refresh_token"));
         assert_eq!(body["clientType"], serde_json::json!("extension"));
-    }
-
-    #[test]
-    fn qwen_token_url_prefers_the_env_override() {
-        // One test does the whole set/assert/restore cycle rather than splitting
-        // it across cases: the variable is process-global and the lib test
-        // binary runs tests in parallel, so a second reader would be a flake.
-        let previous = std::env::var("OPENPROXY_QWEN_TOKEN_URL").ok();
-        let restore = || match previous.clone() {
-            Some(value) => std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", value),
-            None => std::env::remove_var("OPENPROXY_QWEN_TOKEN_URL"),
-        };
-
-        std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", "http://127.0.0.1:1/mock-token");
-        assert_eq!(qwen_token_url(), "http://127.0.0.1:1/mock-token");
-
-        // Blank is not a URL: falling back to the constant beats posting the
-        // refresh at an empty host.
-        std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", "   ");
-        assert_eq!(qwen_token_url(), QWEN_TOKEN_URL);
-
-        std::env::remove_var("OPENPROXY_QWEN_TOKEN_URL");
-        assert_eq!(qwen_token_url(), QWEN_TOKEN_URL);
-
-        restore();
     }
 
     #[test]

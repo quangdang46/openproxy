@@ -72,6 +72,7 @@ Decision logs: `target: openproxy::chat|translator|combo|fusion|github`.
 | **Provider enable/disable rollback** | 9router flips the toggle optimistically (`providers/page.js:227-229`) and then fires the PUTs under `Promise.allSettled` (`:230`) **without ever inspecting the results** — `allSettled` resolves on both fulfil and reject, so a failed PUT leaves the UI showing a provider as enabled that the server never enabled, with no message. OpenProxy keeps the same optimistic flip but collects failures, rolls those rows back (`ProvidersPageClient.tsx:373-377`), and reports them. This is a case where copying 9router byte-for-byte would import a silent state divergence, so the divergence is intentional. |
 | **Simulation ("mock") engine is off by default** | 9router ships the mock executor as a live, runtime-selectable mode. OpenProxy keeps the code (`src/core/simulation/`, ~3.2k lines) but gates it behind a cargo feature that is **not** in the default set, so `cargo build`, `cargo install` and every release binary can never simulate — not via `OPENPROXY_DEV_MOCK`, not via the stored `devMockAll` setting, not via a `sim-stub-` connection id, not via an `x-openproxy-sim: mock` header. The reason is a live inconsistency, not tidiness: `/v1/models` advertises the real provider catalog, while the simulator only knows its own built-in list (`gpt-4o`, `claude-sonnet-4-6`), so with mock reachable every advertised id 404'd at the simulator — the one configuration where a listed model routes nowhere. One routing path is worth more than a second one. Rebuild with `--features simulation` to get the engine back; its tests live behind the same flag. Closes beads `sim-11` / `sim-20`. |
 | Bare-name prefix routing | `infer_provider_from_model_name` mirrors 9router's `MODEL_PREFIX_PROVIDERS` exactly, so a bare `grok-4` / `command-r-plus` / `mistral-large` / `jamba-*` goes to `openai` — 9router's fallback — not to the native vendor. Sending a bare name to the vendor that serves it is tempting, but 9router is canonical, and the `jamba-*` arm in particular could only dead-end: `ai21` is configurable as an API-key provider but has no entry in the merged catalog, so no `jamba-*` name could resolve through it. `grok-build` still reaches `gcli` through the built-in alias. |
+| **Deprecated `qwen` provider kept routable** | 9router removed the standalone `qwen` provider (`accf2c5`, 2026-09-10): its API-key transport duplicated `alims-intl` byte-for-byte (same `dashscope-intl` baseUrl, same empty headers, same `preserveCacheControl` quirk) with a narrower model list, and its OAuth flow had already died upstream (`dcdd4628b`). openproxy keeps the id routable anyway — it has no `PROVIDER_CONFIGS` entry of its own upstream, so removing it here would break stored `provider == "qwen"` connections and the `qw` model prefix with no upstream parity to fall back on. `qwen` therefore resolves to the `alims-intl` transport, logs a deprecation warning, and its OAuth path returns a 400 naming `alims-intl`. Upstream leaves the `qw` alias dangling (`qw → qw`); openproxy keeps it assigned to `qwen`, which is strictly more useful and breaks nothing. |
 
 ## Key pipeline (current)
 
@@ -90,7 +91,7 @@ Decision logs: `target: openproxy::chat|translator|combo|fusion|github`.
 
 ## Specialized executors (chat dispatch)
 
-kiro, vertex, codex, cursor/cu, github, azure, qwen, iflow, gemini-cli, opencode, opencode-go, qoder, commandcode, antigravity, grok-web, perplexity-web, kimchi, **codebuddy-cn/cbcn**, **ollama/ollama-local**, **mimo-free/mmf**, else DefaultExecutor.
+kiro, vertex, codex, cursor/cu, github, azure, iflow, gemini-cli, opencode, opencode-go, qoder, commandcode, antigravity, grok-web, perplexity-web, kimchi, **codebuddy-cn/cbcn**, **ollama/ollama-local**, **mimo-free/mmf**, else DefaultExecutor.
 
 ### Critical executor parity notes
 
@@ -106,6 +107,7 @@ kiro, vertex, codex, cursor/cu, github, azure, qwen, iflow, gemini-cli, opencode
 
 - `should_refresh_credentials` + Codex **8d** max refresh age (`token_refresh.rs`)
 - Kiro external_idp / Vertex service-account mint: **explicit unsupported** for SA JWT mint path — use standard OAuth / API key connections; document if connection fails with “unsupported refresh”.
+- **Qwen OAuth is retired** — upstream 9router dropped the standalone `qwen` provider (`accf2c5`, 2026-09-10) after the Qwen OAuth flow died upstream (`dcdd4628b`, 2026-08-05). openproxy removed the device-code flow, the `portal.qwen.ai` executor and the token-refresh arm; a Qwen OAuth connection now fails with a 400 naming `alims-intl` instead of a 500 against a dead endpoint.
 
 ## Settings: comboStrategies
 
