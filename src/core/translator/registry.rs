@@ -533,7 +533,9 @@ impl TranslationRegistry {
 
         // Target-format post-hooks (9router translator/index.js:124-128).
         // preserveCacheControl follows the provider quirk (alicode / alicode-intl
-        // / alims-intl carry quirks.preserveCacheControl:true).
+        // / alims-intl carry quirks.preserveCacheControl:true). `qwen` is the
+        // deprecated alias of `alims-intl` and upstream's removed `qwen.js`
+        // carried the same quirk.
         if target == Format::OpenAi || target == Format::OpenAiResponses || target == Format::Codex
         {
             let provider = credentials
@@ -541,7 +543,7 @@ impl TranslationRegistry {
                 .unwrap_or("");
             let preserve = matches!(
                 provider,
-                "alicode" | "alicode-intl" | "alims-intl" | "alitp-intl"
+                "alicode" | "alicode-intl" | "alims-intl" | "alitp-intl" | "qwen"
             );
             filter_to_openai_format(body, preserve);
         }

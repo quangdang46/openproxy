@@ -25,7 +25,6 @@ mod opencode_go;
 mod project_id_cache;
 mod provider;
 pub mod qoder;
-mod qwen;
 mod strip_unsupported;
 mod trae;
 mod vertex;
@@ -114,7 +113,6 @@ pub use provider::{
     ProviderExecutorConfig, ProviderExecutorError, ProviderFormat, ProxyOptions, UnifiedExecutor,
 };
 pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderExecutorResponse};
-pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecutorResponse};
 pub use trae::{TraeExecutionRequest, TraeExecutor, TraeExecutorError, TraeExecutorResponse};
 pub use vertex::{
     VertexExecutionRequest, VertexExecutor, VertexExecutorError, VertexExecutorResponse,

@@ -24,6 +24,43 @@ use crate::core::simulation::env_force_all;
 use super::strip_unsupported::strip_unsupported_params;
 use super::ClientPool;
 
+/// DashScope international (Model Studio) OpenAI-compatible chat endpoint.
+///
+/// Shared by `alims-intl` and its deprecated `qwen` alias so the two cannot
+/// drift apart: upstream 9router's `qwen.js` pointed at this exact transport
+/// (same baseUrl, same empty header set, same `preserveCacheControl` quirk)
+/// with a narrower model list, so it added nothing `alims-intl` could not
+/// already reach. Upstream removed it in `accf2c5` ("remove the duplicate qwen
+/// provider", 2026-09-10) after the Qwen OAuth flow itself died upstream.
+const DASHSCOPE_INTL_CHAT_URL: &str =
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions";
+
+/// Providers that still route but are scheduled for removal, mapped to the
+/// provider that replaces them.
+///
+/// `qwen` is the only entry: upstream 9router removed the standalone provider
+/// (`accf2c5`, 2026-09-10) because its API-key transport duplicated
+/// `alims-intl` and its OAuth flow had already died upstream (`dcdd4628b`,
+/// 2026-08-05). openproxy keeps the id routable so stored connections and the
+/// `qw` model prefix keep working, so the warning is the only way a user finds
+/// out the id is on its way out.
+const DEPRECATED_PROVIDERS: &[(&str, &str)] = &[("qwen", "alims-intl")];
+
+/// Log a deprecation notice when a request is dispatched to a provider that
+/// upstream has retired.
+///
+/// Best-effort: the warning is advisory, never a reason to fail a request.
+fn warn_if_deprecated_provider(provider: &str) {
+    if let Some((_, replacement)) = DEPRECATED_PROVIDERS.iter().find(|(id, _)| *id == provider) {
+        tracing::warn!(
+            target: "openproxy::executor",
+            "Provider '{provider}' is deprecated and will be removed in a future release. \
+             Its API-key transport now runs on '{replacement}' (DashScope international) — \
+             update this connection to use '{replacement}'."
+        );
+    }
+}
+
 static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::new(|| {
     BTreeMap::from([
         (
@@ -178,10 +215,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "alims-intl",
-            ProviderConfig::openai(
-                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
-            ),
+            ProviderConfig::openai(DASHSCOPE_INTL_CHAT_URL),
         ),
+        // Deprecated alias of `alims-intl` (upstream 9router dropped the
+        // standalone `qwen` provider; see `DASHSCOPE_INTL_CHAT_URL`). The id
+        // stays routable so stored `provider == "qwen"` connections and the
+        // `qw` model prefix keep working — they now ride this transport
+        // instead of failing with "no upstream configured for provider qwen".
+        ("qwen", ProviderConfig::openai(DASHSCOPE_INTL_CHAT_URL)),
         (
             "alitp-intl",
             ProviderConfig::openai(
@@ -967,6 +1008,7 @@ impl DefaultExecutor {
         provider_node: Option<ProviderNode>,
     ) -> Result<Self, ExecutorError> {
         let provider = provider.into();
+        warn_if_deprecated_provider(&provider);
         let config = if let Some(node) = &provider_node {
             if node.r#type == "openai-compatible" || node.r#type == "anthropic-compatible" {
                 ProviderConfig::openai("")

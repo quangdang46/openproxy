@@ -348,6 +348,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "opencode-go"
                 | "alicode"
                 | "alicode-intl"
+                | "alims-intl"
                 | "volcengine-ark"
                 | "byteplus"
                 | "deepseek"
@@ -473,14 +474,15 @@ async fn fetch_provider_models_response(
                 .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
             fetch_gemini_api_models(connection, &token).await
         }
-        "qwen" => {
-            let token = primary_token(connection)
-                .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
-            fetch_openai_style_models_with_bearer(
+        // `qwen` is the deprecated alias of `alims-intl` and rides the same
+        // DashScope international transport, so both discover models from the
+        // same listing. Upstream 9router lists it at
+        // `src/app/api/providers/[id]/models/route.js:292` for `alims-intl`;
+        // `qwen` used to point at the retired `portal.qwen.ai` OAuth host.
+        "qwen" | "alims-intl" => {
+            fetch_first_party_openai_style_models(
                 connection,
-                &resolve_qwen_models_url(connection),
-                &token,
-                false,
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
             )
             .await
         }
@@ -1953,19 +1955,6 @@ fn normalize_anthropic_models_base_url(base_url: &str) -> String {
     format!("{normalized}/models")
 }
 
-fn resolve_qwen_models_url(connection: &ProviderConnection) -> String {
-    let fallback = "https://portal.qwen.ai/v1/models";
-    let Some(raw) = provider_specific_string(connection, "resourceUrl") else {
-        return fallback.to_string();
-    };
-
-    if raw.starts_with("http://") || raw.starts_with("https://") {
-        return format!("{}/models", raw.trim_end_matches('/'));
-    }
-
-    format!("https://{}/v1/models", raw.trim_end_matches('/'))
-}
-
 fn resolve_ollama_local_host(connection: &ProviderConnection) -> String {
     provider_specific_string(connection, "baseUrl")
         .unwrap_or_else(|| OLLAMA_LOCAL_DEFAULT_HOST.to_string())
@@ -2325,25 +2314,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_qwen_models_url_uses_resource_url_variants() {
-        let mut connection = connection("qwen");
-        connection.provider_specific_data.insert(
-            "resourceUrl".to_string(),
-            Value::String("tenant.qwen.ai".to_string()),
-        );
-        assert_eq!(
-            resolve_qwen_models_url(&connection),
-            "https://tenant.qwen.ai/v1/models"
-        );
-
-        connection.provider_specific_data.insert(
-            "resourceUrl".to_string(),
-            Value::String("https://tenant.qwen.ai/base".to_string()),
-        );
-        assert_eq!(
-            resolve_qwen_models_url(&connection),
-            "https://tenant.qwen.ai/base/models"
-        );
+    fn qwen_and_alims_intl_share_model_discovery() {
+        // `qwen` is the deprecated alias of `alims-intl` (upstream 9router
+        // dropped the standalone provider in `accf2c5`). Both discover from the
+        // same DashScope international listing, so both must report that they
+        // support discovery — otherwise `/v1/models` skips one of them and the
+        // provider page loses its "import models" button for no reason.
+        assert!(supports_models_discovery("qwen"));
+        assert!(supports_models_discovery("alims-intl"));
     }
 
     #[test]

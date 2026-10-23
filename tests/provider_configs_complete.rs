@@ -39,7 +39,6 @@ const OAUTH_REGISTRY_IDS: &[&str] = &[
     "kiro",
     "openai-native",
     "qoder",
-    "qwen",
     "trae",
     "xai",
     "zed",
@@ -57,7 +56,6 @@ const DEVICE_CODE_IDS: &[&str] = &[
     "codebuddy-intl",
     "qoder",
     "grok-cli",
-    "qwen",
 ];
 
 /// OAuth providers routed to a dedicated executor instead of `DefaultExecutor`.
@@ -71,7 +69,6 @@ const DEDICATED_EXECUTOR_PROVIDERS: &[&str] = &[
     "kimchi",       // KimchiExecutor
     "kiro",         // KiroExecutor
     "qoder",        // QoderExecutor
-    "qwen",         // QwenExecutor
     "trae",         // TraeExecutor
     "zed",          // ZedExecutor
     // OAuth config only: no dispatch branch and no connection may select it
@@ -141,4 +138,17 @@ fn kimi_coding_routing_mirrors_kimi() {
         kimi, kimi_coding,
         "kimi-coding must mirror the kimi endpoint"
     );
+}
+
+#[test]
+fn qwen_routing_mirrors_alims_intl() {
+    // `qwen` is the deprecated alias of `alims-intl`: upstream 9router removed
+    // the standalone provider (`accf2c5`) because its transport duplicated
+    // `alims-intl` exactly — same baseUrl, same empty header set, same
+    // `preserveCacheControl` quirk. openproxy keeps the id routable so stored
+    // `provider == "qwen"` connections keep working, so the two endpoints must
+    // stay identical or the alias silently changes behaviour.
+    let alims_intl = provider_config_base_url("alims-intl").expect("alims-intl routing entry");
+    let qwen = provider_config_base_url("qwen").expect("qwen routing entry");
+    assert_eq!(alims_intl, qwen, "qwen must mirror the alims-intl endpoint");
 }

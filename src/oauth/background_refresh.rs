@@ -40,7 +40,6 @@ fn provider_lead_ms(provider: &str) -> Option<u64> {
         "openai" => tr::REFRESH_LEAD_OPENAI_MS,
         "claude" | "anthropic" => tr::REFRESH_LEAD_CLAUDE_MS,
         "iflow" => tr::REFRESH_LEAD_IFLOW_MS,
-        "qwen" => tr::REFRESH_LEAD_QWEN_MS,
         "kimi-coding" | "kimi" => tr::REFRESH_LEAD_KIMI_CODING_MS,
         "antigravity" | "gemini-cli" | "gemini" => tr::REFRESH_LEAD_ANTIGRAVITY_MS,
         "xai" | "grok-cli" | "gcli" | "gb" => tr::REFRESH_LEAD_XAI_MS,

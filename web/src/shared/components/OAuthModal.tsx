@@ -200,7 +200,6 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       // cannot be admitted without one; the two lists still have to agree here.
       const deviceCodeProviders = [
         "github",
-        "qwen",
         "kiro",
         "kimi",
         "kimi-coding",
