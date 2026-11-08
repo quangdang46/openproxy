@@ -111,7 +111,7 @@ fn strip_forwarding_headers(headers: &mut HeaderMap) {
 /// a JSON envelope and a stalled socket there leaves the client waiting far
 /// past the point where a retry is useful, so its registry entry cuts the
 /// clock to 120s (open-sse/providers/registry/qoder.js:23).
-const PROVIDER_STALL_TIMEOUT_MS: &[(&str, u64)] = &[("qoder", 120_000)];
+const PROVIDER_STALL_TIMEOUT_MS: &[(&str, u64)] = &[("qoder", 120_000), ("qoder-cn", 120_000)];
 
 /// Maximum time we'll wait for the next byte from an upstream SSE stream before
 /// considering the connection stalled, once tokens are already flowing.
@@ -2177,13 +2177,15 @@ async fn forward_with_provider_fallback(
 
         use crate::core::executor::{
             AntigravityExecutionRequest, AntigravityExecutor, AzureExecutionRequest, AzureExecutor,
-            CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest, CommandCodeExecutor,
-            CursorExecutionRequest, CursorExecutor, DefaultExecutor, DevinCliExecutor,
-            DevinExecutionRequest, ExecutionRequest, ExecutorError, GeminiCliExecutionRequest,
-            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest,
-            GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor, KimchiExecutor,
-            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
-            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
+            BedrockExecutionRequest, BedrockExecutor, ChatGptWebExecutionRequest,
+            ChatGptWebExecutor, CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest,
+            CommandCodeExecutor, CursorExecutionRequest, CursorExecutor, DefaultExecutor,
+            DevinCliExecutor, DevinExecutionRequest, ExecutionRequest, ExecutorError,
+            GeminiCliExecutionRequest, GeminiCliExecutor, GithubExecutionRequest, GithubExecutor,
+            GrokWebExecutionRequest, GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor,
+            KimchiExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
+            OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
+            OpenCodeGoExecutor, OpenCodeZenExecutionRequest, OpenCodeZenExecutor,
             PerplexityWebExecutionRequest, PerplexityWebExecutor, ProviderExecutionRequest,
             ProviderExecutor, QoderExecutionRequest, QoderExecutor, TraeExecutionRequest,
             TraeExecutor, VertexExecutionRequest, VertexExecutor, WindsurfExecutionRequest,
@@ -2596,15 +2598,54 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
-            } else if provider == "qoder" {
-                let executor = QoderExecutor::new(state.client_pool.clone(), provider_node)
+            } else if provider == "opencode-zen" || provider == "ocz" {
+                // 9router open-sse/executors/opencode-zen.js — keyed Zen lane:
+                // three /zen/v1 transports, free-tier fingerprint for *-free
+                // models, x-opencode-session gating.
+                let executor = OpenCodeZenExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("OpenCodeZen executor creation failed: {}", e),
+                    retry_after: None,
+                    upstream_body: None,
+                    upstream_headers: Vec::new(),
+                })?;
+                let result = executor
+                    .execute_request(OpenCodeZenExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                        raw_headers: client_raw_header_map(client_headers),
+                    })
+                    .await
                     .map_err(|e| ComboAttemptError {
                         status: 500,
-                        message: format!("Qoder executor creation failed: {}", e),
+                        message: format!("OpenCodeZen execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                         upstream_headers: Vec::new(),
                     })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "qoder" || provider == "qoder-cn" {
+                // qoder-cn shares the QoderExecutor with region-aware endpoints
+                // (9router executors/qoder.js constructor provider → region).
+                let executor =
+                    QoderExecutor::new(state.client_pool.clone(), provider_node, &provider)
+                        .map_err(|e| ComboAttemptError {
+                            status: 500,
+                            message: format!("Qoder executor creation failed: {}", e),
+                            retry_after: None,
+                            upstream_body: None,
+                            upstream_headers: Vec::new(),
+                        })?;
                 let result = executor
                     .execute_request(QoderExecutionRequest {
                         model: model.to_string(),
@@ -2731,6 +2772,31 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("PerplexityWeb execution failed: {}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                        upstream_headers: Vec::new(),
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "chatgpt-web" || provider == "cg" {
+                let executor = ChatGptWebExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(ChatGptWebExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("ChatGptWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
                         upstream_headers: Vec::new(),
@@ -3056,6 +3122,43 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "bedrock" || provider == "bedrock-xai" {
+                // AWS Bedrock: SigV4-signed invoke (+ AWS EventStream decode for
+                // streaming). One executor serves both entries; the provider id
+                // picks the wire format (claude vs openai).
+                let executor =
+                    BedrockExecutor::new(state.client_pool.clone(), provider.to_string()).map_err(
+                        |e| ComboAttemptError {
+                            status: 500,
+                            message: format!("Bedrock executor creation failed: {}", e),
+                            retry_after: None,
+                            upstream_body: None,
+                            upstream_headers: Vec::new(),
+                        },
+                    )?;
+                let result = executor
+                    .execute_request(BedrockExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Bedrock execution failed: {}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                        upstream_headers: Vec::new(),
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else {
                 let executor = DefaultExecutor::new(
                     provider.to_string(),
@@ -3247,18 +3350,29 @@ async fn forward_with_provider_fallback(
                 let upstream_headers = forwarded_upstream_headers(result.response.headers());
                 let (message, raw_body, body_retry_after) =
                     extract_error_message_and_retry_after_with_body(result.response).await;
-                let retry_after = header_retry_after.or(body_retry_after);
+                // 9router codebuddy-cn/intl `parseError` (commit e706e4f):
+                // a `{code:6004}` / frequency-limit body classifies as HTTP
+                // 429 regardless of the transport status, and its reset
+                // instant (`resetsAtMs`) is parsed out of `msg` — there is no
+                // `retryAfter` field for `parse_retry_after_from_body`.
+                let codebuddy_limit = raw_body
+                    .as_deref()
+                    .and_then(crate::core::combo::parse_codebuddy_rate_limit);
+                let error_status = if codebuddy_limit.is_some() {
+                    429
+                } else {
+                    status.as_u16()
+                };
+                let retry_after = header_retry_after
+                    .or(body_retry_after)
+                    .or_else(|| codebuddy_limit.and_then(|e| e.resets_at));
                 state
                     .usage_live
                     .finish_request(model, provider, Some(connection.id.as_str()), true)
                     .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
-                let decision = check_fallback_error(
-                    status.as_u16(),
-                    &message,
-                    current_backoff,
-                    Some(provider),
-                );
+                let decision =
+                    check_fallback_error(error_status, &message, current_backoff, Some(provider));
                 // 9router auth.js:262-267: a provider-reported reset time
                 // (`resetsAtMs` — our `retry_after` header/body equivalent)
                 // is clamped to MAX_RATE_LIMIT_COOLDOWN_MS, EXCEPT for
@@ -3281,7 +3395,7 @@ async fn forward_with_provider_fallback(
                     })
                     .unwrap_or(decision.cooldown);
                 last_error = Some(ComboAttemptError {
-                    status: status.as_u16(),
+                    status: error_status,
                     message: message.clone(),
                     retry_after,
                     // H23 (bead openproxy-i7yt): preserve the raw upstream
@@ -3307,7 +3421,7 @@ async fn forward_with_provider_fallback(
                 // makes the repeat fall through to the normal
                 // `decision.should_fallback` branch below, which excludes the
                 // connection and lets the loop advance to the next account.
-                if (status.as_u16() == 401 || status.as_u16() == 403)
+                if (error_status == 401 || error_status == 403)
                     && connection.refresh_token.is_some()
                     && !refreshed_this_request.contains(&connection.id)
                 {
@@ -3370,7 +3484,7 @@ async fn forward_with_provider_fallback(
                     // monthly-usage-limit message locks the ACCOUNT (model="")
                     // until the first of next month, and resets backoff to 0.
                     let github_reset = crate::core::account_fallback::github_monthly_reset_ms(
-                        status.as_u16(),
+                        error_status,
                         &message,
                         &plan.provider,
                     );
@@ -3380,7 +3494,7 @@ async fn forward_with_provider_fallback(
                             state,
                             &connection.id,
                             "",
-                            status.as_u16(),
+                            error_status,
                             &message,
                             cooldown_ms,
                             0,
@@ -3393,7 +3507,7 @@ async fn forward_with_provider_fallback(
                         state,
                         &connection.id,
                         model,
-                        status.as_u16(),
+                        error_status,
                         &message,
                         cooldown,
                         next_backoff_level(&decision, current_backoff),
@@ -3691,14 +3805,26 @@ fn select_connection(
 }
 
 fn is_no_auth_provider(provider: &str) -> bool {
-    // 9router parity (bead openproxy-sewn): only `opencode` (Free) carries
-    // `noAuth: true` in the registry. `opencode-go` is a paid apikey
-    // provider with NO noAuth flag — it must never get the virtual "public"
-    // connection, or a valid stored key is bypassed and upstream returns
-    // `AuthError Missing API key.` for every model on the provider.
+    // 9router registry: `category: "free"` AND top-level `noAuth: true`
+    // (FREE_PROVIDERS filtered by `.noAuth`, auth.js:47) is exactly
+    // devin-cli / mimo-free / opencode — the same set /v1/models injects
+    // pseudo-connections for (v1_models.rs NO_AUTH_FREE_PROVIDERS). The
+    // other noAuth registry entries are freeTier/webCookie providers, not
+    // FREE_PROVIDERS, and get no virtual connection upstream.
+    //
+    // `opencode` is the id this build actually uses for the provider — the list
+    // previously carried `opencode-zen`, which matches no row in the registry —
+    // so the Zen free tier was probed with a key it does not use. `opencode-go`
+    // is a paid apikey provider with NO noAuth flag: it must never get the
+    // virtual "public" connection, or a valid stored key is bypassed and
+    // upstream returns `AuthError Missing API key.` for every model on it.
     matches!(
         provider,
         "opencode"
+            | "devin-cli"
+            | "dv"
+            | "mimo-free"
+            | "mmf"
             | "edge-tts"
             | "google-tts"
             | "local-device"
@@ -4571,7 +4697,7 @@ async fn proxy_response_with_pending_tracking(
     // Billing blocks arrive pre-detected as a real 403 by the executor's
     // first-frame peek — but the flag is still re-checked here so the
     // non-peeked dashboard path also short-circuits.
-    let qoder_sse_unwrap = provider == "qoder";
+    let qoder_sse_unwrap = provider == "qoder" || provider == "qoder-cn";
     // 9router streamingHandler.js:85 — `isResponsesPassthrough`. A Responses
     // client talking to a Responses upstream keeps the wire format, so the
     // frames it is waiting for are Responses events and a plain stream close
@@ -7993,7 +8119,12 @@ mod tests {
     #[test]
     fn is_no_auth_provider_matches_registry_flags() {
         // 9router registry: opencode has noAuth:true; opencode-go does not.
+        // devin-cli / mimo-free are the other two FREE_PROVIDERS noAuth
+        // entries (auth.js:47) — /v1/models lists their catalogs, so the
+        // dispatcher must be able to serve them without a stored key.
         assert!(is_no_auth_provider("opencode"));
+        assert!(is_no_auth_provider("devin-cli"));
+        assert!(is_no_auth_provider("mimo-free"));
         assert!(!is_no_auth_provider("opencode-go"));
         assert!(!is_no_auth_provider("ocg"));
     }
@@ -8934,7 +9065,9 @@ mod sse_framing_tests {
         buf.extend_from_slice(b"lock_delta\",\"index\":0}\n\n");
         assert_eq!(
             drain_complete_sse_frames(&mut buf),
-            vec!["event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0}\n\n"]
+            vec![
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0}\n\n"
+            ]
         );
         assert!(buf.is_empty());
     }

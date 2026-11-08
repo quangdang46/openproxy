@@ -20,96 +20,113 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hyper::http;
 use hyper::http::uri::InvalidUri;
 use rand::RngCore;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, REFERER,
+};
 use reqwest::Body as ReqwestBody;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::utils::web_cookie::build_grok_cookie_header;
 use crate::types::ProviderConnection;
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const GROK_CHAT_API: &str = "https://grok.com/rest/app-chat/conversations/new";
-const GROK_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+/// `GROK_TLS_USER_AGENT` (services/grokTlsClient.js) — must match the UA of
+/// the browser that earned the `cf_clearance` cookie. Upstream routes grok-web
+/// through a wreq-js `chrome_146` session because Cloudflare Enterprise
+/// rejects Node's TLS fingerprint; Rust has no wreq equivalent, so requests
+/// go out on the normal reqwest/rustls transport — the same fail-open posture
+/// upstream takes when wreq-js is absent (see `opencode.rs` for the same
+/// documented gap). The header set is kept in lockstep regardless.
+pub(crate) const GROK_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const GROK_STATSIG_SUFFIX: &str =
     "e:TypeError: Cannot read properties of null (reading 'children')";
 
-/// Grok web mode mapping (JS MODEL_MAP, lines 9-24).
+/// Grok web mode mapping (JS MODEL_MAP, executors/grok-web.js:16-30 @ v0.5.112).
+///
+/// Everything routes to `grok-4-1-thinking-1129` — the only `modelName` the
+/// `conversations/new` endpoint still accepts (older grok-3/grok-4/420 names
+/// 403 with "Model is not found"). FAST is the reliably-available mode; the
+/// THINKING/EXPERT/420 modes are usage-gated per account.
 struct GrokModelInfo {
     grok_model: &'static str,
     model_mode: &'static str,
     is_thinking: bool,
 }
 
+const GROK_MODEL_4_1: &str = "grok-4-1-thinking-1129";
+
 fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
     &[
         (
             "grok-3",
             GrokModelInfo {
-                grok_model: "grok-3",
-                model_mode: "MODEL_MODE_GROK_3",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_FAST",
                 is_thinking: false,
             },
         ),
         (
             "grok-3-mini",
             GrokModelInfo {
-                grok_model: "grok-3",
-                model_mode: "MODEL_MODE_GROK_3_MINI_THINKING",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_GROK_4_1_MINI_THINKING",
                 is_thinking: true,
             },
         ),
         (
             "grok-3-thinking",
             GrokModelInfo {
-                grok_model: "grok-3",
-                model_mode: "MODEL_MODE_GROK_3_THINKING",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_GROK_4_1_THINKING",
                 is_thinking: true,
             },
         ),
         (
             "grok-4",
             GrokModelInfo {
-                grok_model: "grok-4",
-                model_mode: "MODEL_MODE_GROK_4",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_FAST",
                 is_thinking: false,
             },
         ),
         (
             "grok-4-mini",
             GrokModelInfo {
-                grok_model: "grok-4-mini",
-                model_mode: "MODEL_MODE_GROK_4_MINI_THINKING",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_GROK_4_1_MINI_THINKING",
                 is_thinking: true,
             },
         ),
         (
             "grok-4-thinking",
             GrokModelInfo {
-                grok_model: "grok-4",
-                model_mode: "MODEL_MODE_GROK_4_THINKING",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_GROK_4_1_THINKING",
                 is_thinking: true,
             },
         ),
         (
             "grok-4-heavy",
             GrokModelInfo {
-                grok_model: "grok-4",
-                model_mode: "MODEL_MODE_HEAVY",
+                grok_model: GROK_MODEL_4_1,
+                model_mode: "MODEL_MODE_EXPERT",
                 is_thinking: true,
             },
         ),
         (
             "grok-4.1-mini",
             GrokModelInfo {
-                grok_model: "grok-4-1-thinking-1129",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_GROK_4_1_MINI_THINKING",
                 is_thinking: true,
             },
@@ -117,7 +134,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.1-fast",
             GrokModelInfo {
-                grok_model: "grok-4-1-thinking-1129",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_FAST",
                 is_thinking: false,
             },
@@ -125,7 +142,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.1-expert",
             GrokModelInfo {
-                grok_model: "grok-4-1-thinking-1129",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_EXPERT",
                 is_thinking: true,
             },
@@ -133,7 +150,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.1-thinking",
             GrokModelInfo {
-                grok_model: "grok-4-1-thinking-1129",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_GROK_4_1_THINKING",
                 is_thinking: true,
             },
@@ -141,7 +158,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.2",
             GrokModelInfo {
-                grok_model: "grok-420",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_GROK_420",
                 is_thinking: false,
             },
@@ -149,7 +166,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.20",
             GrokModelInfo {
-                grok_model: "grok-420",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_GROK_420",
                 is_thinking: false,
             },
@@ -157,7 +174,7 @@ fn model_map() -> &'static [(&'static str, GrokModelInfo)] {
         (
             "grok-4.20-beta",
             GrokModelInfo {
-                grok_model: "grok-420",
+                grok_model: GROK_MODEL_4_1,
                 model_mode: "MODEL_MODE_GROK_420",
                 is_thinking: false,
             },
@@ -203,6 +220,15 @@ fn random_hex(len_bytes: usize) -> String {
     let mut bytes = vec![0u8; len_bytes];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// `isCloudflareChallenge` (services/grokTlsClient.js): CF interstitial pages
+/// arrive with 403 + this marker in the body.
+fn is_cloudflare_challenge(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("just a moment")
+        || lower.contains("attention required")
+        || lower.contains("cf-mitigated")
 }
 
 /// Flatten OpenAI messages to a single Grok message string (JS parseOpenAIMessages).
@@ -275,6 +301,7 @@ pub enum GrokWebExecutorError {
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
     UnsupportedFormat(String),
+    Media(String),
 }
 
 impl From<reqwest::Error> for GrokWebExecutorError {
@@ -326,6 +353,7 @@ impl std::fmt::Display for GrokWebExecutorError {
             Self::Hyper(e) => write!(f, "Hyper error: {}", e),
             Self::Request(e) => write!(f, "Request error: {}", e),
             Self::UnsupportedFormat(msg) => write!(f, "Unsupported format: {}", msg),
+            Self::Media(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -398,26 +426,35 @@ impl GrokWebExecutor {
             .send()
             .await?;
 
-        // JS grok-web.js:295-330 — map upstream failures to JSON error bodies
-        // with actionable messages (auth/429 text drives account rotation).
+        // JS grok-web.js execute() error mapping — upstream reads the error
+        // body for the Cloudflare-challenge marker (isCloudflareChallenge)
+        // before choosing the message; auth/429 text drives account rotation.
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let (msg, code): (&str, String) = match status {
-                401 | 403 => (
-                    "Grok auth failed — SSO cookie may be expired. Re-paste your sso cookie value from grok.com.",
+            let body_text = response.text().await.unwrap_or_default();
+            let (msg, code): (String, String) = if is_cloudflare_challenge(&body_text) {
+                (
+                    "Grok returned a Cloudflare challenge — cf_clearance in the pasted Cookie header no longer matches this machine. Re-copy the full Cookie header from a logged-in grok.com browser on this machine.".to_string(),
                     format!("HTTP_{status}"),
-                ),
-                429 => (
-                    "Grok rate limited. Wait a moment and retry, or rotate cookies.",
-                    format!("HTTP_{status}"),
-                ),
-                _ => (
-                    &format!("Grok returned HTTP {status}")[..],
-                    format!("HTTP_{status}"),
-                ),
+                )
+            } else {
+                match status {
+                    401 | 403 => (
+                        "Grok auth failed — SSO cookie may be expired. Re-paste your sso cookie value from grok.com.".to_string(),
+                        format!("HTTP_{status}"),
+                    ),
+                    429 => (
+                        "Grok rate limited. Wait a moment and retry, or rotate cookies.".to_string(),
+                        format!("HTTP_{status}"),
+                    ),
+                    _ => (
+                        format!("Grok returned HTTP {status}"),
+                        format!("HTTP_{status}"),
+                    ),
+                }
             };
             return Ok(GrokWebExecutorResponse {
-                response: json_error(status, msg, "upstream_error", Some(&code)),
+                response: json_error(status, &msg, "upstream_error", Some(&code)),
                 url,
                 headers,
                 transformed_body,
@@ -492,21 +529,28 @@ impl GrokWebExecutor {
         })
     }
 
-    /// Browser-fingerprint headers (JS lines 263-283) — statsig, traceparent,
-    /// Sec-Ch-Ua/Sec-Fetch-*, Chrome 136 UA, and the `sso` cookie.
+    /// Browser-fingerprint headers (JS executors/grok-web.js:400-421) —
+    /// statsig, traceparent, Sec-Ch-Ua/Sec-Fetch-*, Browser-Id, the wreq-UA,
+    /// and the full grok cookie header (sso + sso-rw + cf_clearance/__cf_bm).
     fn build_headers(
         &self,
         credentials: &ProviderConnection,
     ) -> Result<HeaderMap, GrokWebExecutorError> {
         let mut headers = HeaderMap::new();
 
-        let sso = credentials
+        let raw = credentials
             .api_key
             .as_deref()
-            .ok_or_else(|| GrokWebExecutorError::MissingCredentials("grok-web".into()))?
-            .to_string();
-        let token = sso.strip_prefix("sso=").unwrap_or(&sso);
-        let cookie_value = HeaderValue::from_str(&format!("sso={token}"))
+            .ok_or_else(|| GrokWebExecutorError::MissingCredentials("grok-web".into()))?;
+        // Full cookie header: sso + paired sso-rw + cf_clearance/__cf_bm when
+        // the pasted blob carries them (buildGrokCookieHeader).
+        let cookie_header = build_grok_cookie_header(raw);
+        if cookie_header.is_empty() {
+            return Err(GrokWebExecutorError::CookieParse(
+                "no sso cookie found in credentials".to_string(),
+            ));
+        }
+        let cookie_value = HeaderValue::from_str(&cookie_header)
             .map_err(|_| GrokWebExecutorError::CookieParse("Invalid cookie".to_string()))?;
         headers.insert(COOKIE, cookie_value);
 
@@ -529,14 +573,22 @@ impl GrokWebExecutor {
             HeaderValue::from_static("https://grok.com/"),
         );
         headers.insert(
+            reqwest::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+        headers.insert(
+            reqwest::header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        );
+        headers.insert(
             reqwest::header::USER_AGENT,
             HeaderValue::from_static(GROK_USER_AGENT),
         );
+        // chrome_146 profile UA components (upstream Sec-Ch-Ua is pinned to
+        // the wreq-js browser profile, not the UA's Chrome/155 token).
         headers.insert(
             "Sec-Ch-Ua",
-            HeaderValue::from_static(
-                r#""Google Chrome";v="136", "Chromium";v="136", "Not(A:Brand";v="24""#,
-            ),
+            HeaderValue::from_static(r#""Chromium";v="146", "Not(A:Brand";v="24""#),
         );
         headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
         headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static(r#""macOS""#));
@@ -562,6 +614,12 @@ impl GrokWebExecutor {
             })?,
         );
         headers.insert(
+            "Browser-Id",
+            HeaderValue::from_str(&Uuid::new_v4().to_string()).map_err(|_| {
+                GrokWebExecutorError::InvalidCredentials("Invalid browser id".to_string())
+            })?,
+        );
+        headers.insert(
             "traceparent",
             HeaderValue::from_str(&format!("00-{}-{}-00", random_hex(16), random_hex(8))).map_err(
                 |_| GrokWebExecutorError::InvalidCredentials("Invalid traceparent".to_string()),
@@ -570,6 +628,380 @@ impl GrokWebExecutor {
 
         Ok(headers)
     }
+
+    /// Executor-driven media generation — port of upstream
+    /// `GrokWebExecutor.generateMedia` (executors/grok-web.js:498-608).
+    ///
+    /// `kind` is `"image"` or `"video"`; image loops `n` times (clamped 1..=4
+    /// upstream-side), video is single-shot (quota ~1/day). Returns base64
+    /// assets downloaded from `assets.grok.com`. Same reqwest/rustls
+    /// transport caveat as chat — upstream prefers the wreq-js `chrome_146`
+    /// session; Cloudflare may challenge either way.
+    pub async fn generate_media(
+        &self,
+        prompt: &str,
+        kind: &str,
+        size: Option<&str>,
+        duration: Option<f64>,
+        n: usize,
+        credentials: &ProviderConnection,
+        proxy: Option<&ProxyTarget>,
+    ) -> Result<Vec<GrokMediaAsset>, GrokWebExecutorError> {
+        if kind != "image" && kind != "video" {
+            return Err(GrokWebExecutorError::Media(
+                "Grok Web supports image and video generation only".into(),
+            ));
+        }
+        if prompt.trim().is_empty() {
+            return Err(GrokWebExecutorError::Media(
+                "prompt is required for media generation".into(),
+            ));
+        }
+        let cookie_header = build_grok_cookie_header(
+            credentials.api_key.as_deref().unwrap_or_default(),
+        );
+        if cookie_header.is_empty() {
+            return Err(GrokWebExecutorError::Media(
+                "Grok Web requires the grok.com Cookie header (sso) pasted into the connection".into(),
+            ));
+        }
+
+        let iterations = if kind == "video" {
+            1
+        } else {
+            n.clamp(1, 4)
+        };
+        let client = self.pool.get("grok-web", proxy)?;
+        let mut results = Vec::with_capacity(iterations);
+
+        for _ in 0..iterations {
+            let request_id = Uuid::new_v4().to_string();
+            let payload = if kind == "video" {
+                build_grok_video_payload(prompt, size, duration)
+            } else {
+                json!({
+                    "temporary": true,
+                    "modelName": "grok-4-1-thinking-1129",
+                    "modelMode": "MODEL_MODE_FAST",
+                    "message": match size {
+                        Some(s) if !s.is_empty() => format!("Generate an image ({s}): {prompt}"),
+                        _ => format!("Generate an image: {prompt}"),
+                    },
+                    "fileAttachments": [],
+                    "imageAttachments": [],
+                    "disableSearch": false,
+                    "enableImageGeneration": true,
+                    "returnImageBytes": false,
+                    "returnRawGrokInXaiRequest": false,
+                    "enableImageStreaming": true,
+                    "imageGenerationCount": 1,
+                    "forceConcise": false,
+                    "toolOverrides": {},
+                    "enableSideBySide": true,
+                    "sendFinalMetadata": true,
+                    "isReasoning": false,
+                    "disableTextFollowUps": false,
+                    "disableMemory": true,
+                    "forceSideBySide": false,
+                    "isAsyncChat": false,
+                    "disableSelfHarmShortCircuit": false,
+                    "deviceEnvInfo": {
+                        "darkModeEnabled": false,
+                        "devicePixelRatio": 2,
+                        "screenWidth": 2056,
+                        "screenHeight": 1329,
+                        "viewportWidth": 2056,
+                        "viewportHeight": 1083,
+                    },
+                })
+            };
+
+            let turn_timeout = if kind == "video" {
+                VIDEO_TURN_TIMEOUT
+            } else {
+                IMAGE_TURN_TIMEOUT
+            };
+            let mut headers = media_headers(&cookie_header, &request_id);
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+
+            let response = client
+                .post(GROK_CHAT_API)
+                .headers(headers)
+                .body(serde_json::to_vec(&payload)?)
+                .timeout(turn_timeout)
+                .send()
+                .await?;
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            if !(200..300).contains(&status) || is_cloudflare_challenge(&text) {
+                return Err(GrokWebExecutorError::Media(if is_cloudflare_challenge(&text) {
+                    "Grok returned a Cloudflare challenge — re-copy the full Cookie header (with cf_clearance) from a logged-in grok.com browser on this machine".into()
+                } else {
+                    format!("grok {kind} request failed: HTTP {status} {}", &text[..text.len().min(200)])
+                }));
+            }
+
+            if kind == "video" {
+                let video_url = find_grok_video_url(&text).ok_or_else(|| {
+                    GrokWebExecutorError::Media(
+                        "grok returned no video asset — quota may be exhausted (1 video/day) or the prompt was moderated".into(),
+                    )
+                })?;
+                let url = if video_url.starts_with("http") {
+                    video_url
+                } else {
+                    format!("https://assets.grok.com/{video_url}")
+                };
+                let asset = download_grok_asset(&client, &url, &cookie_header, VIDEO_ASSET_TIMEOUT)
+                    .await
+                    .map_err(GrokWebExecutorError::Media)?
+                    .ok_or_else(|| {
+                        GrokWebExecutorError::Media(format!(
+                            "video download failed: HTTP error for {url}"
+                        ))
+                    })?;
+                results.push(GrokMediaAsset {
+                    b64: asset.b64,
+                    mime: "video/mp4".into(),
+                });
+                break;
+            }
+
+            // Image: NDJSON lines → result.response.cardAttachment.jsonData
+            // → image_chunk with progress>=100 and imageUrl.
+            let mut final_chunk: Option<(String, String)> = None;
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    continue;
+                }
+                let Ok(outer) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                let Some(card) = outer
+                    .pointer("/result/response/cardAttachment/jsonData")
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let Ok(inner) = serde_json::from_str::<Value>(card) else {
+                    continue;
+                };
+                let Some(chunk) = inner.get("image_chunk") else {
+                    continue;
+                };
+                let progress = chunk.get("progress").and_then(Value::as_f64).unwrap_or(0.0);
+                if let Some(image_url) = chunk.get("imageUrl").and_then(Value::as_str) {
+                    if progress >= 100.0 && !image_url.is_empty() {
+                        let mime = chunk
+                            .get("mimeType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/jpeg")
+                            .to_string();
+                        final_chunk = Some((image_url.to_string(), mime));
+                    }
+                }
+            }
+            let Some((image_url, mime)) = final_chunk else {
+                return Err(GrokWebExecutorError::Media(
+                    "grok returned no completed image chunk — prompt may have been moderated or image generation is unavailable for this account".into(),
+                ));
+            };
+            let url = format!("https://assets.grok.com/{image_url}");
+            let asset = download_grok_asset(&client, &url, &cookie_header, IMAGE_ASSET_TIMEOUT)
+                .await
+                .map_err(GrokWebExecutorError::Media)?
+                .ok_or_else(|| {
+                    GrokWebExecutorError::Media("image download failed: empty body".into())
+                })?;
+            results.push(GrokMediaAsset {
+                b64: asset.b64,
+                mime: if mime.is_empty() { asset.mime } else { mime },
+            });
+        }
+        Ok(results)
+    }
+}
+
+/// One generated media asset returned by `generateMedia`.
+#[derive(Debug)]
+pub struct GrokMediaAsset {
+    pub b64: String,
+    pub mime: String,
+}
+
+const IMAGE_TURN_TIMEOUT: Duration = Duration::from_secs(170);
+const VIDEO_TURN_TIMEOUT: Duration = Duration::from_secs(300);
+const IMAGE_ASSET_TIMEOUT: Duration = Duration::from_secs(60);
+const VIDEO_ASSET_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `buildGrokVideoPayload` (executors/grok-web.js:39-57): Grok Imagine
+/// text-to-video, 480p, 16:9 default aspect, 6s default duration.
+fn build_grok_video_payload(prompt: &str, size: Option<&str>, duration: Option<f64>) -> Value {
+    let aspect_ratio = size
+        .filter(|s| {
+            let parts: Vec<&str> = s.split(':').collect();
+            parts.len() == 2
+                && parts[0].len() <= 2
+                && parts[0].chars().all(|c| c.is_ascii_digit())
+                && parts[1].len() <= 2
+                && parts[1].chars().all(|c| c.is_ascii_digit())
+        })
+        .unwrap_or("16:9");
+    let duration = duration.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(6.0);
+    json!({
+        "modelName": "imagine-video-gen",
+        "message": format!("{prompt} --mode=custom"),
+        "enableImageStreaming": true,
+        "enableSideBySide": true,
+        "sendFinalMetadata": true,
+        "responseMetadata": { "experiments": [], "modelConfigOverride": { "modelMap": {} } },
+        "mediaGenInput": {
+            "textToVideo": {
+                "prompt": prompt,
+                "aspectRatio": aspect_ratio,
+                "duration": duration,
+                "resolutionName": "480p",
+            },
+        },
+        "kind": "CONVERSATION_KIND_IMAGINE",
+    })
+}
+
+/// Media-turn headers (executors/grok-web.js:512-524): same fingerprint set
+/// as chat minus traceparent, `Accept: text/event-stream`, and a shared
+/// Browser-Id / x-xai-request-id pair.
+fn media_headers(cookie_header: &str, request_id: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        HeaderValue::from_static(GROK_USER_AGENT),
+    );
+    headers.insert(
+        "Sec-Ch-Ua",
+        HeaderValue::from_static(r#""Chromium";v="146", "Not(A:Brand";v="24""#),
+    );
+    headers.insert("Sec-Ch-Ua-Mobile", HeaderValue::from_static("?0"));
+    headers.insert("Sec-Ch-Ua-Platform", HeaderValue::from_static(r#""macOS""#));
+    headers.insert(ORIGIN, HeaderValue::from_static("https://grok.com"));
+    headers.insert(REFERER, HeaderValue::from_static("https://grok.com/"));
+    for name in ["Browser-Id", "x-xai-request-id"] {
+        if let Ok(v) = HeaderValue::from_str(request_id) {
+            headers.insert(name, v);
+        }
+    }
+    if let Ok(v) = HeaderValue::from_str(&generate_statsig_id()) {
+        headers.insert("x-statsig-id", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(cookie_header) {
+        headers.insert(COOKIE, v);
+    }
+    headers
+}
+
+/// Deep-scan the NDJSON reply for the finished video asset — any `.mp4`
+/// URL/path found in nested (possibly stringified) JSON
+/// (`findGrokVideoUrl`, executors/grok-web.js:66-90).
+fn find_grok_video_url(text: &str) -> Option<String> {
+    fn visit(value: &Value, found: &mut Vec<String>) {
+        if found.len() > 8 {
+            return;
+        }
+        match value {
+            Value::String(s) => {
+                if s.to_ascii_lowercase().contains(".mp4")
+                    && (s.contains(".mp4?") || s.contains(".mp4#") || s.ends_with(".mp4"))
+                {
+                    found.push(s.clone());
+                    return;
+                }
+                let trimmed = s.trim();
+                if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    if let Ok(inner) = serde_json::from_str::<Value>(trimmed) {
+                        visit(&inner, found);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    visit(item, found);
+                }
+            }
+            Value::Object(map) => {
+                for v in map.values() {
+                    visit(v, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    // The stream is NDJSON — visit every line that parses as JSON.
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            visit(&value, &mut found);
+        }
+        if !found.is_empty() {
+            break;
+        }
+    }
+    found.into_iter().next()
+}
+
+/// Download a `assets.grok.com` asset as base64 (`generateMedia` download
+/// step). Returns `None` on non-2xx so callers can emit upstream-style
+/// errors.
+async fn download_grok_asset(
+    client: &reqwest::Client,
+    url: &str,
+    cookie_header: &str,
+    timeout: Duration,
+) -> Result<Option<GrokMediaAsset>, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        HeaderValue::from_static(GROK_USER_AGENT),
+    );
+    headers.insert(REFERER, HeaderValue::from_static("https://grok.com/"));
+    if let Ok(v) = HeaderValue::from_str(cookie_header) {
+        headers.insert(COOKIE, v);
+    }
+    let resp = client
+        .get(url)
+        .headers(headers)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| format!("asset download failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ct| ct.split(';').next())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("asset download failed: {e}"))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(GrokMediaAsset {
+        b64: STANDARD.encode(&bytes),
+        mime,
+    }))
 }
 
 pub struct PerplexityWebExecutionRequest {
@@ -2304,10 +2736,75 @@ mod tests {
         let message =
             parse_openai_messages(body.get("messages").and_then(Value::as_array).unwrap());
         let transformed = executor.build_payload(model_info, &message);
-        assert_eq!(transformed["modelName"], "grok-420");
+        // v0.5.112 MODEL_MAP: every alias routes to grok-4-1-thinking-1129.
+        assert_eq!(transformed["modelName"], "grok-4-1-thinking-1129");
         assert_eq!(transformed["modelMode"], "MODEL_MODE_GROK_420");
         assert_eq!(transformed["message"], "system: S\n\nU");
         assert_eq!(transformed["temporary"], true);
+    }
+
+    #[test]
+    fn test_grok_model_map_all_route_to_4_1() {
+        // Upstream v0.5.112: conversations/new only accepts
+        // grok-4-1-thinking-1129; legacy grok-3/grok-4/420 names 403.
+        for (id, info) in model_map() {
+            assert_eq!(
+                info.grok_model, "grok-4-1-thinking-1129",
+                "{id} must route to grok-4-1-thinking-1129"
+            );
+        }
+        let get = |id: &str| {
+            model_map()
+                .iter()
+                .find(|(k, _)| *k == id)
+                .map(|(_, i)| i)
+                .unwrap()
+        };
+        assert_eq!(get("grok-3").model_mode, "MODEL_MODE_FAST");
+        assert!(!get("grok-3").is_thinking);
+        assert_eq!(
+            get("grok-3-mini").model_mode,
+            "MODEL_MODE_GROK_4_1_MINI_THINKING"
+        );
+        assert!(get("grok-3-thinking").is_thinking);
+        assert_eq!(get("grok-4-heavy").model_mode, "MODEL_MODE_EXPERT");
+        assert_eq!(get("grok-4.2").model_mode, "MODEL_MODE_GROK_420");
+        assert_eq!(get("grok-4.20").model_mode, "MODEL_MODE_GROK_420");
+        assert_eq!(get("grok-4.20-beta").model_mode, "MODEL_MODE_GROK_420");
+        assert_eq!(get("grok-4.1-fast").model_mode, "MODEL_MODE_FAST");
+    }
+
+    #[test]
+    fn test_build_grok_cookie_header() {
+        // Bare sso value.
+        assert_eq!(build_grok_cookie_header("abc123"), "sso=abc123");
+        // name=value pair.
+        assert_eq!(build_grok_cookie_header("sso=tok"), "sso=tok");
+        // Full DevTools blob forwards paired cookies.
+        assert_eq!(
+            build_grok_cookie_header("sso=tok; sso-rw=rw; cf_clearance=cf; __cf_bm=bm; other=x"),
+            "sso=tok; sso-rw=rw; cf_clearance=cf; __cf_bm=bm"
+        );
+        // sso without sso-rw still works (bare blob).
+        assert_eq!(
+            build_grok_cookie_header("foo=1; sso=tok2; bar=2"),
+            "sso=tok2"
+        );
+        // No sso -> empty.
+        assert_eq!(build_grok_cookie_header("foo=1; bar=2"), "");
+        assert_eq!(build_grok_cookie_header(""), "");
+        // Bearer / Cookie: prefixes stripped.
+        assert_eq!(build_grok_cookie_header("Bearer sso=tok3"), "sso=tok3");
+        assert_eq!(build_grok_cookie_header("Cookie: sso=tok4"), "sso=tok4");
+    }
+
+    #[test]
+    fn test_is_cloudflare_challenge() {
+        assert!(is_cloudflare_challenge("<title>Just a moment...</title>"));
+        assert!(is_cloudflare_challenge("Attention Required! | Cloudflare"));
+        assert!(is_cloudflare_challenge("cf-mitigated: challenge"));
+        assert!(!is_cloudflare_challenge("{\"error\":\"unauthorized\"}"));
+        assert!(!is_cloudflare_challenge(""));
     }
 
     #[test]

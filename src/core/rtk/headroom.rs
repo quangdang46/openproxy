@@ -489,9 +489,13 @@ fn build_openai_body(messages: &[Value], model: &str) -> Value {
     })
 }
 
-/// Handle Claude-shaped bodies: flatten content blocks to simple
-/// `{role, content}` strings before POSTing (the Headroom proxy expects
-/// OpenAI-format text messages), then write compressed messages back.
+/// Handle Claude-shaped bodies: project only text leaves onto flat OpenAI
+/// messages for the `/v1/compress` proxy, then write compressed text back
+/// into the native blocks. Documents, signed thinking, tool_use inputs and
+/// tool_result metadata stay untouched — the previous implementation
+/// flattened every block to text and overwrote `body.messages`, which was
+/// data loss (#4670). 9router `collectClaudeHeadroomMessages` +
+/// `applyProjectedHeadroomMessages` (headroom.js:170-208, 342-368).
 async fn compress_claude_body(
     body: &mut Value,
     config: &HeadroomConfig,
@@ -499,8 +503,8 @@ async fn compress_claude_body(
     hooks: Option<&dyn HeadroomHooks>,
     mut diagnostics: Option<&mut HeadroomDiagnostics>,
 ) -> Option<HeadroomStats> {
-    let raw_messages = match body.get("messages").and_then(Value::as_array) {
-        Some(m) => m.clone(),
+    let proj = match collect_claude_headroom_messages(body) {
+        Some(p) => p,
         None => {
             if let Some(d) = diagnostics.as_deref_mut() {
                 d.set_reason("Claude request has no eligible text content");
@@ -509,59 +513,28 @@ async fn compress_claude_body(
         }
     };
 
-    // Flatten Claude's typed content blocks to plain text messages
-    // so the Headroom proxy (which expects OpenAI format) can process them.
-    let flat_messages: Vec<Value> = raw_messages
-        .iter()
-        .map(|msg| {
-            let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
-            let content = match msg.get("content") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Array(blocks)) => blocks
-                    .iter()
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                _ => String::new(),
-            };
-            json!({"role": role, "content": content})
-        })
-        .collect();
-
-    // Notify hook before compression.
     if let Some(h) = hooks {
-        h.before_compress(&flat_messages);
+        h.before_compress(&proj.messages);
     }
+    let data = call_compress(config, &proj.messages, model, diagnostics.as_deref_mut()).await?;
+    let stats = parse_stats(&data);
+    let compressed = data.get("messages").and_then(Value::as_array).cloned()?;
 
-    let original_size = serde_json::to_string(&flat_messages)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let data = call_compress(config, &flat_messages, model, diagnostics.as_deref_mut()).await?;
-
-    // Write compressed messages back into the Claude body.
-    if let Some(compressed) = data.get("messages").and_then(Value::as_array) {
-        body["messages"] = Value::Array(compressed.clone());
-    } else {
-        if let Some(h) = hooks {
-            h.after_compress(
-                original_size,
-                0,
-                &Err("no messages in response".to_string()),
-            );
-        }
+    if !apply_projected_headroom_messages(
+        body,
+        &proj,
+        &compressed,
+        "Claude",
+        diagnostics.as_deref_mut(),
+    ) {
         return None;
     }
 
-    let compressed_size = data
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|arr| serde_json::to_string(arr).ok())
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let stats = parse_stats(&data);
-
+    if let Some(d) = diagnostics {
+        d.after = Some(capture_size_snapshot(body));
+    }
     if let Some(h) = hooks {
-        h.after_compress(original_size, compressed_size, &Ok(stats.clone()));
+        h.after_compress(0, 0, &Ok(stats.clone()));
     }
     Some(stats)
 }
@@ -1164,6 +1137,153 @@ fn apply_tool_output_text(
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// Claude projection (9router collectClaudeHeadroomMessages, headroom.js:170-208)
+// ---------------------------------------------------------------------------
+
+/// Push one projected text leaf. `tool_call_id` is set for tool_result content
+/// so the proxy sees a valid OpenAI tool message (upstream `extra`).
+fn push_claude_text_target(
+    proj: &mut HeadroomProjection,
+    role: &str,
+    text: &str,
+    path: Vec<TargetSeg>,
+    tool_call_id: Option<&str>,
+) {
+    let mut msg = json!({"role": role, "content": text});
+    if let Some(id) = tool_call_id {
+        msg["tool_call_id"] = json!(id);
+    }
+    proj.push(
+        msg,
+        Some(TextTarget {
+            path,
+            text_len: text.chars().count(),
+        }),
+    );
+}
+
+/// Port of upstream `addContent`/`addText` (headroom.js:174-186): a string
+/// content value becomes one projected message; an array contributes only its
+/// `type:"text"` blocks — documents, images, tool_use inputs and signed
+/// thinking are never projected.
+fn add_claude_content(
+    proj: &mut HeadroomProjection,
+    role: &str,
+    content: &Value,
+    base_path: Vec<TargetSeg>,
+    tool_call_id: Option<&str>,
+) {
+    match content {
+        Value::String(s) => push_claude_text_target(proj, role, s, base_path, tool_call_id),
+        Value::Array(blocks) => {
+            for (bi, block) in blocks.iter().enumerate() {
+                if block.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    let mut p = base_path.clone();
+                    p.push(TargetSeg::Index(bi));
+                    p.push(TargetSeg::Key("text".into()));
+                    push_claude_text_target(proj, role, text, p, tool_call_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Project Claude text leaves onto flat OpenAI messages + write-back targets.
+/// Returns `None` when `body.messages` is not an array or no writable text
+/// leaf exists (upstream `targets.some(Boolean)` gate).
+fn collect_claude_headroom_messages(body: &Value) -> Option<HeadroomProjection> {
+    let messages = body.get("messages").and_then(Value::as_array)?;
+    let mut proj = HeadroomProjection::default();
+
+    // Top-level system prompt is compressed too (headroom.js:189).
+    if let Some(system) = body.get("system") {
+        add_claude_content(
+            &mut proj,
+            "system",
+            system,
+            vec![TargetSeg::Key("system".into())],
+            None,
+        );
+    }
+
+    for (mi, message) in messages.iter().enumerate() {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        let msg_base = vec![
+            TargetSeg::Key("messages".into()),
+            TargetSeg::Index(mi),
+            TargetSeg::Key("content".into()),
+        ];
+        let blocks: Vec<&Value> = message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().collect())
+            .unwrap_or_default();
+
+        // Assistant tool_use blocks become OpenAI tool_calls context for the
+        // proxy — a null target, never written back (headroom.js:192-202).
+        let tool_uses: Vec<&&Value> = blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .collect();
+        if role == "assistant" && !tool_uses.is_empty() {
+            let tool_calls: Vec<Value> = tool_uses
+                .iter()
+                .map(|b| {
+                    let input = b.get("input").cloned().unwrap_or(Value::Null);
+                    let args = if input.is_null() {
+                        "{}".to_string()
+                    } else {
+                        serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string())
+                    };
+                    json!({
+                        "id": b.get("id").cloned().unwrap_or(Value::Null),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name").cloned().unwrap_or(Value::Null),
+                            "arguments": args
+                        }
+                    })
+                })
+                .collect();
+            proj.push(
+                json!({"role": "assistant", "content": "", "tool_calls": tool_calls}),
+                None,
+            );
+        }
+
+        // Message content (string or text blocks).
+        if let Some(content) = message.get("content") {
+            add_claude_content(&mut proj, role, content, msg_base.clone(), None);
+        }
+
+        // tool_result blocks project their inner text leaves as role:"tool"
+        // messages keyed by tool_use_id (headroom.js:203-208).
+        for (bi, block) in blocks.iter().enumerate() {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let tool_call_id = block.get("tool_use_id").and_then(Value::as_str);
+            if let Some(content) = block.get("content") {
+                let mut p = msg_base.clone();
+                p.push(TargetSeg::Index(bi));
+                p.push(TargetSeg::Key("content".into()));
+                add_claude_content(&mut proj, "tool", content, p, tool_call_id);
+            }
+        }
+    }
+
+    if proj.targets.iter().any(|t| t.is_some()) {
+        Some(proj)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2788,5 +2908,141 @@ mod tests {
             reason.starts_with("request failed:") || reason.contains("HTTP"),
             "expected transport failure reason, got: {reason}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Claude projection tests (#4670)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn claude_projection_collects_text_leaves_only() {
+        let body = json!({
+            "model": "claude-3",
+            "system": [{"type": "text", "text": "You are helpful"}],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hello world"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "calling tool"},
+                    {"type": "tool_use", "id": "tu1", "name": "read", "input": {"path": "/x"}},
+                    {"type": "thinking", "thinking": "secret", "signature": "sig"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": [
+                        {"type": "text", "text": "file contents here"},
+                        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}
+                    ]}
+                ]}
+            ]
+        });
+
+        let proj = collect_claude_headroom_messages(&body).expect("projection");
+        // system text, user text, assistant pseudo(tool_calls), assistant
+        // text, tool_result text = 5 messages.
+        assert_eq!(proj.messages.len(), 5);
+        assert_eq!(proj.messages[0]["role"], "system");
+        assert_eq!(proj.messages[0]["content"], "You are helpful");
+        assert_eq!(proj.messages[1]["role"], "user");
+        assert_eq!(proj.messages[1]["content"], "hello world");
+        // Assistant tool_use pseudo-message carries OpenAI tool_calls and a
+        // null target.
+        assert_eq!(proj.messages[2]["role"], "assistant");
+        assert_eq!(proj.messages[2]["content"], "");
+        assert_eq!(proj.messages[2]["tool_calls"][0]["id"], "tu1");
+        assert_eq!(
+            proj.messages[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"/x\"}"
+        );
+        assert!(proj.targets[2].is_none());
+        assert_eq!(proj.messages[3]["role"], "assistant");
+        assert_eq!(proj.messages[3]["content"], "calling tool");
+        assert_eq!(proj.messages[4]["role"], "tool");
+        assert_eq!(proj.messages[4]["tool_call_id"], "tu1");
+        assert_eq!(proj.messages[4]["content"], "file contents here");
+        // Image / thinking blocks never become targets.
+        assert!(proj
+            .targets
+            .iter()
+            .all(|t| t.as_ref().map(|t| t.path.len()).unwrap_or(0) > 0 || t.is_some()));
+    }
+
+    #[test]
+    fn claude_projection_none_without_text_leaves() {
+        let body = json!({
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu1", "name": "read", "input": {}}
+                ]}
+            ]
+        });
+        // Only a null-target pseudo message -> upstream targets.some(Boolean)
+        // is false -> None.
+        assert!(collect_claude_headroom_messages(&body).is_none());
+    }
+
+    #[test]
+    fn claude_projection_apply_preserves_native_blocks() {
+        let body = json!({
+            "system": "sys prompt text",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "a very long user message that should be compressed"},
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "PDF"}},
+                    {"type": "tool_result", "tool_use_id": "tu1", "is_error": true, "content": "tool output text"}
+                ]}
+            ]
+        });
+        let proj = collect_claude_headroom_messages(&body).expect("projection");
+        assert_eq!(proj.messages.len(), 3);
+        // system, user text, tool_result string content.
+        assert_eq!(proj.messages[2]["role"], "tool");
+        assert_eq!(proj.messages[2]["tool_call_id"], "tu1");
+
+        // Simulate compressed proxy response.
+        let compressed: Vec<Value> = proj
+            .messages
+            .iter()
+            .map(|m| {
+                json!({
+                    "role": m["role"].clone(),
+                    "content": "c",
+                    "tool_call_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null)
+                })
+            })
+            .collect();
+        let mut body2 = body.clone();
+        assert!(apply_projected_headroom_messages(
+            &mut body2,
+            &proj,
+            &compressed,
+            "Claude",
+            None
+        ));
+        // Text leaves written back; everything else preserved.
+        assert_eq!(body2["system"], "c");
+        assert_eq!(body2["messages"][0]["content"][0]["text"], "c");
+        assert_eq!(body2["messages"][0]["content"][1]["type"], "document");
+        assert_eq!(body2["messages"][0]["content"][2]["content"], "c");
+        assert_eq!(body2["messages"][0]["content"][2]["is_error"], true);
+    }
+
+    #[test]
+    fn claude_projection_apply_rejects_mismatched_count() {
+        let body = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        let proj = collect_claude_headroom_messages(&body).expect("projection");
+        let mut body2 = body.clone();
+        assert!(!apply_projected_headroom_messages(
+            &mut body2,
+            &proj,
+            &[],
+            "Claude",
+            None
+        ));
+        // Body untouched on failure.
+        assert_eq!(body2, body);
     }
 }

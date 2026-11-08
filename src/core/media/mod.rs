@@ -19,4 +19,5 @@ pub mod image;
 pub mod responses;
 pub mod search;
 pub mod stt;
+pub mod systemone;
 pub mod tts;

@@ -284,9 +284,26 @@ fn claude_adaptive_supports_xhigh(model: &str) -> bool {
 }
 
 fn is_gemini_level_model(model: &str) -> bool {
-    // Gemini 3.x uses thinkingLevel; 2.5 uses thinkingBudget.
+    // Gemini 3.x/4.x (Argon) use thinkingLevel; 2.5 uses thinkingBudget.
+    // 9router thinkingLevels.js `*gemini-4*` pattern + capabilities.js
+    // `thinkingFormat: "gemini-level"` (commit 29fc880).
     let m = model.to_ascii_lowercase();
-    m.contains("gemini-3") || m.contains("gemini3")
+    m.contains("gemini-3")
+        || m.contains("gemini3")
+        || crate::core::translator::request::openai_to_gemini::is_gemini4_model(model)
+}
+
+/// Selectable `thinkingLevel` values per 9router `PATTERN_THINKING` /
+/// `FORMAT_LEVELS["gemini-level"]` (thinkingLevels.js): Gemini 4 (Argon)
+/// rejects `"minimal"` with 400 — LOW is the floor and thinking cannot be
+/// disabled; every other gemini-level model keeps the minimal|low|medium|high
+/// enum.
+fn gemini_level_supported_levels(model: &str) -> &'static [&'static str] {
+    if crate::core::translator::request::openai_to_gemini::is_gemini4_model(model) {
+        &["low", "medium", "high"]
+    } else {
+        &["minimal", "low", "medium", "high"]
+    }
 }
 
 /// True when the body already carries a client- or settings-provided thinking intent.
@@ -841,10 +858,20 @@ pub fn apply_thinking_intent(
             ensure_gemini_output_floor(body, gemini_budget_output_floor(b));
         }
         ThinkingNative::GeminiLevel => {
-            let glevel = if none {
+            let glevel_raw = if none {
                 "minimal"
             } else {
                 effort_to_gemini_thinking_level(&level)
+            };
+            // 9router thinkingUnified.js `gemini-level` arm: a level outside
+            // the model's advertised set clamps to the LOWEST supported one —
+            // Gemini 4 (Argon) has no "minimal" tier, so none/auto intents
+            // land on "low" instead of 400ing upstream.
+            let supported = gemini_level_supported_levels(model);
+            let glevel = if supported.contains(&glevel_raw) {
+                glevel_raw
+            } else {
+                supported[0]
             };
             set_gemini_thinking(
                 body,
@@ -1326,6 +1353,47 @@ mod tests {
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["includeThoughts"],
             true
+        );
+    }
+
+    /// 9router thinkingLevels.js `*gemini-4*` → `[low, medium, high]` +
+    /// capabilities `thinkingCanDisable: false` (commit 29fc880): Argon
+    /// rejects `"minimal"` with 400 and cannot disable thinking, so none/
+    /// minimal intents clamp to `low` while supported levels pass through.
+    #[test]
+    fn gemini4_argon_thinking_level_clamp() {
+        for level in ["none", "minimal"] {
+            let mut body = json!({"contents": []});
+            apply_thinking_level(Format::Gemini, "gemini", "gemini-4-argon", &mut body, level);
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"], "low",
+                "{level} must clamp to low on gemini-4"
+            );
+        }
+        let mut body = json!({"contents": []});
+        apply_thinking_level(
+            Format::Gemini,
+            "gemini",
+            "gemini-4-argon",
+            &mut body,
+            "high",
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "high"
+        );
+        // Gemini 3 keeps the minimal tier.
+        let mut body = json!({"contents": []});
+        apply_thinking_level(
+            Format::Gemini,
+            "gemini",
+            "gemini-3-pro",
+            &mut body,
+            "minimal",
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "minimal"
         );
     }
 

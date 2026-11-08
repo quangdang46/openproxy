@@ -31,15 +31,20 @@ const OAUTH_REGISTRY_IDS: &[&str] = &[
     "gemini-cli",
     "github",
     "gitlab",
+    "glm",
     "iflow",
     "kilocode",
     "kimchi",
     "kimi",
     "kimi-coding",
     "kiro",
+    "minimax-code",
+    "minimax-code-global",
+    "muse",
     "nous",
     "openai-native",
     "qoder",
+    "qoder-cn",
     "trae",
     "xai",
     "zed",
@@ -56,8 +61,13 @@ const DEVICE_CODE_IDS: &[&str] = &[
     "codebuddy-cn",
     "codebuddy-intl",
     "qoder",
+    "qoder-cn",
+    "minimax-code",
+    "minimax-code-global",
     "grok-cli",
+    "glm",
     "nous",
+    "muse",
 ];
 
 /// OAuth providers routed to a dedicated executor instead of `DefaultExecutor`.
@@ -71,6 +81,7 @@ const DEDICATED_EXECUTOR_PROVIDERS: &[&str] = &[
     "kimchi",       // KimchiExecutor
     "kiro",         // KiroExecutor
     "qoder",        // QoderExecutor
+    "qoder-cn",     // QoderExecutor (CN region)
     "trae",         // TraeExecutor
     "zed",          // ZedExecutor
     // OAuth config only: no dispatch branch and no connection may select it

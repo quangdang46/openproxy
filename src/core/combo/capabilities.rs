@@ -228,7 +228,7 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("gpt-5.6-luna-thinking-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
         ]));
         table.insert("codebuddy-cn", HashMap::from([
-            ("glm-5.2", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 48000 })),
+            ("glm-5.2", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
             ("glm-5.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
             ("glm-5.0", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 48000 })),
             ("glm-5.0-turbo", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
@@ -243,6 +243,11 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("deepseek-v4-pro", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 50000 })),
             ("deepseek-v4-flash", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 50000 })),
             ("deepseek-v3-2-volc", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 96000, "maxOutput": 32000 })),
+            // GLM-5.3 line on the CN gateway: openai reasoning_effort shape and
+            // thinking CAN be disabled here (unlike z.ai's own lines) —
+            // upstream PROVIDER_CAPABILITIES["codebuddy-cn"].
+            ("glm-5.3", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
+            ("glm-5.3-flash", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
         ]));
         table.insert("poolside", HashMap::from([
             ("laguna-s-2.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 32000 })),
@@ -427,7 +432,11 @@ static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::ne
         ),
         (
             "glm-4.6v",
-            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "zai", "contextWindow": 128000 }),
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "zai", "contextWindow": 128000, "maxOutput": 32768 }),
+        ),
+        (
+            "glm-4.5v",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "zai", "contextWindow": 64000, "maxOutput": 16384 }),
         ),
         (
             "vision-model",
@@ -508,6 +517,68 @@ static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::ne
         (
             "glm-5.3-flash-free",
             serde_json::json!({ "vision": true, "videoInput": true, "pdf": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        // GLM-5.2 exact entry (upstream capabilities.js MODEL_CAPABILITIES):
+        // shadows the *glm-5.2* pattern completely, so it must repeat
+        // thinkingEffortSupported or reasoning_effort is dropped; z.ai's 5.2
+        // line also rejects thinking.type "disabled".
+        (
+            "glm-5.2",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "thinkingEffortSupported": true, "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
+        // Kimi K3.1 Pro (commandcode + opencode-go, upstream 5cd4a756).
+        (
+            "kimi-k3.1-pro",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        // OpenCode free-tier ids (upstream MODEL_CAPABILITIES, 4c58e7f et al).
+        (
+            "union-alpha",
+            serde_json::json!({ "vision": true, "contextWindow": 262144, "maxOutput": 131072 }),
+        ),
+        (
+            "space-bunny-free",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 524288 }),
+        ),
+        (
+            "space-bunny",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 524288 }),
+        ),
+        (
+            "big-pickle",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 }),
+        ),
+        (
+            "exo-free",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "fledge-alpha-free",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "longcat-2.0",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
+        (
+            "longcat-2.0-free",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
+        (
+            "longcat-2.5-preview-free",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
+        (
+            "north-mini-code-free",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 256000, "maxOutput": 64000 }),
+        ),
+        (
+            "ring-2.6-1t-free",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 262000, "maxOutput": 66000 }),
+        ),
+        (
+            "x-preview-f-free",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 131072 }),
         ),
     ])
 });
@@ -608,6 +679,14 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
             serde_json::json!({ "vision": true, "imageOutput": true, "contextWindow": 1048576 }),
         ),
         (
+            "*gemini-4*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
+            "*gemini-3.8*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
             "*gemini-3.7*",
             serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
         ),
@@ -618,6 +697,10 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         (
             "*gemini-3*",
             serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
+            "*gemini-2.5*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-budget", "thinkingRange": { "min": 0, "max": 24576 }, "contextWindow": 1048576, "maxOutput": 65536 }),
         ),
         (
             "*gemini-2*",
@@ -721,6 +804,14 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
             serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 256000 }),
         ),
         (
+            "*grok-4.7*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 500000 }),
+        ),
+        (
+            "*grok-4.6*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 500000 }),
+        ),
+        (
             "*grok-4.5*",
             serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 64000 }),
         ),
@@ -750,7 +841,7 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         ),
         (
             "*qwen*max*",
-            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
         ),
         (
             "*qwen3.5*",
@@ -810,6 +901,10 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
             serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "thinkingEffortSupported": true, "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
+            "*glm-5.2*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "thinkingEffortSupported": true, "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
             "*glm-5*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 }),
         ),
@@ -830,11 +925,11 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         // (upstream capabilities.js PATTERN_CAPABILITIES).
         (
             "*deepseek-v4.*",
-            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "thinkingEffortSupported": true, "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "*deepseek-v4*",
-            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 }),
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "thinkingEffortSupported": true, "contextWindow": 1000000, "maxOutput": 384000 }),
         ),
         (
             "*reasoner*",
@@ -858,27 +953,35 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         ),
         (
             "*minimax-m3*",
-            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "contextWindow": 1048576, "maxOutput": 512000 }),
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "contextWindow": 1000000, "maxOutput": 131072 }),
         ),
         (
             "*minimax-m2.7*",
-            serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 204800, "maxOutput": 131072 }),
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 204800, "maxOutput": 131072 }),
+        ),
+        (
+            "*minimax-m2.5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 204800, "maxOutput": 131072 }),
         ),
         (
             "*minimax*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 131072 }),
         ),
         (
+            "*mimo*v2.6*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
             "*mimo*v2.5*",
-            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "contextWindow": 1048576, "maxOutput": 131072 }),
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
         ),
         (
             "*mimo*omni*",
-            serde_json::json!({ "vision": true, "audioInput": true, "contextWindow": 262144, "maxOutput": 131072 }),
+            serde_json::json!({ "vision": true, "audioInput": true, "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 131072 }),
         ),
         (
             "*mimo*",
-            serde_json::json!({ "vision": true, "contextWindow": 262144, "maxOutput": 131072 }),
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 131072 }),
         ),
         (
             "*llama-4*",
@@ -1507,6 +1610,22 @@ mod tests {
         assert!(chat.vision && !chat.image_output);
     }
 
+    /// 9router capabilities.js PATTERN_CAPABILITIES `*gemini-4*` (commit
+    /// 29fc880): Argon is multimodal with non-disableable gemini-level
+    /// thinking, 1M context, 64K output.
+    #[test]
+    fn gemini_4_argon_capability_pattern() {
+        for model in ["gemini-4-argon", "google/gemini-4-argon-high"] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.thinking_format, Some("gemini-level"), "{model}");
+            assert!(!caps.thinking_can_disable, "{model}");
+            assert_eq!(caps.context_window, 1_048_576, "{model}");
+            assert_eq!(caps.max_output, 65_536, "{model}");
+            assert!(caps.audio_input, "{model}");
+            assert!(caps.video_input, "{model}");
+        }
+    }
+
     #[test]
     fn pattern_fallback_and_floor() {
         // Unknown family → floor defaults.
@@ -1719,9 +1838,14 @@ mod tests {
         assert!(flash.vision && flash.video_input && flash.pdf);
         assert_eq!(flash.context_window, 1_000_000);
         assert_eq!(flash.max_output, 131_072);
-        // Older GLM lines keep the disable-able default.
+        // GLM-5.2 has its own exact entry upstream (1M window, zai shape,
+        // thinking cannot be disabled); older lines keep the default.
         let glm52 = get_capabilities_for_model("", "glm-5.2");
-        assert!(glm52.thinking_can_disable);
+        assert!(!glm52.thinking_can_disable);
+        assert_eq!(glm52.thinking_format, Some("zai"));
+        assert_eq!(glm52.context_window, 1_000_000);
+        let glm51 = get_capabilities_for_model("", "glm-5.1");
+        assert!(glm51.thinking_can_disable);
     }
 
     #[test]

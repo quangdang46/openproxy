@@ -126,6 +126,35 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::claude_compatible("https://api.minimaxi.com/anthropic/v1/messages"),
         ),
         (
+            // 9router registry/minimax-code.js — MiniMax Code (mcode) OAuth
+            // device-flow provider. Claude-format transport on the mavis agent
+            // gateway; per-request headers (x-api-key placeholder,
+            // X-Mavis-Timezone-Offset, X-Mavis-Session-Id) are applied by the
+            // minimaxHeaders hook in build_headers.
+            "minimax-code",
+            ProviderConfig::claude_compatible(
+                "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages",
+            )
+            .with_header("User-Agent", "MiniMaxAgent")
+            .with_header("X-Mavis-Agent-Id", "main"),
+        ),
+        (
+            // 9router registry/minimax-code-global.js — same wire protocol,
+            // international hosts (agent.minimax.io / account.minimax.io).
+            "minimax-code-global",
+            ProviderConfig::claude_compatible(
+                "https://agent.minimax.io/mavis/api/v1/llm/v1/messages",
+            )
+            .with_header("User-Agent", "MiniMaxAgent")
+            .with_header("X-Mavis-Agent-Id", "main"),
+        ),
+        (
+            // 9router registry/tokenharbor.js — OpenAI-compatible aggregator;
+            // bare model ids pass through, live catalogue via /v1/models.
+            "tokenharbor",
+            ProviderConfig::openai("https://tokenharbor.ai/v1/chat/completions"),
+        ),
+        (
             "deepseek",
             ProviderConfig::openai("https://api.deepseek.com/chat/completions"),
         ),
@@ -301,6 +330,29 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             // OpenAI-compatible chat completions.
             "sensenova",
             ProviderConfig::openai("https://token.sensenova.cn/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/dahl.js — Gonka inference node
+            // (inference.dahl.global), OpenAI-compatible /v1/chat/completions.
+            "dahl",
+            ProviderConfig::openai("https://inference.dahl.global/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/atria.js — Atria Dawn (AtomInnoLab) research
+            // preview, single case-sensitive model id.
+            "atria",
+            ProviderConfig::openai("https://api.atria-asi.ai/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/agnes.js — Agnes AI gateway; accepts a bearer
+            // token or x-api-key (the generic Bearer arm covers both).
+            "agnes",
+            ProviderConfig::openai("https://apihub.agnes-ai.com/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/bai.js — B.AI OpenAI-compatible gateway.
+            "bai",
+            ProviderConfig::openai("https://api.b.ai/v1/chat/completions"),
         ),
         (
             "venice",
@@ -553,6 +605,37 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         (
             "nous-research",
             ProviderConfig::openai("https://inference-api.nousresearch.com/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/muse.js — Meta Model API. Dual transport
+            // (chat/completions + strict /responses) is resolved per-request
+            // by provider_transports; this entry is the DefaultExecutor
+            // fallback and the provider_config_* status surface.
+            "muse",
+            ProviderConfig::openai("https://api.meta.ai/v1/chat/completions"),
+        ),
+        (
+            // 9router registry/bedrock.js — SigV4 provider with a dedicated
+            // BedrockExecutor; this entry exists so provider_config_* status
+            // surfaces resolve it. The {region} host is built per-request by
+            // the executor, never from this base_url.
+            "bedrock",
+            ProviderConfig {
+                base_url: "https://bedrock-runtime.{region}.amazonaws.com".to_string(),
+                format: "claude".into(),
+                default_headers: Vec::new(),
+                fallback_urls: Vec::new(),
+            },
+        ),
+        (
+            // 9router registry/bedrock-xai.js — same SigV4 host, OpenAI wire.
+            "bedrock-xai",
+            ProviderConfig {
+                base_url: "https://bedrock-runtime.{region}.amazonaws.com".to_string(),
+                format: "openai".into(),
+                default_headers: Vec::new(),
+                fallback_urls: Vec::new(),
+            },
         ),
         (
             "glhf",
@@ -2153,6 +2236,39 @@ impl DefaultExecutor {
             // 400 / 11128 "request illegal".
             if matches!(self.provider.as_str(), "codebuddy-intl" | "codebuddy-cn") {
                 apply_codebuddy_channel_headers(&mut headers);
+            }
+            // 9router HEADER_HOOKS.museHeaders (executors/default.js): the
+            // subscription/OAuth credential (accessToken set, no apiKey) gets
+            // x-api-version; pay-as-you-go Model API keys do not.
+            if self.provider == "muse"
+                && credentials.access_token.is_some()
+                && credentials.api_key.is_none()
+            {
+                headers.insert(
+                    "x-api-version",
+                    HeaderValue::from_static(crate::oauth::muse::API_VERSION),
+                );
+            }
+            // 9router HEADER_HOOKS.minimaxHeaders (open-sse/executors/default.js):
+            // the mavis gateway wants the literal placeholder x-api-key next to
+            // the Bearer token, plus a per-request timezone offset (seconds east
+            // of UTC — JS `getTimezoneOffset() * -60`) and a session id.
+            if matches!(
+                self.provider.as_str(),
+                "minimax-code" | "minimax-code-global"
+            ) {
+                headers.insert("x-api-key", HeaderValue::from_static("sk-xxx"));
+                let tz_offset = chrono::Local::now().offset().local_minus_utc();
+                if let Ok(val) = HeaderValue::from_str(&tz_offset.to_string()) {
+                    headers.insert("X-Mavis-Timezone-Offset", val);
+                }
+                if !headers.contains_key("X-Mavis-Session-Id") {
+                    headers.insert(
+                        "X-Mavis-Session-Id",
+                        HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
+                            .unwrap_or_else(|_| HeaderValue::from_static("")),
+                    );
+                }
             }
             // Per-model Anthropic-Beta flags (9router default.js:218-223 +
             // shared.js selectAnthropicBeta/mergeAnthropicBeta). The client's

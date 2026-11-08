@@ -182,6 +182,23 @@ const UNSUPPORTED_SCHEMA_CONSTRAINTS: &[&str] = &[
     "strokeColor",
     "strokeThickness",
     "textColor",
+    // Non-standard annotation/error keywords used by some MCP tool schemas
+    // (#4283). Gemini's schema proto has no field for these and rejects the
+    // whole request with "Unknown name X: Cannot find field". The `x-`
+    // variants are listed for parity with upstream — `remove_unsupported_keywords`
+    // also strips any `x-` prefixed key dynamically.
+    "errorMessage",
+    "errorMessages",
+    "x-errorMessage",
+    "x-errorMessages",
+    "markdownDescription",
+    "x-intellij-html-description",
+    "x-taplo-info",
+    "x-taplo",
+    "doNotSuggest",
+    "suggestSortText",
+    "minProperties",
+    "maxProperties",
 ];
 
 /// Recursively remove unsupported keywords from a JSON schema (mutates in place).
@@ -1575,8 +1592,18 @@ mod tests {
         clean_json_schema_for_antigravity(&mut schema);
 
         let props = schema["properties"].as_object().unwrap();
-        // The `properties` param keeps its own schema untouched.
-        assert_eq!(props["properties"], json!({"type": "string"}));
+        // Phase 6 (`enforceTypeConstraints`, upstream gemini.js:393-425)
+        // recurses into EVERY object value — including the `properties` map
+        // itself. That map node has no `type`, so upstream deletes its
+        // `properties`/`required`/`items` keys, which are the params literally
+        // named `properties`/`required`/`items`. Verified against upstream:
+        // `cleanJSONSchemaForAntigravity` drops the `properties` param too.
+        // Parity keeps the strip; the .4 guarantee (the properties MAP is not
+        // a schema node for type inference) still holds for every other param.
+        assert!(
+            props.get("properties").is_none(),
+            "upstream Phase 6 strips a param literally named `properties`: {props:?}"
+        );
         // The nested object schema still gets type:"object" inferred.
         assert_eq!(
             props["nested"]["type"],
@@ -1929,5 +1956,59 @@ mod tests {
         assert!(!is_gemini4_model("gemini-4x"));
         assert!(!is_gemini4_model("mygemini-4-pro"));
         assert!(!is_gemini4_model(""));
+    }
+
+    // ---- #4283: non-standard MCP schema keywords must be stripped ----
+
+    #[test]
+    fn test_strips_nonstandard_mcp_schema_keywords() {
+        // Gemini rejects the whole request ("Unknown name X: Cannot find
+        // field") when a tool schema carries these keywords.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "errorMessage": "required",
+                    "errorMessages": {"required": "x"},
+                    "markdownDescription": "docs",
+                    "doNotSuggest": true,
+                    "suggestSortText": "1",
+                    "minProperties": 1,
+                    "maxProperties": 5,
+                    "x-taplo-info": {"foo": 1}
+                }
+            },
+            "minProperties": 1,
+            "maxProperties": 9,
+            "errorMessage": "top-level"
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+        let q = &schema["properties"]["q"];
+        for key in [
+            "errorMessage",
+            "errorMessages",
+            "markdownDescription",
+            "doNotSuggest",
+            "suggestSortText",
+            "minProperties",
+            "maxProperties",
+            "x-taplo-info",
+        ] {
+            assert!(
+                q.get(key).is_none(),
+                "property-level {key} must be stripped"
+            );
+        }
+        for key in ["minProperties", "maxProperties", "errorMessage"] {
+            assert!(
+                schema.get(key).is_none(),
+                "top-level {key} must be stripped"
+            );
+        }
+        // Standard keywords survive.
+        assert_eq!(q["type"], "string");
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].get("q").is_some());
     }
 }

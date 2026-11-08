@@ -38,7 +38,12 @@ bcrypt = "0.19"
 # Streaming / bytes
 bytes = "1"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 http-body-util = "0.1"
+# http-body 1.x Frame type — needed to replay buffered SSE head bytes AND
+# trailers when reconstructing a peeked combo stream (emptyFailover.js
+# reconstructStream parity). Already in the lockfile as a transitive dep.
+http-body = "1"
 tokio-util = { version = "0.7", features = ["io", "net", "codec"] }
 
 # Async runtime utilities
@@ -72,6 +77,8 @@ serde_urlencoded = "0.7"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 
 # UUID
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
@@ -83,9 +90,12 @@ dotenvy = "0.15"
 thiserror = "2"
 anyhow = "1"
 
-# AWS Signature for Kiro
+# AWS Signature for Kiro + Bedrock (SigV4). aws-config resolves profile/SSO
+# credentials (~/.aws config, sso cache, credential_process) for Bedrock's
+# profile auth mode — 9router parity with @aws-sdk/credential-providers.
 aws-credential-types = "1"
 aws-sigv4 = "1.4"
+aws-config = "1"
 
 # Compression
 flate2 = "1"

@@ -684,14 +684,17 @@ mod tests {
     }
 
     #[test]
-    fn zero_content_openai_reasoning_only_still_zero() {
-        // reasoning_content is not client content (think-then-abort).
+    fn usable_openai_reasoning_only_is_not_zero() {
+        // Upstream asymmetry: the non-stream JSON check DOES count
+        // reasoning_content as usable content (`hasReasoning` in
+        // isZeroContentResponse) — only the SSE peek excludes reasoning.
+        // A reasoning-only JSON completion is accepted, not failed over.
         let data = serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "",
                                      "reasoning_content": "thinking..."},
                          "finish_reason": "stop"}]
         });
-        assert!(is_zero_content_response(&data));
+        assert!(!is_zero_content_response(&data));
     }
 
     #[test]
@@ -718,10 +721,13 @@ mod tests {
 
     #[test]
     fn zero_content_claude_empty_blocks() {
+        // Upstream isZeroContentResponse Anthropic arm: empty content only
+        // fails over on an ABSENT or abnormal stop_reason — a normal
+        // "end_turn" empty message is accepted, same as OpenAI "stop".
         let data = serde_json::json!({
             "content": [], "stop_reason": "end_turn"
         });
-        assert!(is_zero_content_response(&data));
+        assert!(!is_zero_content_response(&data));
         let data2 = serde_json::json!({
             "content": [{"type": "text", "text": "  "}], "stop_reason": "incomplete"
         });

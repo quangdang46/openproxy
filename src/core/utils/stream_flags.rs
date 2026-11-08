@@ -41,6 +41,11 @@ pub fn provider_requires_streaming(provider: &str) -> bool {
             // aggregation already covers non-streaming clients.
             | "opencode"
             | "oc"
+            // 9router executors/opencode-zen.js transformRequest forces
+            // `stream:true` on every lane — the free-tier gate 403s
+            // stream:false, and paid legs get the same treatment upstream.
+            | "opencode-zen"
+            | "ocz"
             // 9router registry/zed.js:27 + registry/api-airforce.js:32.
             | "zed"
             | "api-airforce"

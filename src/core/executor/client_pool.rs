@@ -23,6 +23,10 @@ pub const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(180);
 /// disabled. Kept separate from the secure key so the one-shot insecure
 /// retry never shares a connection pool with (or poisons) the normal path.
 const INSECURE_KEY_SUFFIX: &str = "|insecure-tls";
+/// Cache-key suffix for clients that never follow redirects. SigV4-signed
+/// providers (Bedrock) must not let reqwest replay a signed body +
+/// `x-amz-security-token` at whatever origin a 3xx names.
+const NO_REDIRECT_KEY_SUFFIX: &str = "|no-redirect";
 
 /// How often the stale-connection cleaner runs.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
@@ -114,7 +118,20 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_inner(provider_key, proxy, true)
+        self.get_inner(provider_key, proxy, true, false)
+    }
+
+    /// A pooled client that never follows redirects
+    /// (`reqwest::redirect::Policy::none()`). Required for SigV4-signed
+    /// requests: reqwest strips `Authorization` on cross-host redirects but
+    /// still replays the body and the `x-amz-*` signature headers, which
+    /// would leak a signed payload to whatever origin the 3xx names.
+    pub fn get_no_redirect(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+    ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+        self.get_inner(provider_key, proxy, false, true)
     }
 
     fn get_inner(
@@ -122,18 +139,20 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
         insecure: bool,
+        no_redirect: bool,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
         let timeout = self.timeout;
-        let key = client_key(provider_key, proxy);
-        let key = if insecure {
-            format!("{key}{INSECURE_KEY_SUFFIX}")
-        } else {
-            key
-        };
+        let mut key = client_key(provider_key, proxy);
+        if insecure {
+            key = format!("{key}{INSECURE_KEY_SUFFIX}");
+        }
+        if no_redirect {
+            key = format!("{key}{NO_REDIRECT_KEY_SUFFIX}");
+        }
         let result = self
             .reqwest_clients
             .entry(key.clone())
-            .or_try_insert_with(|| build_reqwest_client(proxy, timeout, insecure));
+            .or_try_insert_with(|| build_reqwest_client(proxy, timeout, insecure, no_redirect));
         match result {
             Ok(entry) => {
                 self.touch(key);
@@ -272,8 +291,16 @@ fn build_reqwest_client(
     proxy: Option<&ProxyTarget>,
     timeout: ClientTimeout,
     insecure: bool,
+    no_redirect: bool,
 ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
+        // SigV4-signed requests (Bedrock) must surface 3xx to the caller
+        // rather than have reqwest replay the signed body/headers.
+        .redirect(if no_redirect {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::default()
+        })
         .pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT)
         .pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST)
         .tcp_keepalive(CLIENT_POOL_TCP_KEEPALIVE)

@@ -13,10 +13,14 @@ use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 pub mod background_refresh;
+pub mod glm;
 pub mod kilocode;
+pub mod minimax_code;
+pub mod muse;
 pub mod nous;
 pub mod pending;
 pub mod providers;
+pub mod qoder_device;
 pub mod secret;
 #[cfg(test)]
 pub mod tests;

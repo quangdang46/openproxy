@@ -139,6 +139,11 @@ pub struct SourceModel {
     /// the listed id is an alias for another model.
     #[serde(default)]
     pub upstream_model_id: Option<String>,
+    /// 9router `models[].transport` — registry transport marker (e.g.
+    /// `"gemini-live"` for Gemini Live STT). `stt.rs` reads this from the
+    /// custom model's `extra` blob to dispatch the Live WebSocket adapter.
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 fn default_model_kind() -> String {
@@ -409,6 +414,9 @@ fn build_extra(
     if let Some(up) = &model.upstream_model_id {
         extra.insert("upstreamModelId".into(), Value::String(up.clone()));
     }
+    if let Some(t) = &model.transport {
+        extra.insert("transport".into(), Value::String(t.clone()));
+    }
     if let Some(fmt) = &provider.format {
         extra.insert("providerFormat".into(), Value::String(fmt.clone()));
     }
@@ -653,6 +661,7 @@ mod tests {
                     max_output_tokens: None,
                     target_format: None,
                     upstream_model_id: None,
+                    transport: None,
                 }],
             }],
         }

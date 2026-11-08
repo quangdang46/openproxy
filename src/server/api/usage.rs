@@ -11,13 +11,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
-    codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
-    fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota, fetch_commandcode_quota,
-    fetch_deepseek_usage, fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota,
-    fetch_grok_cli_quota, fetch_groq_quota, fetch_kimi_oauth_usage, fetch_kimi_usage,
-    fetch_kiro_quota, fetch_minimax_quota, fetch_ollama_quota, fetch_opencode_go_quota,
-    fetch_qoder_quota, fetch_vercel_ai_gateway_quota, fetch_zed_quota,
-    get_codex_rate_limit_reset_credits,
+    codex_account_id, consume_claude_reset_grant, consume_codex_rate_limit_reset_credit,
+    fetch_antigravity_quota, fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota,
+    fetch_commandcode_quota, fetch_cursor_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
+    fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota, fetch_groq_quota,
+    fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota, fetch_minimax_quota,
+    fetch_ollama_quota, fetch_opencode_go_quota, fetch_opencode_zen_quota, fetch_qoder_quota,
+    fetch_vercel_ai_gateway_quota, fetch_zed_quota, get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
@@ -47,6 +47,8 @@ fn is_usage_apikey_provider(provider: &str) -> bool {
             | "qoder"
             | "groq"
             | "opencode-go"
+            | "opencode-zen"
+            | "ocz"
             | "vercel-ai-gateway"
             | "codebuddy-cn"
             | "codebuddy-intl"
@@ -79,6 +81,8 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "zed" => fetch_zed_quota(token, psd).await,
         "grok-cli" => fetch_grok_cli_quota(token).await,
         "ollama" => fetch_ollama_quota(token).await,
+        // Cursor IDE DashboardService quota (spend + request buckets).
+        "cursor" | "cu" => fetch_cursor_quota(token, psd).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
         "kimi" | "kimi-coding" => fetch_kimi_oauth_usage(token, psd).await,
         // MiMo's weekly quota is authorised by an account-session cookie, not
@@ -155,6 +159,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/usage/{connection_id}/codex-reset-credits",
             routing::get(get_connection_codex_reset_credits).post(reset_connection_credits),
+        )
+        .route(
+            "/api/usage/{connection_id}/claude-reset",
+            routing::post(reset_connection_claude_limit),
         )
         .route("/api/usage/chart", routing::get(get_usage_chart))
         .route("/api/usage/providers", routing::get(get_usage_by_provider))
@@ -701,6 +709,7 @@ async fn get_connection_usage(
                 "qoder" => fetch_qoder_quota(api_key, &provider).await,
                 "groq" => fetch_groq_quota(api_key).await,
                 "opencode-go" => fetch_opencode_go_quota(api_key).await,
+                "opencode-zen" | "ocz" => fetch_opencode_zen_quota(api_key).await,
                 "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await,
                 "vercel-ai-gateway" => fetch_vercel_ai_gateway_quota(api_key).await,
                 "codebuddy-cn" | "codebuddy-intl" => {
@@ -917,7 +926,7 @@ fn is_auth_expired_consume_result(
     values.iter().any(|v| is_auth_expired_message(v))
 }
 
-async fn persist_codex_tokens(
+async fn persist_oauth_tokens(
     state: &AppState,
     connection_id: &str,
     access_token: &str,
@@ -1079,7 +1088,7 @@ async fn get_connection_codex_reset_credits(
         {
             match refresh_codex_token(refresh_token).await {
                 Ok(refreshed) => {
-                    if let Err(e) = persist_codex_tokens(
+                    if let Err(e) = persist_oauth_tokens(
                         &state,
                         &connection_id,
                         &refreshed.access_token,
@@ -1138,7 +1147,7 @@ async fn get_connection_codex_reset_credits(
         {
             if let Some(refresh_token) = connection.refresh_token.clone() {
                 if let Ok(refreshed) = refresh_codex_token(&refresh_token).await {
-                    let _ = persist_codex_tokens(
+                    let _ = persist_oauth_tokens(
                         &state,
                         &connection_id,
                         &refreshed.access_token,
@@ -1223,7 +1232,7 @@ async fn reset_connection_credits(
         {
             match refresh_codex_token(refresh_token).await {
                 Ok(refreshed) => {
-                    if let Err(e) = persist_codex_tokens(
+                    if let Err(e) = persist_oauth_tokens(
                         &state,
                         &connection_id,
                         &refreshed.access_token,
@@ -1306,7 +1315,7 @@ async fn reset_connection_credits(
         if let Some(refresh_token) = connection.refresh_token.clone() {
             match refresh_codex_token(&refresh_token).await {
                 Ok(refreshed) => {
-                    let _ = persist_codex_tokens(
+                    let _ = persist_oauth_tokens(
                         &state,
                         &connection_id,
                         &refreshed.access_token,
@@ -1340,6 +1349,135 @@ async fn reset_connection_credits(
     }
 
     consume_result_response(&consume_result, &redeem_request_id)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeResetRequest {
+    #[serde(alias = "grant_id")]
+    grant_id: Option<String>,
+}
+
+/// Handler for POST /api/usage/:connection_id/claude-reset — spend one free
+/// Claude "limit reset" grant (irreversible). 9router
+/// `usage/[connectionId]/claude-reset/route.js` parity: refresh credentials,
+/// resolve the org via the OAuth profile endpoint, POST `reset_rate_limits`
+/// with program `cedar_ember`, then invalidate the quota cache.
+async fn reset_connection_claude_limit(
+    State(state): State<AppState>,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ClaudeResetRequest>,
+) -> Response {
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(stored) = snapshot
+        .provider_connections
+        .iter()
+        .find(|entry| entry.id == connection_id)
+        .cloned()
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Connection not found" })),
+        )
+            .into_response();
+    };
+
+    // 9router: `provider !== "claude" || authType !== "oauth"` → 400.
+    if stored.provider != "claude" || stored.auth_type != "oauth" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Limit reset is only available for Claude OAuth connections."
+            })),
+        )
+            .into_response();
+    }
+
+    // refreshAndUpdateCredentials parity: refresh first (best-effort — a
+    // refresh failure keeps the stored token, same as the quota path), and
+    // persist the rotated credentials when they actually changed.
+    let connection = match refresh_oauth_connection(&stored, false).await {
+        Ok(refreshed) => {
+            if refreshed.access_token != stored.access_token
+                || refreshed.refresh_token != stored.refresh_token
+            {
+                if let Some(access_token) = refreshed.access_token.as_deref() {
+                    let _ = persist_oauth_tokens(
+                        &state,
+                        &connection_id,
+                        access_token,
+                        refreshed.refresh_token.as_deref(),
+                        refreshed.expires_in,
+                    )
+                    .await;
+                }
+            }
+            refreshed
+        }
+        Err(e) => {
+            tracing::warn!(
+                provider = "claude",
+                error = %e,
+                "Claude reset grant credential refresh failed; using stored token"
+            );
+            stored.clone()
+        }
+    };
+
+    let grant_id = body.grant_id.unwrap_or_default();
+    let result = match consume_claude_reset_grant(
+        connection
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(""),
+        &grant_id,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // Client-input failures are 4xx; transport/upstream failures 5xx.
+            let status = if e.contains("Invalid reset grant id") {
+                axum::http::StatusCode::BAD_REQUEST
+            } else if e.contains("No Claude access token") {
+                axum::http::StatusCode::UNAUTHORIZED
+            } else {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::warn!(provider = "claude", error = %e, "Claude reset grant failed");
+            return (status, Json(json!({ "error": e }))).into_response();
+        }
+    };
+
+    if result.ok {
+        return Json(result).into_response();
+    }
+
+    // 9router: upstream 4xx passes through, anything else becomes 409.
+    let upstream_status = result.status;
+    let status = if (400..500).contains(&upstream_status) {
+        axum::http::StatusCode::from_u16(upstream_status)
+            .unwrap_or(axum::http::StatusCode::CONFLICT)
+    } else {
+        axum::http::StatusCode::CONFLICT
+    };
+    let mut value = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
+    if value.get("message").and_then(|v| v.as_str()).is_none() {
+        let detail = result
+            .reason
+            .as_deref()
+            .or(result.result.as_deref())
+            .unwrap_or("unknown");
+        value["message"] = json!(format!("Reset not applied: {detail}"));
+    }
+    (status, Json(value)).into_response()
 }
 
 // Handler for GET /api/usage/chart?period=X
@@ -2279,6 +2417,120 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let out = rt.block_on(refresh_oauth_connection(&conn, false)).unwrap();
         assert_eq!(out.access_token.as_deref(), Some("stale-token"));
+    }
+
+    // ---- POST /api/usage/:id/claude-reset (9router claude-reset/route.js) ----
+
+    async fn claude_reset_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let state = AppState::new(std::sync::Arc::new(db));
+        state
+            .db
+            .update(|db| db.settings.require_login = false)
+            .await
+            .unwrap();
+        state
+    }
+
+    async fn seed_connection(state: &AppState, conn: ProviderConnection) {
+        let id = conn.id.clone();
+        state
+            .db
+            .update(move |db| {
+                db.provider_connections.retain(|c| c.id != id);
+                db.provider_connections.push(conn);
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn post_claude_reset(
+        state: &AppState,
+        connection_id: &str,
+        grant_id: Option<&str>,
+    ) -> axum::http::StatusCode {
+        reset_connection_claude_limit(
+            State(state.clone()),
+            axum::extract::Path(connection_id.to_string()),
+            HeaderMap::new(),
+            Json(ClaudeResetRequest {
+                grant_id: grant_id.map(str::to_string),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn claude_reset_missing_connection_is_404() {
+        let state = claude_reset_state().await;
+        let status = post_claude_reset(&state, "no-such-conn", Some("grant_1")).await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn claude_reset_rejects_non_claude_and_non_oauth() {
+        let state = claude_reset_state().await;
+
+        let mut codex = ProviderConnection::default();
+        codex.id = "codex-1".into();
+        codex.provider = "codex".into();
+        codex.auth_type = "oauth".into();
+        codex.access_token = Some("tok".into());
+        seed_connection(&state, codex).await;
+        assert_eq!(
+            post_claude_reset(&state, "codex-1", Some("grant_1")).await,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+
+        let mut apikey = ProviderConnection::default();
+        apikey.id = "claude-key-1".into();
+        apikey.provider = "claude".into();
+        apikey.auth_type = "apikey".into();
+        apikey.access_token = Some("tok".into());
+        seed_connection(&state, apikey).await;
+        assert_eq!(
+            post_claude_reset(&state, "claude-key-1", Some("grant_1")).await,
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_reset_rejects_invalid_grant_id_before_any_network() {
+        let state = claude_reset_state().await;
+        let mut conn = ProviderConnection::default();
+        conn.id = "claude-1".into();
+        conn.provider = "claude".into();
+        conn.auth_type = "oauth".into();
+        conn.access_token = Some("tok".into());
+        // No refresh_token → refresh_oauth_connection is a no-op, and an
+        // invalid grant id fails validation before any HTTP call.
+        seed_connection(&state, conn).await;
+
+        for bad in ["", "HAS SPACE", "bad/id", &"x".repeat(41)] {
+            assert_eq!(
+                post_claude_reset(&state, "claude-1", Some(bad)).await,
+                axum::http::StatusCode::BAD_REQUEST,
+                "grant id {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_reset_requires_an_access_token() {
+        let state = claude_reset_state().await;
+        let mut conn = ProviderConnection::default();
+        conn.id = "claude-notoken".into();
+        conn.provider = "claude".into();
+        conn.auth_type = "oauth".into();
+        // Valid grant id, but no token at all → 401 before any HTTP call.
+        seed_connection(&state, conn).await;
+
+        assert_eq!(
+            post_claude_reset(&state, "claude-notoken", Some("grant_1")).await,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
     }
 }
 

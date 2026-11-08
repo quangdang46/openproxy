@@ -43,6 +43,8 @@ import Tooltip from "@/shared/components/Tooltip";
 import { useNotificationStore } from "@/store/notificationStore";
 import { USAGE_SUPPORTED_PROVIDERS, USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
 import { AUTO_PING_SETTINGS_KEYS } from "@/shared/constants/config";
+import AutoPingScheduleModal from "@/components/usage/AutoPingScheduleModal";
+import { getScheduleSlotLabels, type PingSchedule } from "@/shared/services/quotaPingSchedule";
 
 interface Connection {
   id: string;
@@ -100,10 +102,40 @@ function getConnectionSecondaryLabel(connection: Connection): string | null {
   return null;
 }
 
-function getCodexResetCreditCount(quota?: QuotaDataEntry | null): number {
+function getResetCreditCount(quota?: QuotaDataEntry | null): number {
+  // Both Codex reset credits and Claude "limit reset" grants surface as
+  // `raw.resetCredits.availableCount`.
   const value = quota?.raw?.resetCredits?.availableCount;
   const count = typeof value === "number" ? value : Number(value);
   return Number.isFinite(count) ? Math.max(0, count) : 0;
+}
+
+const CLAUDE_RESET_LIMIT_NAMES: Record<string, string> = {
+  five_hour: "session",
+  seven_day: "weekly",
+  seven_day_overage_included: "weekly",
+  seven_day_opus: "Opus weekly",
+  seven_day_sonnet: "Sonnet weekly",
+};
+
+function formatClaudeResetClears(clears?: string[] | null): string {
+  const names = [...new Set((clears || []).map((c) => CLAUDE_RESET_LIMIT_NAMES[c]).filter(Boolean))];
+  return names.length ? `${names.join(" + ")} limits` : "limits";
+}
+
+function claudeGrantStatus(grant: any): string {
+  if (grant.resetsLeft <= 0) return "used";
+  if (grant.paused) return "paused";
+  if (grant.endsAt && new Date(grant.endsAt).getTime() <= Date.now()) return "expired";
+  if (grant.usableNow) return "usable now";
+  if (grant.startsAt && new Date(grant.startsAt).getTime() > Date.now()) return "not started";
+  return grant.useRequiresLimit ? "at limit only" : "unavailable";
+}
+
+interface AutoPingProviderConfig {
+  enabled?: boolean;
+  connections?: Record<string, boolean>;
+  schedules?: Record<string, PingSchedule>;
 }
 
 function formatCreditDate(value?: string | null): string {
@@ -134,11 +166,6 @@ interface CodexResetCredit {
   status?: string;
   grantedAt?: string | null;
   expiresAt?: string | null;
-}
-
-interface CodexResetCreditsData {
-  availableCount?: number;
-  credits: CodexResetCredit[];
 }
 
 interface ProxyPool {
@@ -173,7 +200,8 @@ export default function ProviderLimits() {
     connection: Connection;
     loading: boolean;
     error: string | null;
-    data: CodexResetCreditsData | null;
+    // `kind: "claude"` carries grant rows; codex carries `credits`.
+    data: any;
   } | null>(null);
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [selectedConnection, setSelectedConnection] = useState<Connection | null>(null);
@@ -201,11 +229,8 @@ export default function ProviderLimits() {
   const [expiringFirst, setExpiringFirst] = useState<boolean>(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState<boolean>(false);
   const [bulkToggling, setBulkToggling] = useState<boolean>(false);
-  const [autoPingMaps, setAutoPingMaps] = useState<Record<string, Record<string, boolean>>>({ claude: {}, codex: {} });
-  const autoPingTooltips: Record<string, string> = {
-    claude: "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.",
-    codex: "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota.",
-  };
+  const [autoPingConfigs, setAutoPingConfigs] = useState<Record<string, AutoPingProviderConfig>>({ claude: {}, codex: {} });
+  const [scheduleConnection, setScheduleConnection] = useState<Connection | null>(null);
   const [quotaVisibility, setQuotaVisibility] = useState<Record<string, { hidden?: string[] }>>({});
   const [quotaSortMode, setQuotaSortMode] = useState<string>("default");
   const tickCountRef = useRef(0);
@@ -413,9 +438,10 @@ export default function ProviderLimits() {
     updateQuotaVisibility(next, previous);
   }, [quotaVisibility, updateQuotaVisibility]);
 
-  const handleResetCodexLimit = useCallback(
+  // Redeems a limit reset for Codex (reset credit) or Claude (free grant).
+  const handleResetLimit = useCallback(
     async (connectionId: string, provider: string) => {
-      if (provider !== "codex" || resettingLimitId) return;
+      if ((provider !== "codex" && provider !== "claude") || resettingLimitId) return;
 
       setResettingLimitId(connectionId);
       setErrors((prev) => {
@@ -425,10 +451,16 @@ export default function ProviderLimits() {
       });
 
       try {
-        const response = await fetch(
-          `/api/usage/${connectionId}/codex-reset-credits`,
-          { method: "POST" },
-        );
+        const response = provider === "claude"
+          ? await fetch(`/api/usage/${connectionId}/claude-reset`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ grantId: quotaData[connectionId]?.raw?.resetCredits?.nextGrantId }),
+          })
+          : await fetch(
+            `/api/usage/${connectionId}/codex-reset-credits`,
+            { method: "POST" },
+          );
         const result = await response.json().catch(() => ({}));
 
         if (!response.ok) {
@@ -436,27 +468,43 @@ export default function ProviderLimits() {
             result.message ||
               result.error ||
               result.code ||
-              "Failed to reset Codex limit",
+              (provider === "claude" ? "Failed to reset Claude limits" : "Failed to reset Codex limit"),
           );
         }
 
         notify.success(
-          result.localOnly
-            ? "Local Codex rate-limit state cleared"
-            : "Codex rate-limit reset credit used",
+          provider === "claude"
+            ? "Claude limit reset used"
+            : result.localOnly
+              ? "Local Codex rate-limit state cleared"
+              : "Codex rate-limit reset credit used",
         );
-        await fetchQuota(connectionId, provider);
+        await fetchQuota(connectionId, provider, { force: true });
         setLastUpdated(new Date());
       } catch (error) {
         const message =
-          (error as Error).message || "Failed to reset Codex limit";
+          (error as Error).message ||
+          (provider === "claude" ? "Failed to reset Claude limits" : "Failed to reset Codex limit");
         setErrors((prev) => ({ ...prev, [connectionId]: message }));
         notify.error(message);
       } finally {
         setResettingLimitId(null);
       }
     },
-    [fetchQuota, notify, resettingLimitId],
+    [fetchQuota, notify, quotaData, resettingLimitId],
+  );
+
+  // Claude grants already arrive with the usage read; no extra fetch.
+  const handleViewClaudeResets = useCallback(
+    (connection: Connection, resetCredits: any) => {
+      setResetCreditsState({
+        connection,
+        loading: false,
+        error: null,
+        data: { kind: "claude", ...resetCredits },
+      });
+    },
+    [],
   );
 
   const handleViewCodexResetCredits = useCallback(
@@ -497,6 +545,7 @@ export default function ProviderLimits() {
           loading: false,
           error: null,
           data: {
+            kind: "codex",
             availableCount: result.availableCount ?? 0,
             credits,
           },
@@ -691,13 +740,14 @@ export default function ProviderLimits() {
     window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
   }, [autoRefresh]);
 
-  // Load auto-ping per-connection maps + quota visibility
+  // Load auto-ping per-connection configs (reactive map + anchored schedules)
+  // + quota visibility
   useEffect(() => {
     useSettingsStore.getState().fetchSettings()
       .then((s) => {
-        setAutoPingMaps({
-          claude: (s as any)?.claudeAutoPing?.connections || {},
-          codex: (s as any)?.codexAutoPing?.connections || {},
+        setAutoPingConfigs({
+          claude: (s as any)?.claudeAutoPing || {},
+          codex: (s as any)?.codexAutoPing || {},
         });
         setQuotaVisibility((s as any)?.quotaVisibility || {});
       })
@@ -824,22 +874,35 @@ export default function ProviderLimits() {
     [bulkToggling],
   );
 
-  const toggleAutoPing = useCallback(
-    async (connectionId: string, provider: string, on: boolean) => {
+  // Unified 3-way auto-ping save (Off / On reset / Schedule) — writes the whole
+  // provider config `{connections, schedules}` like 9router's handleSaveAutoPing.
+  const handleSaveAutoPing = useCallback(
+    async (
+      connectionId: string,
+      provider: string,
+      { reactive, schedule }: { reactive: boolean; schedule: PingSchedule },
+    ) => {
       const settingsKey = AUTO_PING_SETTINGS_KEYS[provider as keyof typeof AUTO_PING_SETTINGS_KEYS];
       if (!settingsKey) return;
-      const previous = autoPingMaps[provider] || {};
-      const nextProviderMap = { ...previous, [connectionId]: on };
-      const nextMaps = { ...autoPingMaps, [provider]: nextProviderMap };
-      setAutoPingMaps(nextMaps);
+
+      const previous = autoPingConfigs;
+      const prevCfg = autoPingConfigs[provider] || {};
+      const nextProviderCfg: AutoPingProviderConfig = {
+        ...prevCfg,
+        connections: { ...(prevCfg.connections || {}), [connectionId]: reactive },
+        schedules: { ...(prevCfg.schedules || {}), [connectionId]: schedule },
+      };
+      const nextConfigs = { ...autoPingConfigs, [provider]: nextProviderCfg };
+      setAutoPingConfigs(nextConfigs);
+
       try {
-        await patchSettings({ [settingsKey]: nextProviderMap });
+        await patchSettings({ [settingsKey]: nextProviderCfg });
       } catch (error) {
         console.error("Error saving auto-ping config:", error);
-        setAutoPingMaps((prev) => ({ ...prev, [provider]: previous }));
+        setAutoPingConfigs(previous);
       }
     },
-    [autoPingMaps],
+    [autoPingConfigs],
   );
 
   const handleDisableDepleted = () => {
@@ -1112,7 +1175,9 @@ export default function ProviderLimits() {
           // Use table layout for all providers
           const isInactive = conn.isActive === false;
           const isCodex = conn.provider === "codex";
-          const resetCreditCount = getCodexResetCreditCount(quota);
+          const claudeReset = conn.provider === "claude" ? quota?.raw?.resetCredits : null;
+          const resetLabel = isCodex ? "Codex reset credit" : "Claude limit reset";
+          const resetCreditCount = getResetCreditCount(quota);
           const isResettingLimit = resettingLimitId === conn.id;
           const rowBusy =
             deletingId === conn.id ||
@@ -1190,25 +1255,15 @@ export default function ProviderLimits() {
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
-                    {AUTO_PING_SETTINGS_KEYS[conn.provider as keyof typeof AUTO_PING_SETTINGS_KEYS] && conn.authType === "oauth" && (
-                      <Tooltip text={autoPingTooltips[conn.provider] || "Auto-ping warmup"}>
-                        <button
-                          type="button"
-                          onClick={() => toggleAutoPing(conn.id, conn.provider, !(autoPingMaps[conn.provider]?.[conn.id] === true))}
-                          aria-label="Toggle auto-ping"
-                          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPingMaps[conn.provider]?.[conn.id] === true ? "text-primary" : "text-text-muted"}`}
-                        >
-                          <span className="material-symbols-outlined text-[18px]">bolt</span>
-                        </button>
-                      </Tooltip>
-                    )}
-                    {isCodex && (
+                    {(isCodex || claudeReset) && (
                       <>
                         <Tooltip
                           text={
                             resetCreditCount > 0
-                              ? `Use one Codex reset credit. Available: ${resetCreditCount}`
-                              : "No Codex reset credits available"
+                              ? claudeReset
+                                ? `Use your reset now (${resetCreditCount} left, use by ${formatCreditDate(claudeReset.expiresAt)}) · refills ${formatClaudeResetClears(claudeReset.clears)}`
+                                : `Use one ${resetLabel}. Available: ${resetCreditCount}`
+                              : `No ${resetLabel}s available`
                           }
                         >
                           <button
@@ -1224,8 +1279,8 @@ export default function ProviderLimits() {
                             }
                             aria-label={
                               resetCreditCount > 0
-                                ? `Use one Codex reset credit. ${resetCreditCount} available.`
-                                : "No Codex reset credits available"
+                                ? `Use one ${resetLabel}. ${resetCreditCount} available.`
+                                : `No ${resetLabel}s available`
                             }
                             className={`flex h-8 min-w-10 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-medium tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                               resetCreditCount > 0
@@ -1243,12 +1298,12 @@ export default function ProviderLimits() {
                             <span>{resetCreditCount}</span>
                           </button>
                         </Tooltip>
-                        <Tooltip text="View Codex reset credit expiry">
+                        <Tooltip text={isCodex ? "View Codex reset credit expiry" : "View Claude Code reset expiry"}>
                           <button
                             type="button"
-                            onClick={() => handleViewCodexResetCredits(conn)}
+                            onClick={() => (isCodex ? handleViewCodexResetCredits(conn) : handleViewClaudeResets(conn, claudeReset))}
                             disabled={isLoading || rowBusy}
-                            aria-label="View Codex reset credit expiry"
+                            aria-label={isCodex ? "View Codex reset credit expiry" : "View Claude Code reset expiry"}
                             className="flex h-8 w-8 items-center justify-center rounded-lg border border-black/10 text-text-muted transition-colors hover:bg-black/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:hover:bg-white/5"
                           >
                             <span className="material-symbols-outlined text-[17px]">
@@ -1258,6 +1313,38 @@ export default function ProviderLimits() {
                         </Tooltip>
                       </>
                     )}
+                    {AUTO_PING_SETTINGS_KEYS[conn.provider as keyof typeof AUTO_PING_SETTINGS_KEYS] && conn.authType === "oauth" && (() => {
+                      const cfg = autoPingConfigs[conn.provider] || {};
+                      const isReactive = cfg.connections?.[conn.id] === true;
+                      const schedule = cfg.schedules?.[conn.id];
+                      const isSchedule = schedule?.enabled === true;
+                      const isActive = isReactive || isSchedule;
+
+                      const activeModes: string[] = [];
+                      if (isReactive) activeModes.push("On reset");
+                      if (isSchedule) {
+                        const summary = getScheduleSlotLabels(schedule).join(" / ");
+                        activeModes.push(`Scheduled (${summary || "active"})`);
+                      }
+                      const tooltipText = activeModes.length > 0
+                        ? `Auto-ping active: ${activeModes.join(" + ")}. Click to configure.`
+                        : conn.provider === "codex"
+                          ? "Auto-starts the next 5h Codex window after reset or on schedule. Click to configure."
+                          : "Auto-starts a new window on quota reset or fixed schedule. Click to configure.";
+
+                      return (
+                        <Tooltip text={tooltipText}>
+                          <button
+                            type="button"
+                            onClick={() => setScheduleConnection(conn)}
+                            aria-label="Configure auto-ping"
+                            className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${isActive ? "text-primary" : "text-text-muted"}`}
+                          >
+                            <span className="material-symbols-outlined text-[18px]">bolt</span>
+                          </button>
+                        </Tooltip>
+                      );
+                    })()}
                     <Tooltip text="Refresh quota">
                       <button
                         type="button"
@@ -1535,16 +1622,18 @@ export default function ProviderLimits() {
         onConfirm={async () => {
           const connection = resetConfirmState?.connection;
           if (!connection) return;
-          await handleResetCodexLimit(connection.id, connection.provider);
+          await handleResetLimit(connection.id, connection.provider);
           setResetConfirmState(null);
         }}
-        title="Reset Codex limit?"
-        message={`Use 1 Codex reset credit for ${
-          getConnectionLabel(resetConfirmState?.connection || { id: "", provider: "codex" }) ||
-          "this account"
-        }. This cannot be undone. Remaining credits: ${
-          resetConfirmState?.resetCreditCount ?? 0
-        }.`}
+        title={resetConfirmState?.connection?.provider === "claude" ? "Reset Claude limits?" : "Reset Codex limit?"}
+        message={resetConfirmState?.connection?.provider === "claude"
+          ? `Refills your ${formatClaudeResetClears(quotaData[resetConfirmState.connection.id]?.raw?.resetCredits?.clears)} now for ${getConnectionLabel(resetConfirmState.connection) || "this account"} · your weekly reset day stays ${formatCreditDate(quotaData[resetConfirmState.connection.id]?.raw?.resetCredits?.weeklyResetsAt)}. This cannot be undone. Resets left: ${resetConfirmState.resetCreditCount ?? 0}.`
+          : `Use 1 Codex reset credit for ${
+            getConnectionLabel(resetConfirmState?.connection || { id: "", provider: "codex" }) ||
+            "this account"
+          }. This cannot be undone. Remaining credits: ${
+            resetConfirmState?.resetCreditCount ?? 0
+          }.`}
         confirmText="Reset limit"
         cancelText="Cancel"
         variant="danger"
@@ -1557,11 +1646,11 @@ export default function ProviderLimits() {
             <div className="flex items-start justify-between gap-3 border-b border-black/10 bg-black/[0.03] px-4 py-3 dark:border-white/10 dark:bg-white/[0.04]">
               <div className="min-w-0">
                 <h3 className="text-base font-semibold text-text-primary">
-                  Codex Reset Credit Expiry
+                  {resetCreditsState.data?.kind === "claude" ? "Claude Code Limit Resets" : "Codex Reset Credit Expiry"}
                 </h3>
                 <p className="mt-0.5 truncate text-xs text-text-muted">
                   {getConnectionLabel(resetCreditsState.connection) ||
-                    "Codex account"}
+                    (resetCreditsState.data?.kind === "claude" ? "Claude account" : "Codex account")}
                 </p>
               </div>
               <button
@@ -1588,6 +1677,51 @@ export default function ProviderLimits() {
                 <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-300">
                   {resetCreditsState.error}
                 </div>
+              ) : resetCreditsState.data?.kind === "claude" && resetCreditsState.data.grants?.length ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 text-xs text-text-muted dark:border-white/10 dark:bg-white/[0.03]">
+                    <span>
+                      {resetCreditsState.data.availableCount ?? 0} reset
+                      {resetCreditsState.data.availableCount === 1 ? "" : "s"} left
+                    </span>
+                    <span>
+                      Weekly reset day: {formatCreditDate(resetCreditsState.data.weeklyResetsAt)}
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-black/10 dark:border-white/10">
+                    <table className="w-full min-w-[560px] text-left text-sm">
+                      <thead className="bg-black/[0.03] text-xs uppercase tracking-wide text-text-muted dark:bg-white/[0.04]">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">Reset</th>
+                          <th className="px-3 py-2 font-medium">Left</th>
+                          <th className="px-3 py-2 font-medium">Refills</th>
+                          <th className="px-3 py-2 font-medium">Use By</th>
+                          <th className="px-3 py-2 font-medium">Remaining</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(resetCreditsState.data.grants || []).map((grant: any) => (
+                          <tr key={grant.id} className="border-t border-black/5 dark:border-white/5">
+                            <td className="px-3 py-2">
+                              <div className="text-text-primary">{grant.label || grant.id}</div>
+                              <span className="mt-1 inline-block rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                                {claudeGrantStatus(grant)}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-2 font-medium tabular-nums text-text-primary">
+                              {grant.resetsLeft} / {grant.resetsTotal}
+                            </td>
+                            <td className="px-3 py-2 text-text-muted">{formatClaudeResetClears(grant.clears)}</td>
+                            <td className="px-3 py-2 text-text-primary">{formatCreditDate(grant.endsAt)}</td>
+                            <td className="whitespace-nowrap px-3 py-2 font-medium text-text-primary">
+                              {formatTimeRemaining(grant.endsAt)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               ) : resetCreditsState.data?.credits?.length ? (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 text-xs text-text-muted dark:border-white/10 dark:bg-white/[0.03]">
@@ -1610,7 +1744,7 @@ export default function ProviderLimits() {
                         </tr>
                       </thead>
                       <tbody>
-                        {resetCreditsState.data.credits.map((credit, index) => (
+                        {resetCreditsState.data.credits.map((credit: CodexResetCredit, index: number) => (
                           <tr
                             key={`${credit.status}-${credit.expiresAt || index}`}
                             className="border-t border-black/5 dark:border-white/5"
@@ -1637,12 +1771,25 @@ export default function ProviderLimits() {
                 </div>
               ) : (
                 <div className="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-8 text-center text-sm text-text-muted dark:border-white/10 dark:bg-white/[0.03]">
-                  No reset credit details returned for this account.
+                  {resetCreditsState.data?.kind === "claude"
+                    ? "No limit resets available for this account."
+                    : "No reset credit details returned for this account."}
                 </div>
               )}
             </div>
           </div>
         </div>
+      )}
+
+      {scheduleConnection && (
+        <AutoPingScheduleModal
+          isOpen={!!scheduleConnection}
+          onClose={() => setScheduleConnection(null)}
+          connection={scheduleConnection}
+          reactive={autoPingConfigs[scheduleConnection.provider]?.connections?.[scheduleConnection.id] === true}
+          schedule={autoPingConfigs[scheduleConnection.provider]?.schedules?.[scheduleConnection.id] || null}
+          onSave={(result) => handleSaveAutoPing(scheduleConnection.id, scheduleConnection.provider, result)}
+        />
       )}
     </div>
   );

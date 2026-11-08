@@ -41,6 +41,14 @@ pub struct PendingOAuthFlow {
     pub expires_at: i64,
     /// Kiro OIDC client credentials, set when using Kiro's special device code flow
     pub kiro_credentials: Option<KiroCredentials>,
+    /// One-off bearer token for custom polling flows that mint their own
+    /// credential (GLM ZCode CLI flow: `cli/init` returns a poll token that
+    /// authenticates every `cli/poll` call for that flow).
+    pub poll_token: Option<String>,
+    /// Free-form per-flow state for providers whose device flow needs more
+    /// than the standard fields (e.g. qoder-cn machineId, minimax-code
+    /// poll-by-user flag). Keys are provider-defined.
+    pub extra_data: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 impl PendingOAuthFlow {
@@ -144,6 +152,8 @@ mod tests {
             created_at: now,
             expires_at: now + expires_in_secs,
             kiro_credentials: None,
+            poll_token: None,
+            extra_data: None,
         }
     }
 

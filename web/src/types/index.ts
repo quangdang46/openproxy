@@ -45,6 +45,19 @@ export interface Provider {
   thinkingConfig?: ThinkingConfig;
   kindNotice?: Record<string, string>;
   hasProviderSpecificData?: boolean;
+  /**
+   * Credential form variant (9router registry `credentialForm`). `"aws"`
+   * renders the AWS credential section: Profile / Region / Access Key ID /
+   * Session Token, with the API-key field repurposed as the secret access
+   * key (omittable in profile mode — see `apiKeyOptionalWith`).
+   */
+  credentialForm?: "aws";
+  /**
+   * providerSpecificData field that stands in for an API key (9router
+   * `apiKeyOptionalWith`). When set and that field is present, the API key
+   * input is optional.
+   */
+  apiKeyOptionalWith?: string;
   searchViaChat?: SearchViaChatConfig;
   hidden?: boolean;
   hiddenKinds?: ServiceKind[];
@@ -111,7 +124,7 @@ export interface FreeTierInfo {
   source?: string;
 }
 
-export type ServiceKind = "llm" | "tts" | "stt" | "embedding" | "image" | "imageToText" | "webSearch" | "webFetch" | "video" | "music";
+export type ServiceKind = "llm" | "tts" | "stt" | "embedding" | "image" | "imageToText" | "webSearch" | "webFetch" | "video" | "music" | "systemone";
 
 export interface TTSConfig {
   baseUrl: string;

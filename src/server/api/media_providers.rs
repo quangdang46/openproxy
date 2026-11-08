@@ -74,6 +74,8 @@ const KNOWN_KINDS: &[&str] = &[
     "webFetch",
     "video",
     "music",
+    // System One (Jev) decision models — 9router MEDIA_PROVIDER_KINDS.
+    "systemone",
     // Legacy alias retained for the old `add_media_provider` shape and
     // for the `MediaProvidersResponse` aggregator.
     "search",
@@ -1231,9 +1233,21 @@ async fn list_providers_by_kind(
         .provider_connections
         .iter()
         .filter(|c| c.is_active())
-        .filter(|c| match detect_media_type(c).as_deref() {
-            Some(detected) => kind_matches(&kind, detected),
-            None => false,
+        .filter(|c| {
+            let detected_matches = match detect_media_type(c).as_deref() {
+                Some(detected) => kind_matches(&kind, detected),
+                None => false,
+            };
+            // System One connections rarely carry a `mediaType` tag — the
+            // kind comes from the provider's catalog `serviceKinds`
+            // (9router lists these pages straight from the registry).
+            detected_matches
+                || (kind == "systemone"
+                    && crate::core::model::catalog::provider_catalog()
+                        .provider_info(&c.provider)
+                        .is_some_and(|info| {
+                            info.service_kinds.iter().any(|k| k == "systemone")
+                        }))
         })
         .map(provider_summary_for_kind)
         .collect();

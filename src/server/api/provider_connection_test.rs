@@ -6,14 +6,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{Duration as ChronoDuration, Utc};
-use rand::RngCore;
 use reqwest::{Client, Proxy, RequestBuilder};
 use serde::Serialize;
 use serde_json::{json, Value};
 use url::Url;
-use uuid::Uuid;
 
 use crate::core::model::catalog::provider_catalog;
 use crate::server::state::AppState;
@@ -631,6 +628,30 @@ async fn test_api_key_connection(
             )
             .await
         }
+        "muse" => {
+            // 9router registry/muse.js validateUrl (/v1/models). Subscription
+            // keys also carry x-api-version via museHeaders; sending it for
+            // pay-as-you-go keys too is harmless.
+            let response = execute_request(
+                state,
+                &connection.provider,
+                effective_proxy,
+                PreparedRequest {
+                    method: Method::GET,
+                    url: "https://api.meta.ai/v1/models".to_string(),
+                    headers: vec![
+                        (
+                            "Authorization".to_string(),
+                            format!("Bearer {}", connection.api_key.clone().unwrap_or_default()),
+                        ),
+                        ("x-api-version".to_string(), "1.0.0".to_string()),
+                    ],
+                    body: None,
+                },
+            )
+            .await;
+            compatible_result(response, "Invalid API key")
+        }
         "groq" => {
             simple_get_bearer_test(
                 state,
@@ -841,6 +862,9 @@ async fn test_api_key_connection(
         "perplexity-web" => {
             test_perplexity_web_connection(state, connection, effective_proxy).await
         }
+        "chatgpt-web" | "cg" => {
+            test_chatgpt_web_connection(state, connection, effective_proxy).await
+        }
         "deepseek-web" | "ds-web" => {
             test_deepseek_web_connection(state, connection, effective_proxy).await
         }
@@ -854,6 +878,44 @@ async fn test_api_key_connection(
                 "Invalid API key",
             )
             .await
+        }
+        // 9router testUtils.js:591-608 — Command Code's only meaningful probe
+        // is GET /alpha/whoami?limits=1 (the generate endpoint is an NDJSON
+        // chat stream, not a models listing). valid = res.ok; 401/403 →
+        // "Invalid API key", anything else → "Command Code API error (n)".
+        "commandcode" => {
+            let request = PreparedRequest {
+                method: Method::GET,
+                url: "https://api.commandcode.ai/alpha/whoami?limits=1".to_string(),
+                headers: vec![
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {}", connection.api_key.clone().unwrap_or_default()),
+                    ),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+            };
+            match execute_request(state, &connection.provider, effective_proxy, request).await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let valid = (200..300).contains(&status);
+                    ConnectionTestResult {
+                        valid,
+                        error: if valid {
+                            None
+                        } else if status == 401 || status == 403 {
+                            Some("Invalid API key".to_string())
+                        } else {
+                            Some(format!("Command Code API error ({status})"))
+                        },
+                        refreshed: false,
+                        new_tokens: None,
+                        soft_error: None,
+                    }
+                }
+                Err(error) => invalid(&error),
+            }
         }
         // 9router probes several API-key providers this table has no arm for
         // (alims-intl, blackbox, chutes, codebuddy-cn, grok-web, llm7, …), and
@@ -1110,61 +1172,55 @@ async fn test_grok_web_connection(
     connection: &ProviderConnection,
     effective_proxy: &EffectiveProxy,
 ) -> ConnectionTestResult {
-    let mut token = connection.api_key.clone().unwrap_or_default();
-    if let Some(value) = token.strip_prefix("sso=") {
-        token = value.to_string();
-    }
-
-    let statsig_id =
-        STANDARD.encode("e:TypeError: Cannot read properties of null (reading 'children')");
+    // webIdentity.js `grok-web` probe parity: GET /api/auth/session with the
+    // raw pasted credential as the Cookie header (upstream sends the blob
+    // verbatim) and the wreq UA. `status == "authenticated"` proves the sso
+    // session; anything else is rejected/unknown. Upstream tries grokTlsFetch
+    // (wreq-js) first and falls back to plain fetch — Rust has no wreq, so the
+    // reqwest transport IS the fallback path.
+    let raw_credential = connection.api_key.clone().unwrap_or_default();
     let request = PreparedRequest {
-        method: Method::POST,
-        url: "https://grok.com/rest/app-chat/conversations/new".to_string(),
+        method: Method::GET,
+        url: "https://grok.com/api/auth/session".to_string(),
         headers: vec![
-            ("Accept".to_string(), "*/*".to_string()),
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("Cookie".to_string(), format!("sso={token}")),
+            ("Accept".to_string(), "application/json".to_string()),
+            (
+                "Cookie".to_string(),
+                crate::core::utils::web_cookie::strip_cookie_input_prefix(&raw_credential),
+            ),
             ("Origin".to_string(), "https://grok.com".to_string()),
             ("Referer".to_string(), "https://grok.com/".to_string()),
             (
                 "User-Agent".to_string(),
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36".to_string(),
-            ),
-            ("x-statsig-id".to_string(), statsig_id),
-            ("x-xai-request-id".to_string(), Uuid::new_v4().to_string()),
-            (
-                "traceparent".to_string(),
-                format!("00-{}-{}-00", random_hex(16), random_hex(8)),
+                crate::core::executor::GROK_WEB_USER_AGENT.to_string(),
             ),
         ],
-        body: Some(PreparedBody::Json(json!({
-            "temporary": true,
-            "modelName": "grok-4",
-            "message": "ping",
-            "fileAttachments": [],
-            "imageAttachments": [],
-            "disableSearch": false,
-            "enableImageGeneration": false,
-            "sendFinalMetadata": true
-        }))),
+        body: None,
     };
 
     match execute_request(state, &connection.provider, effective_proxy, request).await {
         Ok(response) => {
-            let valid = !matches!(
-                response.status(),
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-            );
-            ConnectionTestResult {
-                valid,
-                error: if valid {
-                    None
-                } else {
-                    Some("Invalid SSO cookie".to_string())
-                },
-                refreshed: false,
-                new_tokens: None,
-                soft_error: None,
+            let code = response.status().as_u16();
+            if code == 401 || code == 403 {
+                return invalid("sso cookie is invalid or expired");
+            }
+            if !response.status().is_success() {
+                return invalid(&format!("Grok returned HTTP {code}"));
+            }
+            match response.json::<Value>().await {
+                Ok(payload)
+                    if payload.get("status").and_then(Value::as_str) == Some("authenticated") =>
+                {
+                    ConnectionTestResult {
+                        valid: true,
+                        error: None,
+                        refreshed: false,
+                        new_tokens: None,
+                        soft_error: None,
+                    }
+                }
+                Ok(_) => invalid("Grok session is not signed in"),
+                Err(error) => invalid(&error.to_string()),
             }
         }
         Err(error) => invalid(&error),
@@ -1176,9 +1232,15 @@ async fn test_perplexity_web_connection(
     connection: &ProviderConnection,
     effective_proxy: &EffectiveProxy,
 ) -> ConnectionTestResult {
-    let mut session_token = connection.api_key.clone().unwrap_or_default();
-    if let Some(value) = session_token.strip_prefix("__Secure-next-auth.session-token=") {
-        session_token = value.to_string();
+    // webIdentity-style cookie normalization (webCookieAuth.js
+    // normalizeSessionCookieHeader): bare value, name=value, full cookie blob,
+    // or cookie-editor JSON array all become a valid Cookie header.
+    let session_cookie = crate::core::utils::web_cookie::normalize_session_cookie_header(
+        &connection.api_key.clone().unwrap_or_default(),
+        "__Secure-next-auth.session-token",
+    );
+    if session_cookie.is_empty() {
+        return invalid("Missing session cookie");
     }
 
     let request = PreparedRequest {
@@ -1187,12 +1249,10 @@ async fn test_perplexity_web_connection(
         headers: vec![
             (
                 "User-Agent".to_string(),
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36".to_string(),
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36".to_string(),
             ),
-            (
-                "Cookie".to_string(),
-                format!("__Secure-next-auth.session-token={session_token}"),
-            ),
+            ("Cookie".to_string(), session_cookie),
+            ("Accept".to_string(), "application/json".to_string()),
         ],
         body: None,
     };
@@ -1219,6 +1279,64 @@ async fn test_perplexity_web_connection(
     }
 }
 
+async fn test_chatgpt_web_connection(
+    state: &AppState,
+    connection: &ProviderConnection,
+    effective_proxy: &EffectiveProxy,
+) -> ConnectionTestResult {
+    // ChatGPT Web storage state (Playwright JSON, Cookie blob, or bare
+    // session token) → cookie header → GET /api/auth/session must return an
+    // `accessToken` (same probe the executor's fetchAccessToken performs).
+    let cookie = match crate::core::executor::chatgpt_web_cookie_header(connection) {
+        Ok(c) => c,
+        Err(e) => return invalid(&e.to_string()),
+    };
+    let request = PreparedRequest {
+        method: Method::GET,
+        url: "https://chatgpt.com/api/auth/session".to_string(),
+        headers: vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            (
+                "User-Agent".to_string(),
+                crate::core::executor::CHATGPT_WEB_DEFAULT_USER_AGENT.to_string(),
+            ),
+            ("Cookie".to_string(), cookie),
+        ],
+        body: None,
+    };
+    match execute_request(state, &connection.provider, effective_proxy, request).await {
+        Ok(response) => {
+            let code = response.status().as_u16();
+            if code == 401 || code == 403 {
+                return invalid("ChatGPT session cookie is invalid or expired");
+            }
+            if !response.status().is_success() {
+                return invalid(&format!("ChatGPT returned HTTP {code}"));
+            }
+            match response.json::<Value>().await {
+                Ok(payload)
+                    if payload
+                        .get("accessToken")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false) =>
+                {
+                    ConnectionTestResult {
+                        valid: true,
+                        error: None,
+                        refreshed: false,
+                        new_tokens: None,
+                        soft_error: None,
+                    }
+                }
+                Ok(_) => invalid("ChatGPT session is not signed in"),
+                Err(error) => invalid(&error.to_string()),
+            }
+        }
+        Err(error) => invalid(&error),
+    }
+}
+
 async fn test_deepseek_web_connection(
     state: &AppState,
     connection: &ProviderConnection,
@@ -1236,7 +1354,9 @@ async fn test_deepseek_web_connection(
         }
     }
     if token.is_empty() {
-        return invalid("Missing userToken — paste the value from DevTools → Application → Local Storage → chat.deepseek.com → userToken");
+        return invalid(
+            "Missing userToken — paste the value from DevTools → Application → Local Storage → chat.deepseek.com → userToken",
+        );
     }
     let request = PreparedRequest {
         method: Method::GET,
@@ -1261,17 +1381,32 @@ async fn test_deepseek_web_connection(
         Ok(response) => {
             let code = response.status().as_u16();
             if code == 401 || code == 403 {
-                return invalid("Invalid userToken");
+                return invalid("userToken is invalid or expired");
             }
             if !response.status().is_success() {
                 return invalid(&format!("DeepSeek returned HTTP {code}"));
             }
-            ConnectionTestResult {
-                valid: true,
-                error: None,
-                refreshed: false,
-                new_tokens: None,
-                soft_error: None,
+            // webIdentity.js deepseek-web probe: auth failures also arrive as
+            // HTTP 200 with application-level `code: 40003`, and a healthy
+            // session carries `data.biz_data.token` (+ email for naming).
+            match response.json::<Value>().await {
+                Ok(payload) => {
+                    if payload.get("code").and_then(Value::as_i64) == Some(40003) {
+                        return invalid("userToken is invalid or expired");
+                    }
+                    let biz = payload.pointer("/data/biz_data");
+                    match biz.and_then(|b| b.get("token")).and_then(Value::as_str) {
+                        Some(_) => ConnectionTestResult {
+                            valid: true,
+                            error: None,
+                            refreshed: false,
+                            new_tokens: None,
+                            soft_error: None,
+                        },
+                        None => invalid("DeepSeek rejected the userToken"),
+                    }
+                }
+                Err(error) => invalid(&error.to_string()),
             }
         }
         Err(error) => invalid(&error),
@@ -1813,7 +1948,7 @@ async fn probe_cloud_code_assist_access(
                     valid: false,
                     error,
                     status: 0,
-                }
+                };
             }
         };
 
@@ -2038,13 +2173,30 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                 body: None,
             })
         }
-        "qoder" => {
-            let base = crate::core::executor::QoderExecutor::inference_base(
+        "qoder" | "qoder-cn" => {
+            // 9router testUtils: qoder-cn probes the CN userinfo endpoint
+            // (Bearer device token); intl keeps the inference-base /models GET.
+            if provider == "qoder-cn" {
+                return Some(PreparedRequest {
+                    method: Method::GET,
+                    url: "https://openapi.qoder.com.cn/api/v1/userinfo".to_string(),
+                    headers: vec![
+                        (
+                            "Authorization".to_string(),
+                            format!("Bearer {access_token}"),
+                        ),
+                        ("Accept".to_string(), "application/json".to_string()),
+                    ],
+                    body: None,
+                });
+            }
+            let base = crate::core::executor::QoderExecutor::inference_base_for(
                 &crate::types::ProviderConnection {
                     api_key: Some(access_token.to_string()),
                     access_token: Some(access_token.to_string()),
                     ..Default::default()
                 },
+                crate::core::executor::qoder::QoderRegion::of(provider),
             );
             Some(PreparedRequest {
                 method: Method::GET,
@@ -2074,6 +2226,21 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                 body: None,
             })
         }
+        // Muse subscription connections store the minted LLM|… Model API key;
+        // the probe is the registry validateUrl with the museHeaders
+        // x-api-version (muse.js).
+        "muse" => Some(PreparedRequest {
+            method: Method::GET,
+            url: crate::oauth::muse::MODELS_URL.to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                ),
+                ("x-api-version".to_string(), "1.0.0".to_string()),
+            ],
+            body: None,
+        }),
         // Nous `/v1/models` is public; the saved-connection probe must be an
         // authenticated inference request (9router createNousApiKeyProbe).
         "nous" | "nous-research" => Some(PreparedRequest {
@@ -2477,12 +2644,6 @@ fn cline_access_token(token: &str) -> String {
     crate::core::auth::cline_auth::get_cline_access_token(token)
 }
 
-fn random_hex(len_bytes: usize) -> String {
-    let mut bytes = vec![0u8; len_bytes];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn compatible_result(
     response: Result<reqwest::Response, String>,
     error_message: &str,
@@ -2548,8 +2709,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    const GROK_SPENDING_LIMIT: &str =
-        "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.";
+    const GROK_SPENDING_LIMIT: &str = "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.";
 
     fn test_result(
         valid: bool,

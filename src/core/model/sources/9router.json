@@ -1,7 +1,7 @@
 {
   "source": "9router",
   "ref": "v0.5.112",
-  "generatedAt": "2026-11-08T12:31:32.326Z",
+  "generatedAt": "2026-11-08T19:53:52.352Z",
   "providerIdToAlias": {
     "alicode-intl": "alicode-intl",
     "alicode": "alicode",
@@ -577,22 +577,22 @@
         {
           "id": "universal-3-pro",
           "name": "Universal 3 Pro",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "universal-2",
           "name": "Universal 2",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "best",
           "name": "Best (Nano + Universal)",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "nano",
           "name": "Nano (Fast)",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -616,22 +616,22 @@
         {
           "id": "flux-pro-1.1",
           "name": "FLUX Pro 1.1",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-pro-1.1-ultra",
           "name": "FLUX Pro 1.1 Ultra",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-pro",
           "name": "FLUX Pro",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-dev",
           "name": "FLUX Dev",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-kontext-pro",
@@ -1357,7 +1357,7 @@
         {
           "id": "gpt-image-2",
           "name": "GPT Image 2 (web)",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -1547,42 +1547,42 @@
         {
           "id": "@cf/black-forest-labs/flux-2-klein-9b",
           "name": "FLUX.2 Klein 9B",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/black-forest-labs/flux-2-klein-4b",
           "name": "FLUX.2 Klein 4B",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/black-forest-labs/flux-2-dev",
           "name": "FLUX.2 Dev",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/leonardo/lucid-origin",
           "name": "Lucid Origin",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/leonardo/phoenix-1.0",
           "name": "Phoenix 1.0",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/black-forest-labs/flux-1-schnell",
           "name": "FLUX.1 Schnell",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/bytedance/stable-diffusion-xl-lightning",
           "name": "SDXL Lightning",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/lykon/dreamshaper-8-lcm",
           "name": "DreamShaper 8 LCM",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "@cf/runwayml/stable-diffusion-v1-5-img2img",
@@ -1597,7 +1597,7 @@
         {
           "id": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
           "name": "SDXL Base 1.0",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -1631,12 +1631,12 @@
         {
           "id": "flux-dev",
           "name": "FLUX Dev",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "sdxl",
           "name": "SDXL",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -1990,7 +1990,7 @@
         {
           "id": "transcribe",
           "name": "Codex Transcription",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -2026,22 +2026,22 @@
         {
           "id": "nova-3",
           "name": "Nova 3",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "nova-2",
           "name": "Nova 2",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "whisper-large",
           "name": "Whisper Large",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "nova",
           "name": "Nova",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -2243,12 +2243,12 @@
         {
           "id": "scribe_v1",
           "name": "Scribe v1",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "scribe_v2",
           "name": "Scribe v2",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -2285,37 +2285,37 @@
         {
           "id": "fal-ai/flux/schnell",
           "name": "FLUX Schnell",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/flux/dev",
           "name": "FLUX Dev",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/flux-pro/v1.1",
           "name": "FLUX Pro v1.1",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/flux-pro/v1.1-ultra",
           "name": "FLUX Pro v1.1 Ultra",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/recraft-v3",
           "name": "Recraft V3",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/ideogram/v2",
           "name": "Ideogram V2",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "fal-ai/stable-diffusion-v35-large",
           "name": "SD 3.5 Large",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -2386,7 +2386,7 @@
         {
           "id": "nomic-ai/nomic-embed-text-v1.5",
           "name": "Nomic Embed Text v1.5",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -2545,82 +2545,83 @@
         {
           "id": "gemini-embedding-2-preview",
           "name": "Gemini Embedding 2 Preview",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "gemini-embedding-001",
           "name": "Gemini Embedding 001",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-005",
           "name": "Text Embedding 005",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-004",
           "name": "Text Embedding 004 (Legacy)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "gemini-3.1-flash-image-preview",
           "name": "Gemini 3.1 Flash Image (Nano Banana 2)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gemini-3-pro-image-preview",
           "name": "Gemini 3 Pro Image (Nano Banana Pro)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gemini-2.5-flash-image",
           "name": "Gemini 2.5 Flash Image (Nano Banana)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gemini-2.5-pro",
           "name": "Gemini 2.5 Pro (Best)",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gemini-2.5-flash",
           "name": "Gemini 2.5 Flash",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gemini-2.5-flash-lite",
           "name": "Gemini 2.5 Flash Lite (Cheapest)",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gemini-2.0-flash",
           "name": "Gemini 2.0 Flash",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gemini-2.5-flash-native-audio-preview-09-17",
           "name": "Gemini Live Transcription (Realtime)",
-          "kind": "llm"
+          "kind": "stt",
+          "transport": "gemini-live"
         },
         {
           "id": "gemini-3.1-flash-tts-preview",
           "name": "Gemini 3.1 Flash TTS",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "gemini-2.5-flash-preview-tts",
           "name": "Gemini 2.5 Flash TTS",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "gemini-2.5-pro-preview-tts",
           "name": "Gemini 2.5 Pro TTS",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "embedding-001",
           "name": "Embedding 001",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -2826,7 +2827,7 @@
         {
           "id": "gemini-image",
           "name": "Gemini Image (web)",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -2979,12 +2980,12 @@
         {
           "id": "text-embedding-3-small",
           "name": "Text Embedding 3 Small (GitHub)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-ada-002",
           "name": "Text Embedding Ada 002 (GitHub)",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -3410,12 +3411,12 @@
         {
           "id": "grok-image",
           "name": "Grok Imagine Image",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "grok-video",
           "name": "Grok Imagine Video",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "grok-3",
@@ -3508,17 +3509,17 @@
         {
           "id": "whisper-large-v3",
           "name": "Whisper Large v3",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "whisper-large-v3-turbo",
           "name": "Whisper Large v3 Turbo",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "distil-whisper-large-v3-en",
           "name": "Distil Whisper Large v3 EN",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -3529,17 +3530,17 @@
         {
           "id": "black-forest-labs/FLUX.1-schnell",
           "name": "FLUX.1 Schnell",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "black-forest-labs/FLUX.1-dev",
           "name": "FLUX.1 Dev",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "black-forest-labs/FLUX.1-Krea-dev",
           "name": "FLUX.1 Krea",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "black-forest-labs/FLUX.1-Kontext-dev",
@@ -3574,27 +3575,27 @@
         {
           "id": "stabilityai/stable-diffusion-xl-base-1.0",
           "name": "SDXL Base 1.0",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "stabilityai/stable-diffusion-3.5-large",
           "name": "Stable Diffusion 3.5 Large",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "stabilityai/stable-diffusion-3.5-large-turbo",
           "name": "Stable Diffusion 3.5 Large Turbo",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "Qwen/Qwen-Image",
           "name": "Qwen Image",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "Qwen/Qwen-Image-2512",
           "name": "Qwen Image 2512",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "Qwen/Qwen-Image-Edit",
@@ -3614,42 +3615,42 @@
         {
           "id": "ideogram-ai/ideogram-4-fp8",
           "name": "Ideogram 4",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "tencent/HunyuanImage-3.0",
           "name": "HunyuanImage 3.0",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "Tongyi-MAI/Z-Image-Turbo",
           "name": "Z-Image Turbo",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "krea/Krea-2-Turbo",
           "name": "Krea 2 Turbo",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "HiDream-ai/HiDream-I1-Fast",
           "name": "HiDream I1 Fast",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "playgroundai/playground-v2.5-1024px-aesthetic",
           "name": "Playground v2.5",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "openai/whisper-large-v3",
           "name": "Whisper Large v3 (HF)",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "openai/whisper-large-v3-turbo",
           "name": "Whisper Large v3 Turbo (HF)",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -4353,47 +4354,47 @@
         {
           "id": "minimax-image-01",
           "name": "MiniMax Image 01",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "speech-2.8-hd",
           "name": "Speech 2.8 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.8-turbo",
           "name": "Speech 2.8 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.6-hd",
           "name": "Speech 2.6 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.6-turbo",
           "name": "Speech 2.6 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-02-hd",
           "name": "Speech 02 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-02-turbo",
           "name": "Speech 02 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-01-hd",
           "name": "Speech 01 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-01-turbo",
           "name": "Speech 01 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         }
       ]
     },
@@ -4427,42 +4428,42 @@
         {
           "id": "speech-2.8-hd",
           "name": "Speech 2.8 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.8-turbo",
           "name": "Speech 2.8 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.6-hd",
           "name": "Speech 2.6 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-2.6-turbo",
           "name": "Speech 2.6 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-02-hd",
           "name": "Speech 02 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-02-turbo",
           "name": "Speech 02 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-01-hd",
           "name": "Speech 01 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "speech-01-turbo",
           "name": "Speech 01 Turbo",
-          "kind": "llm"
+          "kind": "tts"
         }
       ]
     },
@@ -4490,7 +4491,7 @@
         {
           "id": "mistral-embed",
           "name": "Mistral Embed",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -4658,12 +4659,12 @@
         {
           "id": "muse-image",
           "name": "Muse Image",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "muse-video",
           "name": "Muse Video",
-          "kind": "llm"
+          "kind": "video"
         }
       ]
     },
@@ -4692,12 +4693,12 @@
         {
           "id": "nanobanana-flash",
           "name": "NanoBanana Flash",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "nanobanana-pro",
           "name": "NanoBanana Pro",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -4715,7 +4716,7 @@
         {
           "id": "Qwen/Qwen3-Embedding-8B",
           "name": "Qwen3 Embedding 8B",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -4827,22 +4828,22 @@
         {
           "id": "nvidia/nv-embedqa-e5-v5",
           "name": "NV EmbedQA E5 v5",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nvidia/parakeet-ctc-1.1b-asr",
           "name": "Parakeet CTC 1.1B",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "fastpitch",
           "name": "FastPitch",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "tacotron2",
           "name": "Tacotron2",
-          "kind": "llm"
+          "kind": "tts"
         }
       ]
     },
@@ -5365,562 +5366,562 @@
         {
           "id": "phonon:latest",
           "name": "Phonon (Latest)",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon",
           "name": "Phonon",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:multilingual",
           "name": "Phonon Multilingual",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-multilingual",
           "name": "Phonon 40M Multilingual",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:en",
           "name": "Phonon English",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:31m-en",
           "name": "Phonon 31M English",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-en",
           "name": "Phonon 40M English",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:de",
           "name": "Phonon German",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-de",
           "name": "Phonon 40M German",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:es",
           "name": "Phonon Spanish",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-es",
           "name": "Phonon 40M Spanish",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:fr",
           "name": "Phonon French",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-fr",
           "name": "Phonon 40M French",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:pt",
           "name": "Phonon Portuguese",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "phonon:40m-pt",
           "name": "Phonon 40M Portuguese",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "nomic-embed-text",
           "name": "Nomic Embed Text",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nomic-embed-text:latest",
           "name": "Nomic Embed Text (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nomic-embed-text:v1.5",
           "name": "Nomic Embed Text v1.5",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nomic-embed-text:137m-v1.5-fp16",
           "name": "Nomic Embed Text 137M v1.5 (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nomic-embed-text-v2-moe",
           "name": "Nomic Embed Text v2 MoE",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nomic-embed-text-v2-moe:latest",
           "name": "Nomic Embed Text v2 MoE (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding",
           "name": "Qwen3 Embedding",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:latest",
           "name": "Qwen3 Embedding (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:8b",
           "name": "Qwen3 Embedding 8B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:8b-q4_K_M",
           "name": "Qwen3 Embedding 8B (Q4_K_M)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:8b-q8_0",
           "name": "Qwen3 Embedding 8B (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:8b-fp16",
           "name": "Qwen3 Embedding 8B (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:4b",
           "name": "Qwen3 Embedding 4B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:4b-q4_K_M",
           "name": "Qwen3 Embedding 4B (Q4_K_M)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:4b-q8_0",
           "name": "Qwen3 Embedding 4B (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:4b-fp16",
           "name": "Qwen3 Embedding 4B (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:0.6b",
           "name": "Qwen3 Embedding 0.6B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:0.6b-q8_0",
           "name": "Qwen3 Embedding 0.6B (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen3-embedding:0.6b-fp16",
           "name": "Qwen3 Embedding 0.6B (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-m3",
           "name": "BGE M3",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-m3:latest",
           "name": "BGE M3 (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-m3:567m",
           "name": "BGE M3 567M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-m3:567m-fp16",
           "name": "BGE M3 567M (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-large",
           "name": "BGE Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-large:latest",
           "name": "BGE Large (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-large:335m",
           "name": "BGE Large 335M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "bge-large:335m-en-v1.5-fp16",
           "name": "BGE Large 335M EN v1.5 (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "mxbai-embed-large",
           "name": "mxbai Embed Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "mxbai-embed-large:latest",
           "name": "mxbai Embed Large (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "mxbai-embed-large:335m",
           "name": "mxbai Embed Large 335M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "mxbai-embed-large:v1",
           "name": "mxbai Embed Large v1",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "mxbai-embed-large:335m-v1-fp16",
           "name": "mxbai Embed Large 335M v1 (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma",
           "name": "EmbeddingGemma",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma:latest",
           "name": "EmbeddingGemma (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma:300m",
           "name": "EmbeddingGemma 300M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma:300m-bf16",
           "name": "EmbeddingGemma 300M (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma:300m-qat-q4_0",
           "name": "EmbeddingGemma 300M (QAT Q4_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma:300m-qat-q8_0",
           "name": "EmbeddingGemma 300M (QAT Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2",
           "name": "EmbeddingGemma 2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:latest",
           "name": "EmbeddingGemma 2 (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:740m",
           "name": "EmbeddingGemma 2 740M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:740m-bf16",
           "name": "EmbeddingGemma 2 740M (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:740m-q8_0",
           "name": "EmbeddingGemma 2 740M (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:570m",
           "name": "EmbeddingGemma 2 570M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:570m-bf16-text-audio",
           "name": "EmbeddingGemma 2 570M Audio (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:570m-q8_0-text-audio",
           "name": "EmbeddingGemma 2 570M Audio (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:440m",
           "name": "EmbeddingGemma 2 440M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:440m-bf16-text-vision",
           "name": "EmbeddingGemma 2 440M Vision (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:440m-q8_0-text-vision",
           "name": "EmbeddingGemma 2 440M Vision (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:270m",
           "name": "EmbeddingGemma 2 270M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:270m-bf16-text",
           "name": "EmbeddingGemma 2 270M Text (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "embeddinggemma-2:270m-q8_0-text",
           "name": "EmbeddingGemma 2 270M Text (Q8_0)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm",
           "name": "All-MiniLM",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:latest",
           "name": "All-MiniLM (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:33m",
           "name": "All-MiniLM 33M (L12)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:22m",
           "name": "All-MiniLM 22M (L6)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:l12-v2",
           "name": "All-MiniLM L12 v2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:l6-v2",
           "name": "All-MiniLM L6 v2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:33m-l12-v2-fp16",
           "name": "All-MiniLM 33M L12 v2 (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "all-minilm:22m-l6-v2-fp16",
           "name": "All-MiniLM 22M L6 v2 (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed",
           "name": "Snowflake Arctic Embed",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:latest",
           "name": "Snowflake Arctic Embed (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:335m",
           "name": "Snowflake Arctic Embed 335M (L)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:137m",
           "name": "Snowflake Arctic Embed 137M (M-Long)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:110m",
           "name": "Snowflake Arctic Embed 110M (M)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:33m",
           "name": "Snowflake Arctic Embed 33M (S)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:22m",
           "name": "Snowflake Arctic Embed 22M (XS)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:l",
           "name": "Snowflake Arctic Embed L",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:m",
           "name": "Snowflake Arctic Embed M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:m-long",
           "name": "Snowflake Arctic Embed M-Long",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:s",
           "name": "Snowflake Arctic Embed S",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:xs",
           "name": "Snowflake Arctic Embed XS",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:335m-l-fp16",
           "name": "Snowflake Arctic Embed 335M L (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:137m-m-long-fp16",
           "name": "Snowflake Arctic Embed 137M M-Long (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:110m-m-fp16",
           "name": "Snowflake Arctic Embed 110M M (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:33m-s-fp16",
           "name": "Snowflake Arctic Embed 33M S (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed:22m-xs-fp16",
           "name": "Snowflake Arctic Embed 22M XS (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed2",
           "name": "Snowflake Arctic Embed 2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed2:latest",
           "name": "Snowflake Arctic Embed 2 (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed2:568m",
           "name": "Snowflake Arctic Embed 2 568M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "snowflake-arctic-embed2:568m-l-fp16",
           "name": "Snowflake Arctic Embed 2 568M L (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding",
           "name": "Granite Embedding",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:latest",
           "name": "Granite Embedding (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:278m",
           "name": "Granite Embedding 278M (Multilingual)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:30m",
           "name": "Granite Embedding 30M (EN)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:30m-en",
           "name": "Granite Embedding 30M EN",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:278m-fp16",
           "name": "Granite Embedding 278M (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "granite-embedding:30m-en-fp16",
           "name": "Granite Embedding 30M EN (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "paraphrase-multilingual",
           "name": "Paraphrase Multilingual",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "paraphrase-multilingual:latest",
           "name": "Paraphrase Multilingual (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "paraphrase-multilingual:278m",
           "name": "Paraphrase Multilingual 278M",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "paraphrase-multilingual:278m-mpnet-base-v2-fp16",
           "name": "Paraphrase Multilingual 278M (FP16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "laya",
           "name": "Laya",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "laya:latest",
           "name": "Laya (Latest)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "laya:421m-english-bf16",
           "name": "Laya 421M English (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "laya:322m-multilingual-bf16",
           "name": "Laya 322M Multilingual (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "laya:421m-typed-decisions-bf16",
           "name": "Laya 421M Decisions (BF16)",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -6315,77 +6316,77 @@
         {
           "id": "text-embedding-3-large",
           "name": "Text Embedding 3 Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-3-small",
           "name": "Text Embedding 3 Small",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-ada-002",
           "name": "Text Embedding Ada 002",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "tts-1",
           "name": "TTS-1",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "tts-1-hd",
           "name": "TTS-1 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "gpt-4o-mini-tts",
           "name": "GPT-4o Mini TTS",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "whisper-1",
           "name": "Whisper 1",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gpt-4o-transcribe",
           "name": "GPT-4o Transcribe",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gpt-4o-mini-transcribe",
           "name": "GPT-4o Mini Transcribe",
-          "kind": "llm"
+          "kind": "stt"
         },
         {
           "id": "gpt-image-2.5",
           "name": "GPT Image 2.5",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2.5-flare",
           "name": "GPT Image 2.5 Flare",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2.5-sunburst",
           "name": "GPT Image 2.5 Sunburst",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-1",
           "name": "GPT Image 1",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "dall-e-3",
           "name": "DALL-E 3",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "dall-e-2",
           "name": "DALL-E 2",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -6726,87 +6727,87 @@
         {
           "id": "openai/text-embedding-3-large",
           "name": "OpenAI Text Embedding 3 Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "openai/text-embedding-3-small",
           "name": "OpenAI Text Embedding 3 Small",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "openai/text-embedding-ada-002",
           "name": "OpenAI Text Embedding Ada 002",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "qwen/qwen3-embedding-8b",
           "name": "Qwen3 Embedding 8B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "perplexity/pplx-embed-v1-4b",
           "name": "Perplexity Embed V1 4B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "perplexity/pplx-embed-v1-0.6b",
           "name": "Perplexity Embed V1 0.6B",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
           "name": "NVIDIA Nemotron Embed VL 1B V2 (Free)",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "openai/gpt-4o-mini-tts",
           "name": "GPT-4o Mini TTS",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "openai/tts-1-hd",
           "name": "TTS-1 HD",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "openai/tts-1",
           "name": "TTS-1",
-          "kind": "llm"
+          "kind": "tts"
         },
         {
           "id": "openai/dall-e-3",
           "name": "DALL-E 3 (via OpenRouter)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "openai/gpt-image-1",
           "name": "GPT Image 1 (via OpenRouter)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "google/imagen-3.0-generate-002",
           "name": "Imagen 3 (via OpenRouter)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "black-forest-labs/FLUX.1-schnell",
           "name": "FLUX.1 Schnell (via OpenRouter)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "google/veo-3.1",
           "name": "Veo 3.1 (via OpenRouter)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "openai/sora-2-pro",
           "name": "Sora 2 Pro (via OpenRouter)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "bytedance/seedance-2.0",
           "name": "Seedance 2.0 (via OpenRouter)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "typesafe/jev-1.13",
@@ -7293,12 +7294,12 @@
         {
           "id": "recraftv3",
           "name": "Recraft V3",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "recraftv2",
           "name": "Recraft V2",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -7347,22 +7348,22 @@
         {
           "id": "gen4_image",
           "name": "Gen-4 Image",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gen4_image_turbo",
           "name": "Gen-4 Image Turbo",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gen4_turbo",
           "name": "Gen-4 Turbo",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "gen3a_turbo",
           "name": "Gen-3 Alpha Turbo",
-          "kind": "llm"
+          "kind": "video"
         }
       ]
     },
@@ -7387,12 +7388,12 @@
         {
           "id": "stable-diffusion-v1-5",
           "name": "Stable Diffusion v1.5",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "sdxl-base-1.0",
           "name": "SDXL Base 1.0",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -7403,7 +7404,7 @@
         {
           "id": "embedding",
           "name": "Self-hosted embedding model",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -7414,7 +7415,7 @@
         {
           "id": "whisper-1",
           "name": "Whisper (self-hosted)",
-          "kind": "llm"
+          "kind": "stt"
         }
       ]
     },
@@ -7425,7 +7426,7 @@
         {
           "id": "kokoro",
           "name": "Kokoro (self-hosted)",
-          "kind": "llm"
+          "kind": "tts"
         }
       ]
     },
@@ -7567,27 +7568,27 @@
         {
           "id": "stable-image-ultra",
           "name": "Stable Image Ultra",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "stable-image-core",
           "name": "Stable Image Core",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "sd3.5-large",
           "name": "Stable Diffusion 3.5 Large",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "sd3.5-large-turbo",
           "name": "Stable Diffusion 3.5 Large Turbo",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "sd3.5-medium",
           "name": "Stable Diffusion 3.5 Medium",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -7620,12 +7621,12 @@
         {
           "id": "BAAI/bge-large-en-v1.5",
           "name": "BGE Large EN v1.5",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "togethercomputer/m2-bert-80M-8k-retrieval",
           "name": "M2 BERT 80M 8K",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -7795,267 +7796,267 @@
         {
           "id": "seedream-v4.5",
           "name": "Seedream v4.5 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "seedream-v5",
           "name": "Seedream v5 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "seedream-v5-flash",
           "name": "Seedream v5 Flash (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "nano-banana-pro-ultra",
           "name": "Nano Banana Pro Ultra (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "nano-banana-pro",
           "name": "Nano Banana Pro (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "nano-banana",
           "name": "Nano Banana (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "nano-banana-2",
           "name": "Nano Banana 2 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image",
           "name": "GPT Image 1.5 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2",
           "name": "GPT Image 2 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2.5-flare",
           "name": "GPT Image 2.5 Flare (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2.5-sunburst",
           "name": "GPT Image 2.5 Sunburst (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "wan-2.6-image",
           "name": "Wan 2.6 Image (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "wan-2.7-text-to-image",
           "name": "Wan 2.7 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "wan-2.7-text-to-image-pro",
           "name": "Wan 2.7 Pro (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "prefect-pony-xl",
           "name": "Prefect Pony XL (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "1.0",
           "name": "Flux.1 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "1.1",
           "name": "Flux.1.1 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "2.0",
           "name": "Flux.2 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-2-max",
           "name": "Flux 2 Max (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "SDXL",
           "name": "SDXL Uncensored (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "realism",
           "name": "Realism (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "realism-2",
           "name": "Realism 2 (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "z-image-turbo",
           "name": "Z-Image Turbo (UC)",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "default",
           "name": "Video Standard (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "turbo",
           "name": "Video Turbo (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.2-uncensored",
           "name": "Wan Ultra Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.2-uncensored-v2",
           "name": "Wan Ultra Uncensored v2 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.6",
           "name": "Wan 2.6 Video (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.6-ultra",
           "name": "Wan 2.6 Ultra Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.7",
           "name": "Wan 2.7 Video (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.7-pro",
           "name": "Wan 2.7 Pro Video (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.7-uncensored",
           "name": "Wan 2.7 Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-2.7-uncensored-v2",
           "name": "Wan 2.7 Uncensored v2 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-3.0",
           "name": "Wan 3.0 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-3.0-uncensored",
           "name": "Wan 3.0 Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "wan-3.0-uncensored-pro",
           "name": "Wan 3.0 Uncensored Pro (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "sora-2",
           "name": "Sora 2 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "sora-2-pro",
           "name": "Sora 2 Pro (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "grok-imagine-video",
           "name": "Grok Imagine Video (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "bytedance-seedance-2.0",
           "name": "Seedance 2.0 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.0-fast",
           "name": "Seedance 2.0 Fast (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.0-uncensored",
           "name": "Seedance 2.0 Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.0-fast-uncensored",
           "name": "Seedance 2.0 Fast Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.0-mini-uncensored",
           "name": "Seedance 2.0 Mini Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.0-mini-turbo",
           "name": "Seedance 2.0 Mini Turbo Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-v1.5-pro-uncensored",
           "name": "Seedance v1.5 Pro Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.5-uncensored",
           "name": "Seedance 2.5 Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance-2.5",
           "name": "Seedance 2.5 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "vidu-q3-uncensored",
           "name": "Vidu Q3 Uncensored (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "av-gen-v2",
           "name": "AV-Gen v2 with audio (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "cosmos-predict",
           "name": "Cosmos Predict 2.5 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "minimax-h3",
           "name": "MiniMax H3 (UC)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "happyhorse-1.0",
           "name": "Happy Horse 1.0 (UC)",
-          "kind": "llm"
+          "kind": "video"
         }
       ]
     },
@@ -8129,32 +8130,32 @@
         {
           "id": "text-embedding-3-large",
           "name": "Text Embedding 3 Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-bge-m3",
           "name": "BGE-M3 Embedding",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "text-embedding-qwen3-8b",
           "name": "Qwen3 8B Embedding",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "venice-sd35",
           "name": "Venice SD3.5",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "flux-2-pro",
           "name": "FLUX.2 Pro",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "gpt-image-2",
           "name": "GPT Image 2 (via Venice)",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -8165,17 +8166,17 @@
         {
           "id": "veo",
           "name": "VEO 3.1 (Free)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "seedance",
           "name": "Seedance (Free)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "nano-banana",
           "name": "Nano Banana (Free)",
-          "kind": "llm"
+          "kind": "image"
         }
       ]
     },
@@ -8213,22 +8214,22 @@
         {
           "id": "veo-3.1-generate-preview",
           "name": "Veo 3.1 (Preview)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "veo-3.1-fast-generate-preview",
           "name": "Veo 3.1 Fast (Preview)",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "veo-3.0-generate-001",
           "name": "Veo 3",
-          "kind": "llm"
+          "kind": "video"
         },
         {
           "id": "veo-2.0-generate-001",
           "name": "Veo 2",
-          "kind": "llm"
+          "kind": "video"
         }
       ]
     },
@@ -8320,37 +8321,37 @@
         {
           "id": "voyage-3-large",
           "name": "Voyage 3 Large",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-3.5",
           "name": "Voyage 3.5",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-3.5-lite",
           "name": "Voyage 3.5 Lite",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-code-3",
           "name": "Voyage Code 3",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-finance-2",
           "name": "Voyage Finance 2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-law-2",
           "name": "Voyage Law 2",
-          "kind": "llm"
+          "kind": "embedding"
         },
         {
           "id": "voyage-multilingual-2",
           "name": "Voyage Multilingual 2",
-          "kind": "llm"
+          "kind": "embedding"
         }
       ]
     },
@@ -8398,12 +8399,12 @@
         {
           "id": "grok-2-image-1212",
           "name": "Grok 2 Image",
-          "kind": "llm"
+          "kind": "image"
         },
         {
           "id": "grok-imagine-video",
           "name": "Grok Imagine Video",
-          "kind": "llm"
+          "kind": "video"
         }
       ]
     },
@@ -8454,7 +8455,7 @@
         {
           "id": "mimo-v2.5-tts",
           "name": "MiMo V2.5 TTS",
-          "kind": "llm"
+          "kind": "tts"
         }
       ]
     },

@@ -43,6 +43,9 @@ fn provider_lead_ms(provider: &str) -> Option<u64> {
         "kimi-coding" | "kimi" => tr::REFRESH_LEAD_KIMI_CODING_MS,
         "antigravity" | "gemini-cli" | "gemini" => tr::REFRESH_LEAD_ANTIGRAVITY_MS,
         "xai" | "grok-cli" | "gcli" | "gb" => tr::REFRESH_LEAD_XAI_MS,
+        // MiniMax Code mcode access tokens live ~1h; upstream refreshLeadMs
+        // is 10 minutes (registry oauth block).
+        "minimax-code" | "minimax-code-global" => 10 * 60 * 1000,
         _ => return None,
     };
     Some(lead)

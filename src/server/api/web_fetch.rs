@@ -532,6 +532,33 @@ fn build_fetch_request(
             Ok((request_url, request_body, h))
         }
 
+        "tinyfish" => {
+            // 9router fetch/index.js runTinyfish: POST
+            // https://api.fetch.tinyfish.ai {urls:[url], format} with the
+            // `X-API-Key` header. Only markdown|html are supported.
+            if format != "markdown" && format != "html" {
+                return Err(FetchError {
+                    status: 400,
+                    message: format!("Unsupported TinyFish format: {}", format),
+                });
+            }
+            let mut h = headers.clone();
+            if let Some(key) = api_key {
+                h.insert(
+                    HeaderName::from_static("x-api-key"),
+                    HeaderValue::from_str(key).map_err(|_| FetchError {
+                        status: 500,
+                        message: "Invalid API key header".into(),
+                    })?,
+                );
+            }
+            Ok((
+                "https://api.fetch.tinyfish.ai".to_string(),
+                json!({ "urls": [url], "format": format }),
+                h,
+            ))
+        }
+
         _ => Err(FetchError {
             status: 400,
             message: format!("Unsupported web fetch provider: {}", provider),
@@ -546,6 +573,7 @@ fn resolve_fetch_provider(alias: &str) -> String {
         "tv" | "tavily" => "tavily".to_string(),
         "exa" => "exa".to_string(),
         "ol" | "ollama" => "ollama".to_string(),
+        "tf" | "tinyfish" => "tinyfish".to_string(),
         other => other.to_string(),
     }
 }
@@ -697,6 +725,45 @@ fn normalize_fetch_response(
                 .to_string();
             (text, None)
         }
+        "tinyfish" => {
+            // 9router runTinyfish: a per-URL failure rides inside a 200 as
+            // `errors[0]`; results[0].text must be a string.
+            if let Some(failure) = body
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+            {
+                let status = failure
+                    .get("status")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(502) as u16;
+                let msg = failure
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                return Err(FetchError {
+                    status,
+                    message: format!("TinyFish fetch failed: {}", msg),
+                });
+            }
+            let page = body
+                .get("results")
+                .and_then(|r| r.as_array())
+                .and_then(|arr| arr.first());
+            let text = page
+                .and_then(|p| p.get("text"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FetchError {
+                    status: 502,
+                    message: "TinyFish returned no extractable content".into(),
+                })?
+                .to_string();
+            let title = page
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (text, title)
+        }
         _ => ("".to_string(), None),
     };
 
@@ -704,6 +771,26 @@ fn normalize_fetch_response(
         text_owned[..max_chars].to_string()
     } else {
         text_owned.clone()
+    };
+
+    // TinyFish reports author/published_date/language per page
+    // (runTinyfish metadata); other providers leave them null.
+    let metadata = if provider == "tinyfish" {
+        let page = body
+            .get("results")
+            .and_then(|r| r.as_array())
+            .and_then(|arr| arr.first());
+        json!({
+            "author": page.and_then(|p| p.get("author")).and_then(|v| v.as_str()),
+            "published_at": page.and_then(|p| p.get("published_date")).and_then(|v| v.as_str()),
+            "language": page.and_then(|p| p.get("language")).and_then(|v| v.as_str()),
+        })
+    } else {
+        json!({
+            "author": null,
+            "published_at": null,
+            "language": null
+        })
     };
 
     Ok(json!({
@@ -715,11 +802,7 @@ fn normalize_fetch_response(
             "text": text_owned,
             "length": text_owned.len()
         },
-        "metadata": {
-            "author": null,
-            "published_at": null,
-            "language": null
-        },
+        "metadata": metadata,
         "usage": {
             "fetch_cost_usd": null
         },

@@ -1035,6 +1035,9 @@ pub async fn models_info(
         if let Some(v) = cm.context_window {
             info["contextWindow"] = json!(v);
         }
+        if let Some(v) = cm.max_output_tokens {
+            info["maxOutputTokens"] = json!(v);
+        }
         if let Some(v) = cm.dimensions {
             info["dimensions"] = json!(v);
         }
@@ -1223,6 +1226,72 @@ mod tests {
             models.iter().any(|m| m.id == "opencode-zen/kimi-k2.6"),
             "catalog-registered opencode-zen model should appear in /v1/models"
         );
+    }
+
+    /// 9router route.js:370-379 injects `{id:"noauth"}` pseudo-connections for
+    /// FREE_PROVIDERS entries with top-level `noAuth` (opencode, mimo-free,
+    /// devin-cli) so keyless free providers still advertise their catalog when
+    /// no stored connection exists.
+    #[tokio::test]
+    async fn no_auth_free_providers_list_models_without_connections() {
+        let snapshot = AppDb {
+            // Any active connection flips the endpoint out of the
+            // empty-catalog branch — the pseudo-connections are what keep
+            // the free providers listed.
+            provider_connections: vec![ProviderConnection {
+                id: "conn-openai".into(),
+                provider: "openai".into(),
+                auth_type: "apikey".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
+        assert!(
+            models.iter().any(|m| m.id == "oc/mimo-v2.5-free"),
+            "opencode (alias oc) catalog should list via the noauth pseudo-connection"
+        );
+        assert!(
+            models.iter().any(|m| m.id == "mmf/mimo-auto"),
+            "mimo-free (alias mmf) catalog should list via the noauth pseudo-connection"
+        );
+        assert!(
+            models.iter().any(|m| m.id == "dv/swe-1.6"),
+            "devin-cli (alias dv) catalog should list via the noauth pseudo-connection"
+        );
+    }
+
+    /// A stored connection for a no-auth provider replaces the pseudo one —
+    /// its enabledModels/prefix must win and no duplicate rows may appear.
+    #[tokio::test]
+    async fn stored_connection_suppresses_no_auth_pseudo_connection() {
+        let snapshot = AppDb {
+            provider_connections: vec![ProviderConnection {
+                id: "conn-oc".into(),
+                provider: "opencode".into(),
+                auth_type: "apikey".into(),
+                provider_specific_data: BTreeMap::from([(
+                    "enabledModels".into(),
+                    json!(["oc/custom-only"]),
+                )]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
+        assert!(
+            models.iter().any(|m| m.id == "oc/custom-only"),
+            "stored opencode connection's enabledModels should be listed"
+        );
+        assert!(
+            !models.iter().any(|m| m.id == "oc/mimo-v2.5-free"),
+            "static catalog rows must not leak in when enabledModels is set"
+        );
+        // mimo-free / devin-cli still get their pseudo-connections.
+        assert!(models.iter().any(|m| m.id == "mmf/mimo-auto"));
+        assert!(models.iter().any(|m| m.id == "dv/swe-1.6"));
     }
 
     #[tokio::test]

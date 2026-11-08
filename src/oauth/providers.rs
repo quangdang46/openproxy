@@ -228,6 +228,38 @@ pub fn kilocode() -> OAuthProviderConfig {
     }
 }
 
+/// GLM (Z.ai) — ZCode CLI polling flow, dual-auth with API key.
+///
+/// Upstream `open-sse/providers/registry/glm.js` (category `oauth`,
+/// `authModes: ["oauth","apikey"]`, display "Zai GLM Coding"). The flow is
+/// `flowType: "device_code"` but NOT the generic RFC 8628 grant: init mints
+/// a one-off poll token, the browser authorize_url is server-generated, and
+/// poll/ready carries the Z.AI OAuth token which is then exchanged for a
+/// business JWT and a long-lived `zcode-api-key` coding-plan key. The custom
+/// start/poll live in `crate::oauth::glm`; this config only carries the
+/// endpoint parameters.
+pub fn glm() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "glm",
+        client_id: "",
+        authorize_url: "",
+        token_url: "",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("provider_id", "zai"),
+            ("cli_init_url", "https://zcode.z.ai/api/v1/oauth/cli/init"),
+            ("cli_poll_url", "https://zcode.z.ai/api/v1/oauth/cli/poll"),
+            ("business_login_url", "https://api.z.ai/api/auth/z/login"),
+            ("api_base_url", "https://api.z.ai"),
+            ("plan_api_key_name", "zcode-api-key"),
+        ],
+        // The minted coding-plan key is long-lived; there is no refresh
+        // grant, so re-login on expiry (same as the official ZCode CLI).
+        refresh_lead_ms: 0,
+    }
+}
+
 /// Kimchi — browser_token OAuth flow (user copies token from kimchi.dev).
 pub fn kimchi() -> OAuthProviderConfig {
     OAuthProviderConfig {
@@ -320,6 +352,29 @@ pub fn nous() -> OAuthProviderConfig {
     }
 }
 
+/// Muse (Meta Model API) — device-code flow for the Muse Code subscription.
+///
+/// 9router parity: `open-sse/providers/registry/muse.js` (`oauth` block) +
+/// `src/lib/oauth/providers/muse.js`. The flow is bespoke (x-api-version
+/// header on every call, key mint at api.meta.ai), so `extra_params` only
+/// carries what the generic start/poll helpers can use; the dedicated
+/// `crate::oauth::muse` module does the real work.
+pub fn muse() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "muse",
+        client_id: crate::oauth::muse::CLIENT_ID,
+        authorize_url: crate::oauth::muse::DEVICE_CODE_URL,
+        token_url: crate::oauth::muse::TOKEN_URL,
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("client_id", crate::oauth::muse::CLIENT_ID),
+            ("api_version", crate::oauth::muse::API_VERSION),
+        ],
+        refresh_lead_ms: 0,
+    }
+}
+
 /// Gemini CLI — PKCE auth-code flow (Google OAuth).
 pub fn gemini_cli() -> OAuthProviderConfig {
     OAuthProviderConfig {
@@ -349,6 +404,62 @@ pub fn qoder() -> OAuthProviderConfig {
         uses_pkce: false,
         extra_params: &[],
         refresh_lead_ms: 0,
+    }
+}
+
+/// Qoder CN (qoder.com.cn) — same device-token flow as intl Qoder, CN
+/// endpoints (9router registry/qoder-cn.js oauth block). The flow itself is
+/// the client-generated nonce + PKCE poll handled by the dedicated branch in
+/// `server::api::oauth`; these URLs ride in `extra_params` for that branch.
+pub fn qoder_cn() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "qoder-cn",
+        client_id: "openproxy",
+        authorize_url: "https://qoder.com.cn/device/selectAccounts",
+        token_url: "https://openapi.qoder.com.cn/api/v1/deviceToken/poll",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("login_url", "https://qoder.com.cn/device/selectAccounts"),
+            (
+                "user_info_url",
+                "https://openapi.qoder.com.cn/api/v1/userinfo",
+            ),
+            ("openapi_base_url", "https://openapi.qoder.com.cn"),
+        ],
+        refresh_lead_ms: 0,
+    }
+}
+
+/// MiniMax Code (mcode), China site — PKCE S256 device flow against
+/// account.minimax.cn (9router src/lib/oauth/providers/minimax-code-shared.js).
+/// The device-code request carries `code_challenge`; the token poll carries
+/// `code_verifier` and may key on `user_code` instead of `device_code` —
+/// handled by the dedicated branch in `server::api::oauth`.
+pub fn minimax_code() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "minimax-code",
+        client_id: "mcode-public",
+        authorize_url: "https://account.minimax.cn/oauth2/device/code",
+        token_url: "https://account.minimax.cn/oauth2/token",
+        scopes: &["agent.default"],
+        uses_pkce: true,
+        extra_params: &[("audience", "agent-backend"), ("refresh_lead_ms", "600000")],
+        refresh_lead_ms: 10 * 60 * 1000,
+    }
+}
+
+/// MiniMax Code, international site (account.minimax.io / agent.minimax.io).
+pub fn minimax_code_global() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "minimax-code-global",
+        client_id: "mcode-public",
+        authorize_url: "https://account.minimax.io/oauth2/device/code",
+        token_url: "https://account.minimax.io/oauth2/token",
+        scopes: &["agent.default"],
+        uses_pkce: true,
+        extra_params: &[("audience", "agent-backend"), ("refresh_lead_ms", "600000")],
+        refresh_lead_ms: 10 * 60 * 1000,
     }
 }
 pub fn clinepass() -> OAuthProviderConfig {
@@ -592,9 +703,14 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "gemini-cli" => Some(gemini_cli()),
         "grok-cli" => Some(grok_cli()),
         "nous" => Some(nous()),
+        "muse" => Some(muse()),
         "qoder" => Some(qoder()),
+        "qoder-cn" => Some(qoder_cn()),
+        "minimax-code" => Some(minimax_code()),
+        "minimax-code-global" => Some(minimax_code_global()),
         "kimchi" => Some(kimchi()),
         "cursor" => Some(cursor()),
+        "glm" => Some(glm()),
         "antigravity" => Some(antigravity()),
         "codebuddy-cn" => Some(codebuddy_cn()),
         "codebuddy-intl" => Some(codebuddy_intl()),
@@ -606,6 +722,35 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glm_uses_the_zcode_cli_polling_endpoints() {
+        // 9router registry/glm.js oauth block (commit 068ce87): ZCode CLI
+        // init/poll + business login + api.z.ai base, plan key "zcode-api-key".
+        let cfg = glm();
+        assert_eq!(cfg.id, "glm");
+        assert_eq!(cfg.get_param("provider_id"), Some("zai"));
+        assert_eq!(
+            cfg.get_param("cli_init_url"),
+            Some("https://zcode.z.ai/api/v1/oauth/cli/init")
+        );
+        assert_eq!(
+            cfg.get_param("cli_poll_url"),
+            Some("https://zcode.z.ai/api/v1/oauth/cli/poll")
+        );
+        assert_eq!(
+            cfg.get_param("business_login_url"),
+            Some("https://api.z.ai/api/auth/z/login")
+        );
+        assert_eq!(cfg.get_param("api_base_url"), Some("https://api.z.ai"));
+        assert_eq!(cfg.get_param("plan_api_key_name"), Some("zcode-api-key"));
+        assert!(!cfg.uses_pkce, "ZCode flow has no PKCE/verifier");
+        // No refresh grant: the minted coding-plan key is long-lived and
+        // expiry means re-login.
+        assert_eq!(cfg.refresh_lead_ms, 0);
+        // Dispatcher resolves it.
+        assert!(get_config("glm").is_some());
+    }
 
     #[test]
     fn zed_oauth_no_refresh_endpoint() {
@@ -644,6 +789,7 @@ mod device_code_registry {
             "qoder",
             "grok-cli",
             "nous",
+            "muse",
         ] {
             assert!(
                 get_config(provider).is_some(),

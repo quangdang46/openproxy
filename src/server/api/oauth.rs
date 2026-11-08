@@ -706,8 +706,15 @@ fn is_device_code_provider(provider: &str) -> bool {
             | "codebuddy-cn"
             | "codebuddy-intl"
             | "qoder"
+            | "qoder-cn"
+            | "minimax-code"
+            | "minimax-code-global"
             | "grok-cli"
             | "nous"
+            | "muse"
+            // GLM Z.ai — ZCode CLI polling flow (9router registry/glm.js,
+            // flowType device_code). Custom start/poll in oauth::glm.
+            | "glm"
     )
 }
 
@@ -5165,6 +5172,8 @@ pub async fn start_oauth_flow(
         created_at: now,
         expires_at: now + PKCE_FLOW_TTL_SECS,
         kiro_credentials: None,
+        poll_token: None,
+        extra_data: None,
     };
 
     if state.pending_flows.insert(flow).is_err() {
@@ -5342,11 +5351,18 @@ pub async fn start_device_code(
 
     // Kiro uses a special combined flow: register client + start device code
     // KiloCode uses a custom device auth flow (initiateUrl + pollUrlBase)
-    let (device_resp, kiro_credentials) = if provider == "kiro" {
+    // GLM uses the ZCode CLI polling flow (cli/init + cli/poll) which mints
+    // its own one-off poll token carried on the pending flow.
+    // MiniMax Code carries its PKCE verifier + poll-by-user flag; Qoder CN
+    // carries its machineId — both ride on the pending flow's extra_data /
+    // code_verifier slots.
+    let mut flow_code_verifier = String::new();
+    let mut flow_extra_data: Option<std::collections::BTreeMap<String, Value>> = None;
+    let (device_resp, kiro_credentials, glm_poll_token) = if provider == "kiro" {
         match device_code::kiro_start_device_flow().await {
             Ok(kiro_flow) => {
                 let creds = Some((kiro_flow.client_id.clone(), kiro_flow.client_secret.clone()));
-                (kiro_flow.device_code, creds)
+                (kiro_flow.device_code, creds, None)
             }
             Err(e) => {
                 return make_error_response(
@@ -5359,7 +5375,98 @@ pub async fn start_device_code(
         }
     } else if provider == "kilocode" {
         match device_code::kilocode_start_device_flow(&provider_config).await {
-            Ok(resp) => (resp, None),
+            Ok(resp) => (resp, None, None),
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
+        }
+    } else if provider == "muse" {
+        // Muse needs the x-api-version header on the device-authorization
+        // call, which the generic helper does not send (muse.js requestDeviceCode).
+        match crate::oauth::muse::request_device_code().await {
+            Ok(resp) => (resp, None, None),
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
+        }
+    } else if provider == "minimax-code" || provider == "minimax-code-global" {
+        // MiniMax Code (mcode): PKCE S256 device flow — the device-code request
+        // carries a code_challenge and the token poll a code_verifier, with a
+        // user_code fallback when MiniMax issues no device_code
+        // (9router minimax-code-shared.js).
+        let code_verifier = crate::oauth::pkce::generate_code_verifier();
+        let code_challenge = crate::oauth::pkce::generate_code_challenge(&code_verifier);
+        match crate::oauth::minimax_code::request_device_code(&provider_config, &code_challenge)
+            .await
+        {
+            Ok(start) => {
+                flow_code_verifier = code_verifier;
+                let mut extra = std::collections::BTreeMap::new();
+                extra.insert(
+                    "pollByUser".to_string(),
+                    serde_json::json!(start.poll_by_user),
+                );
+                flow_extra_data = Some(extra);
+                (
+                    crate::oauth::DeviceCodeResponse {
+                        device_code: start.device_code,
+                        user_code: start.user_code,
+                        verification_uri: start.verification_uri,
+                        verification_uri_complete: None,
+                        interval: start.interval,
+                        expires_in: Some(start.expires_in as i64),
+                    },
+                    None,
+                    None,
+                )
+            }
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
+        }
+    } else if provider == "qoder-cn" {
+        // Qoder CN device-token flow: client-generated PKCE + nonce + machineId,
+        // no server-issued device code — the nonce doubles as device_code
+        // (9router qoder.js createQoderProvider / QoderService.initiateDeviceFlow).
+        let region = crate::oauth::qoder_device::QODER_CN;
+        let start = crate::oauth::qoder_device::initiate_device_flow(&region);
+        flow_code_verifier = start.code_verifier.clone();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("machineId".to_string(), serde_json::json!(start.machine_id));
+        flow_extra_data = Some(extra);
+        (
+            crate::oauth::DeviceCodeResponse {
+                device_code: start.nonce.clone(),
+                user_code: start.user_code,
+                verification_uri: start.verification_uri_complete,
+                verification_uri_complete: None,
+                interval: start.interval,
+                expires_in: Some(start.expires_in as i64),
+            },
+            None,
+            None,
+        )
+    } else if provider == "glm" {
+        // ZCode CLI polling flow: cli/init mints the poll token that
+        // authenticates every cli/poll call; the ready payload then yields a
+        // business JWT and a minted zcode-api-key (oauth::glm).
+        match crate::oauth::glm::glm_start_device_flow(&provider_config).await {
+            Ok((resp, poll_token)) => (resp, None, Some(poll_token)),
             Err(e) => {
                 return make_error_response(
                     StatusCode::BAD_REQUEST,
@@ -5376,7 +5483,7 @@ pub async fn start_device_code(
             .to_string();
 
         match device_code::start_device_flow(&provider_config, &client_id).await {
-            Ok(resp) => (resp, None),
+            Ok(resp) => (resp, None, None),
             Err(e) => {
                 return make_error_response(
                     StatusCode::BAD_REQUEST,
@@ -5391,7 +5498,7 @@ pub async fn start_device_code(
     let now = now_secs();
     let flow = PendingOAuthFlow {
         state: device_resp.device_code.clone(),
-        code_verifier: String::new(),
+        code_verifier: flow_code_verifier,
         provider: provider.clone(),
         account_id: account_id.clone(),
         redirect_uri: None,
@@ -5405,6 +5512,8 @@ pub async fn start_device_code(
                 client_secret: secret,
             }
         }),
+        poll_token: glm_poll_token,
+        extra_data: flow_extra_data,
     };
 
     if state.pending_flows.insert(flow).is_err() {
@@ -5540,7 +5649,47 @@ pub async fn poll_device_code(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5);
 
-    let token_response = if provider == "kilocode" {
+    let mut glm_psd = std::collections::BTreeMap::new();
+    let mut qoder_cn_profile: Option<(crate::oauth::qoder_device::QoderUserInfo, String, String)> =
+        None;
+    let token_response = if provider == "glm" {
+        // ZCode CLI flow: the pending flow carries the one-off poll token
+        // minted by cli/init; cli/poll then yields a business JWT and a
+        // minted zcode-api-key (oauth::glm).
+        let poll_token = flow.poll_token.clone().unwrap_or_default();
+        if poll_token.is_empty() {
+            return Json(json!({
+                "success": false,
+                "error": "access_denied",
+                "errorDescription": "Missing ZCode poll token — restart the login flow",
+                "pending": false,
+            }))
+            .into_response();
+        }
+        match crate::oauth::glm::glm_poll_for_token(
+            &provider_config,
+            &poll_token,
+            &device_code,
+            interval,
+        )
+        .await
+        {
+            Ok(success) => {
+                glm_psd = success.provider_specific_data;
+                success.token_response
+            }
+            Err(e) => {
+                let pending = e.error == "authorization_pending" || e.error == "slow_down";
+                return Json(json!({
+                    "success": false,
+                    "error": e.error,
+                    "errorDescription": e.error_description,
+                    "pending": pending,
+                }))
+                .into_response();
+            }
+        }
+    } else if provider == "kilocode" {
         match device_code::kilocode_poll_for_token(&provider_config, &device_code).await {
             Ok(resp) => resp,
             Err(e) => {
@@ -5552,6 +5701,124 @@ pub async fn poll_device_code(
                     "pending": pending,
                 }))
                 .into_response();
+            }
+        }
+    } else if provider == "muse" {
+        // Muse polls auth.meta.com with the x-api-version header, then mints
+        // the LLM|… Model API key below (postExchange in muse.js).
+        match crate::oauth::muse::poll_for_token(&device_code, interval).await {
+            Ok(data) => match serde_json::from_value::<TokenResponse>(data) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    return make_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Muse token parse failed: {e}"),
+                        "parse_error",
+                        &provider,
+                    );
+                }
+            },
+            Err(e) => {
+                let pending = e.error == "authorization_pending" || e.error == "slow_down";
+                return Json(json!({
+                    "success": false,
+                    "error": e.error,
+                    "errorDescription": e.error_description,
+                    "pending": pending,
+                }))
+                .into_response();
+            }
+        }
+    } else if provider == "minimax-code" || provider == "minimax-code-global" {
+        // MiniMax Code: single poll attempt per dashboard call; the
+        // poll-by-user flag rides on the pending flow's extra_data
+        // (minimax-code-shared.js pollToken).
+        let poll_by_user = flow
+            .extra_data
+            .as_ref()
+            .and_then(|d| d.get("pollByUser"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        match crate::oauth::minimax_code::poll_token(
+            &provider_config,
+            &device_code,
+            &flow.code_verifier,
+            poll_by_user,
+        )
+        .await
+        {
+            crate::oauth::minimax_code::PollOutcome::Pending { slow_down } => {
+                return Json(json!({
+                    "success": false,
+                    "error": if slow_down { "slow_down" } else { "authorization_pending" },
+                    "pending": true,
+                }))
+                .into_response();
+            }
+            crate::oauth::minimax_code::PollOutcome::Failed(e) => {
+                return Json(json!({
+                    "success": false,
+                    "error": e.error,
+                    "errorDescription": e.error_description,
+                    "pending": false,
+                }))
+                .into_response();
+            }
+            crate::oauth::minimax_code::PollOutcome::Success(resp) => resp,
+        }
+    } else if provider == "qoder-cn" {
+        // Qoder CN device-token poll: GET deviceTokenUrl?nonce&verifier —
+        // 202/404 pending, 200 yields the token (QoderService.pollDeviceToken).
+        let region = crate::oauth::qoder_device::QODER_CN;
+        match crate::oauth::qoder_device::poll_device_token(
+            &region,
+            &device_code,
+            &flow.code_verifier,
+        )
+        .await
+        {
+            Ok(crate::oauth::qoder_device::QoderPollOutcome::Pending) => {
+                return Json(json!({
+                    "success": false,
+                    "error": "authorization_pending",
+                    "pending": true,
+                }))
+                .into_response();
+            }
+            Ok(crate::oauth::qoder_device::QoderPollOutcome::Failed(msg)) => {
+                return Json(json!({
+                    "success": false,
+                    "error": "poll_failed",
+                    "errorDescription": msg,
+                    "pending": false,
+                }))
+                .into_response();
+            }
+            Err(msg) => {
+                return Json(json!({
+                    "success": false,
+                    "error": "poll_failed",
+                    "errorDescription": msg,
+                    "pending": false,
+                }))
+                .into_response();
+            }
+            Ok(crate::oauth::qoder_device::QoderPollOutcome::Success {
+                token, user_id, ..
+            }) => {
+                // Best-effort profile lookup for name/email display
+                // (createQoderProvider.pollToken → fetchUserInfo).
+                let info =
+                    crate::oauth::qoder_device::fetch_user_info(&region, &token.access_token).await;
+                let machine_id = flow
+                    .extra_data
+                    .as_ref()
+                    .and_then(|d| d.get("machineId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                qoder_cn_profile = Some((info, user_id, machine_id));
+                token
             }
         }
     } else {
@@ -5595,7 +5862,7 @@ pub async fn poll_device_code(
     // Kimi device-flow parity (kimi.js): mint a stable deviceId at
     // login and persist it in providerSpecificData so refreshes and
     // usage fetches keep the same X-Msh-Device-Id across restarts.
-    let mut extra_psd = std::collections::BTreeMap::new();
+    let mut extra_psd = glm_psd;
     if provider == "kimi" || provider == "kimi-coding" {
         let device_id = uuid::Uuid::new_v4().to_string();
         extra_psd.insert("deviceId".to_string(), json!(device_id));
@@ -5633,6 +5900,55 @@ pub async fn poll_device_code(
         }
     }
 
+    // Muse postExchange (muse.js): mint the LLM|… Model API key from the Meta
+    // account token. The device code is one-shot, so a mint failure is fatal —
+    // the user must restart the flow rather than keep polling.
+    let mut muse_email: Option<String> = None;
+    if provider == "muse" {
+        let oauth_access_token = final_token_response.access_token.clone();
+        match crate::oauth::muse::mint_key(&oauth_access_token).await {
+            Ok(muse_key) => {
+                muse_email = muse_key.user_email.clone();
+                crate::oauth::muse::apply_muse_key_to_token_response(
+                    &mut final_token_response,
+                    &muse_key,
+                    &oauth_access_token,
+                    &mut extra_psd,
+                );
+            }
+            Err(error) => {
+                return Json(json!({
+                    "success": false,
+                    "error": "exchange_failed",
+                    "errorDescription": error,
+                    "pending": false,
+                    "fatal": true,
+                }))
+                .into_response();
+            }
+        }
+    }
+
+    // Qoder CN: persist the machineId minted at login plus profile fields so
+    // refreshes and usage calls keep the same machine fingerprint
+    // (qoder.js storeQoderCredentials / QoderService.fetchUserInfo).
+    let mut qoder_cn_email: Option<String> = None;
+    if provider == "qoder-cn" {
+        if let Some((info, user_id, machine_id)) = qoder_cn_profile {
+            if !machine_id.is_empty() {
+                extra_psd.insert("machineId".to_string(), json!(machine_id));
+            }
+            extra_psd.insert("userId".to_string(), json!(user_id));
+            if !info.name.is_empty() {
+                extra_psd.insert("name".to_string(), json!(info.name));
+            }
+            if !info.email.is_empty() {
+                qoder_cn_email = Some(info.email.clone());
+                extra_psd.insert("email".to_string(), json!(info.email));
+            }
+        }
+    }
+
     if let Err(e) = store_connection(
         &state.db,
         &flow.account_id,
@@ -5650,7 +5966,8 @@ pub async fn poll_device_code(
         );
     }
 
-    if !extra_psd.is_empty() {
+    let account_email = muse_email.clone().or(qoder_cn_email.clone());
+    if !extra_psd.is_empty() || account_email.is_some() {
         if let Some(conn) = state
             .db
             .snapshot()
@@ -5659,12 +5976,16 @@ pub async fn poll_device_code(
             .find(|c| c.provider == provider && c.id.contains(flow.account_id.as_str()))
             .cloned()
         {
+            let account_email = account_email.clone();
             let _ = state
                 .db
                 .update(move |db| {
                     if let Some(target) =
                         db.provider_connections.iter_mut().find(|c| c.id == conn.id)
                     {
+                        if let Some(email) = &account_email {
+                            target.email = Some(email.clone());
+                        }
                         for (k, v) in extra_psd {
                             target.provider_specific_data.insert(k, v);
                         }

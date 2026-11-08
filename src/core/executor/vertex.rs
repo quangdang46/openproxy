@@ -345,6 +345,32 @@ impl VertexExecutor {
         )
     }
 
+    /// 9router vertex.js:96-98 + commit 9c14191 — location precedence:
+    /// `providerSpecificData.location` (explicit, incl. API-key path) →
+    /// registry `models[].defaultLocation` (Argon → `global`) →
+    /// `us-central1`.
+    fn vertex_location(model: &str, credentials: &ProviderConnection) -> String {
+        if let Some(loc) = credentials
+            .provider_specific_data
+            .get("location")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return loc.to_string();
+        }
+        let bare = model
+            .strip_prefix("vertex-partner/")
+            .or_else(|| model.strip_prefix("vertex/"))
+            .unwrap_or(model);
+        if let Some(loc) =
+            crate::core::model::catalog::provider_catalog().model_default_location("vertex", bare)
+        {
+            return loc.to_string();
+        }
+        VERTEX_DEFAULT_LOCATION.to_string()
+    }
+
     fn build_vertex_request_body(
         body: &Value,
         model: &str,
@@ -402,9 +428,16 @@ impl VertexExecutor {
         // 9router VertexExecutor v1 URL pattern:
         //   https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT/locations/LOCATION/publishers/google/MODEL:streamGenerateContent
         //   ?alt=sse
+        // 9router vertex.js:95-98 — global-only models (registry
+        // `defaultLocation`, e.g. Argon) must not fall back to a regional
+        // location; `providerSpecificData.location` still wins when set.
+        let host = if location == "global" {
+            "aiplatform.googleapis.com".to_string()
+        } else {
+            format!("{location}-aiplatform.googleapis.com")
+        };
         let base = format!(
-            "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}",
-            location,
+            "https://{host}/v1/projects/{}/locations/{}",
             if project_id.is_empty() {
                 "unknown"
             } else {
@@ -445,7 +478,8 @@ impl VertexExecutor {
         request: VertexExecutionRequest,
     ) -> Result<VertexExecutorResponse, VertexExecutorError> {
         // Extract project_id and location from model or credentials
-        let (location, _, _, is_partner) = Self::parse_vertex_model(&request.model);
+        let (_, _, _, is_partner) = Self::parse_vertex_model(&request.model);
+        let location = Self::vertex_location(&request.model, &request.credentials);
 
         // Determine auth path:
         // 1. Raw API key (api_key field) -> ADC or x-goog-api-key
@@ -763,6 +797,51 @@ mod tests {
             false,
         );
         assert_eq!(url, url2, "partner URL must not vary with stream");
+    }
+
+    /// 9router vertex.js:96-98 + commit 29fc880/9c14191: Argon is a
+    /// global-only model — `defaultLocation: "global"` in the catalog must
+    /// beat the `us-central1` fallback, and an explicit
+    /// `providerSpecificData.location` still wins (API-key path included).
+    #[test]
+    fn vertex_location_defaults_argon_to_global() {
+        let conn = ProviderConnection::default();
+        assert_eq!(
+            VertexExecutor::vertex_location("gemini-4-argon", &conn),
+            "global"
+        );
+        assert_eq!(
+            VertexExecutor::vertex_location("vertex/gemini-4-argon", &conn),
+            "global"
+        );
+        assert_eq!(
+            VertexExecutor::vertex_location("gemini-3-flash", &conn),
+            "us-central1"
+        );
+
+        let mut conn = ProviderConnection::default();
+        conn.provider_specific_data
+            .insert("location".to_string(), serde_json::json!("europe-west1"));
+        assert_eq!(
+            VertexExecutor::vertex_location("gemini-4-argon", &conn),
+            "europe-west1"
+        );
+    }
+
+    #[test]
+    fn global_location_uses_unprefixed_vertex_host() {
+        // Regional locations keep the `{loc}-aiplatform` host; `global`
+        // must not become `global-aiplatform.googleapis.com`.
+        let url = VertexExecutor::build_vertex_url("gemini-4-argon", "p", "global", false, true);
+        assert!(
+            url.starts_with(
+                "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/gemini-4-argon:streamGenerateContent"
+            ),
+            "unexpected global url: {url}"
+        );
+        let regional =
+            VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, true);
+        assert!(regional.starts_with("https://us-central1-aiplatform.googleapis.com/"));
     }
 
     #[test]

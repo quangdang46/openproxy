@@ -855,8 +855,8 @@ fn compress_tool_text_owned(text: &str, stats: &mut RtkStats, shape: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_request_preprocessing, compress_messages, inject_caveman_prompt,
-        normalize_caveman_level, CompressionLevel,
+        apply_request_preprocessing, apply_system_prompt_injection, compress_messages,
+        inject_caveman_prompt, normalize_caveman_level, CompressionLevel,
     };
     use crate::types::Settings;
     use serde_json::json;
@@ -1268,6 +1268,97 @@ mod tests {
             body["messages"][0]["content"],
             CompressionLevel::Full.prompt()
         );
+    }
+
+    // 9router TokenSaverClient.js customPromptEnabled/customPrompt
+    // (settingsRepo.js:62-63) → chatCore.js injectCustomPrompt.
+    #[test]
+    fn custom_prompt_injects_when_enabled() {
+        let settings = Settings {
+            custom_prompt_enabled: true,
+            custom_prompt: "Prefer editing existing files.".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({
+            "messages": [
+                { "role": "user", "content": "hi" }
+            ]
+        });
+
+        assert!(apply_system_prompt_injection(&mut body, &settings));
+        let messages = body["messages"].as_array().expect("messages");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Prefer editing existing files.");
+    }
+
+    #[test]
+    fn custom_prompt_disabled_or_empty_is_noop() {
+        let disabled = Settings {
+            custom_prompt_enabled: false,
+            custom_prompt: "ignored".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        assert!(!apply_system_prompt_injection(&mut body, &disabled));
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+
+        // Enabled but empty prompt injects nothing (the textarea may be
+        // left blank; upstream treats empty as no-op too).
+        let empty = Settings {
+            custom_prompt_enabled: true,
+            custom_prompt: "   ".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }] });
+        assert!(!apply_system_prompt_injection(&mut body, &empty));
+    }
+
+    #[test]
+    fn custom_prompt_is_idempotent_across_double_dispatch() {
+        // chatCore can run the inject on both the pre- and post-translate
+        // bodies; the SEP-delimited hasPrompt dedup must make the second
+        // pass a no-op (systemInject.js:75-86).
+        let settings = Settings {
+            custom_prompt_enabled: true,
+            custom_prompt: "Be terse.".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "Base rules" },
+                { "role": "user", "content": "hi" }
+            ]
+        });
+
+        assert!(apply_system_prompt_injection(&mut body, &settings));
+        assert!(!apply_system_prompt_injection(&mut body, &settings));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], "Base rules\n\nBe terse.");
+    }
+
+    #[test]
+    fn apply_request_preprocessing_injects_custom_prompt() {
+        // End-to-end through the pipeline hook chat.rs:1601 calls.
+        let settings = Settings {
+            custom_prompt_enabled: true,
+            custom_prompt: "Answer in French.".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({
+            "messages": [
+                { "role": "user", "content": "hi" }
+            ]
+        });
+
+        assert!(apply_request_preprocessing(
+            &mut body,
+            &settings,
+            "gpt-4o-mini"
+        ));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Answer in French.");
     }
 
     #[test]

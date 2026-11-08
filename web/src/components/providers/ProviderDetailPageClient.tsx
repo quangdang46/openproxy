@@ -28,6 +28,8 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
+import AutoPingScheduleModal from "@/components/usage/AutoPingScheduleModal";
+import { getScheduleSlotLabels, type PingSchedule } from "@/shared/services/quotaPingSchedule";
 import { fetchSettingsStrict } from "@/shared/utils/api";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
@@ -98,7 +100,8 @@ export default function ProviderDetailPageClient() {
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [suggestedModels, setSuggestedModels] = useState([]);
-  const [autoPing, setAutoPing] = useState<{ enabled: boolean; connections: Record<string, boolean> }>({ enabled: false, connections: {} });
+  const [autoPing, setAutoPing] = useState<{ enabled: boolean; connections: Record<string, boolean>; schedules: Record<string, PingSchedule> }>({ enabled: false, connections: {}, schedules: {} });
+  const [scheduleConnection, setScheduleConnection] = useState<any | null>(null);
   const [showAgRiskModal, setShowAgRiskModal] = useState(false);
   const [oneByOneRunning, setOneByOneRunning] = useState(false);
   const [oneByOneStopping, setOneByOneStopping] = useState(false);
@@ -293,7 +296,7 @@ export default function ProviderDetailPageClient() {
       // Load Claude/Codex auto-ping maps (settings.extra keys)
       const autoPingSettingsKey = AUTO_PING_SETTINGS_KEYS[providerId];
       const apCfg = autoPingSettingsKey ? (settingsData[autoPingSettingsKey] || {}) : {};
-      setAutoPing({ enabled: apCfg.enabled === true, connections: apCfg.connections || {} });
+      setAutoPing({ enabled: apCfg.enabled === true, connections: apCfg.connections || {}, schedules: apCfg.schedules || {} });
       if (nodesRes.ok) {
         let node = (nodesData.nodes || []).find((entry) => entry.id === providerId) || null;
 
@@ -433,7 +436,7 @@ export default function ProviderDetailPageClient() {
     saveThinkingConfig(mode);
   };
 
-  const saveAutoPing = async (next: { enabled: boolean; connections: Record<string, boolean> }) => {
+  const saveAutoPing = async (next: { enabled: boolean; connections: Record<string, boolean>; schedules: Record<string, PingSchedule> }) => {
     const autoPingSettingsKey = AUTO_PING_SETTINGS_KEYS[providerId];
     if (!autoPingSettingsKey) return;
     setAutoPing(next);
@@ -454,10 +457,11 @@ export default function ProviderDetailPageClient() {
     }
   };
 
-  const handleAutoPingConnection = (connectionId: string, on: boolean) => {
+  const handleSaveAutoPing = (connectionId: string, { reactive, schedule }: { reactive: boolean; schedule: PingSchedule }) => {
     saveAutoPing({
       ...autoPing,
-      connections: { ...autoPing.connections, [connectionId]: on },
+      connections: { ...autoPing.connections, [connectionId]: reactive },
+      schedules: { ...autoPing.schedules, [connectionId]: schedule },
     });
   };
 
@@ -1135,10 +1139,13 @@ export default function ProviderDetailPageClient() {
                 onMoveUp={() => handleSwapPriority(index, index - 1)}
                 onMoveDown={() => handleSwapPriority(index, index + 1)}
                 onToggleActive={(isActive) => handleUpdateConnectionStatus(conn.id, isActive)}
-                autoPing={AUTO_PING_SETTINGS_KEYS[providerId] && (conn.authType === "oauth" || isOAuth) ? {
-                  on: autoPing.connections[conn.id] === true,
-                  onToggle: (on) => handleAutoPingConnection(conn.id, on),
+                autoPing={AUTO_PING_SETTINGS_KEYS[providerId] && conn.authType === "oauth" ? {
+                  isActive: autoPing.connections[conn.id] === true || autoPing.schedules?.[conn.id]?.enabled === true,
+                  reactiveOn: autoPing.connections[conn.id] === true,
+                  scheduleOn: autoPing.schedules?.[conn.id]?.enabled === true,
+                  scheduleSummary: getScheduleSlotLabels(autoPing.schedules?.[conn.id]).join(" / "),
                   provider: providerId,
+                  onConfigure: () => setScheduleConnection(conn),
                 } : null}
                 oneByOneStatus={oneByOneResults[conn.id] || null}
                 onUpdateProxy={async (proxyPoolId) => {
@@ -2163,6 +2170,17 @@ export default function ProviderDetailPageClient() {
         cancelText="Cancel"
         variant="danger"
       />
+
+      {scheduleConnection && (
+        <AutoPingScheduleModal
+          isOpen={!!scheduleConnection}
+          onClose={() => setScheduleConnection(null)}
+          connection={scheduleConnection}
+          reactive={autoPing.connections[scheduleConnection.id] === true}
+          schedule={autoPing.schedules?.[scheduleConnection.id] || null}
+          onSave={(result) => handleSaveAutoPing(scheduleConnection.id, result)}
+        />
+      )}
     </div>
   );
 }

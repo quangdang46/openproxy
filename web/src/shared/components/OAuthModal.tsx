@@ -210,6 +210,8 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         "qoder",
         "grok-cli",
         "nous",
+        "glm",
+        "muse",
       ];
       if (deviceCodeProviders.includes(provider)) {
         setIsDeviceCode(true);

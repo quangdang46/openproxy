@@ -27,7 +27,7 @@ const NAV_ITEM_NESTED_BASE =
   "relative flex items-center gap-3 px-4 py-1 rounded-lg transition-all group";
 const NAV_ITEM_NESTED_ACTIVE = "bg-primary/10 text-primary";
 
-const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
+const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt", "systemone"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
 const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "travel_explore", href: "/dashboard/media-providers/web" };
 

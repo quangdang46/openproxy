@@ -35,6 +35,9 @@ pub enum SearchType {
     /// Tweet-search type for the xquik adapter (registry `searchTypes: ["x"]`).
     /// Behaves like `Web` everywhere except `as_str` round-trips `"x"`.
     X,
+    /// Academic-paper search type for tinyfish (registry
+    /// `searchTypes: ["web","news","research_paper"]`).
+    ResearchPaper,
 }
 
 impl SearchType {
@@ -43,12 +46,14 @@ impl SearchType {
             SearchType::Web => "web",
             SearchType::News => "news",
             SearchType::X => "x",
+            SearchType::ResearchPaper => "research_paper",
         }
     }
     pub fn parse(s: Option<&str>) -> Self {
         match s {
             Some("news") => SearchType::News,
             Some("x") => SearchType::X,
+            Some("research_paper") => SearchType::ResearchPaper,
             _ => SearchType::Web,
         }
     }

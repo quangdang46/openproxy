@@ -113,8 +113,12 @@ function describeRef(dir) {
 }
 
 function classifyKind(model) {
-  if (model.type) {
-    const t = String(model.type).toLowerCase();
+  // 9router registry entries carry the modality on `kind`; OmniRoute and
+  // older providerModels entries use `type`. Read both so `kind: "stt"`
+  // models (e.g. gemini Live Transcription) don't flatten to "llm".
+  const declared = model.kind ?? model.type;
+  if (declared) {
+    const t = String(declared).toLowerCase();
     if (["embedding", "image", "tts", "stt", "search", "fetch", "video", "audio"].includes(t)) {
       return t;
     }
@@ -155,6 +159,14 @@ async function load9router(rootDir) {
       kind: classifyKind(m),
       ...(m.contextLength ? { contextLength: m.contextLength } : {}),
       ...(m.maxOutputTokens ? { maxOutputTokens: m.maxOutputTokens } : {}),
+      // Registry fields the sync pipeline understands (src/cli/sync.rs
+      // SourceModel): per-model wire-format override + upstream alias id.
+      ...(m.targetFormat ? { targetFormat: m.targetFormat } : {}),
+      ...(m.upstreamModelId ? { upstreamModelId: m.upstreamModelId } : {}),
+      // 9router `models[].transport` — registry transport marker (e.g.
+      // gemini-live STT). Declared on the model so the sync snapshot and
+      // `openproxy sync` keep it instead of dropping it at extraction.
+      ...(m.transport ? { transport: m.transport } : {}),
     }));
     providers.push({
       id,

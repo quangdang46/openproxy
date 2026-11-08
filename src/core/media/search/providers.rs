@@ -27,6 +27,7 @@ pub fn lookup(id: &str) -> Option<&'static dyn SearchProvider> {
         "xquik" => &XQUIK,
         "ollama-search" => &OLLAMA_SEARCH,
         "glm" => &GLM,
+        "tinyfish" => &TINYFISH,
         _ => return None,
     })
 }
@@ -1537,6 +1538,135 @@ impl SearchProvider for GlmSearchProvider {
         SearchResultSet {
             results,
             total_results: Some(total),
+        }
+    }
+}
+
+// ─── tinyfish ────────────────────────────────────────────────────────────
+//
+// Port of `buildTinyfishRequest` (open-sse/handlers/search/callers.js:377)
+// and `normalizeTinyfish` (normalizers.js:114). TinyFish pages results in
+// fixed 10-result pages: `offset` selects the page (`page = offset / 10`)
+// and the within-page slice is applied in `normalize`. Upstream rejects
+// offsets >= 110 and offset+max_results combos that straddle a page
+// boundary.
+
+pub struct TinyFishProvider;
+pub static TINYFISH: TinyFishProvider = TinyFishProvider;
+impl SearchProvider for TinyFishProvider {
+    fn id(&self) -> &'static str {
+        "tinyfish"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry tinyfish.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // registry tinyfish.js searchConfig maxMaxResults = 10.
+        10
+    }
+    fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
+        // Upstream searchTypes: ["web", "news", "research_paper"]. X-type
+        // searches are rejected outright (callers.js:378-380).
+        if request.search_type == SearchType::X {
+            return Err("Unsupported TinyFish search type".to_string());
+        }
+        let mut url = url::Url::parse(&resolve_base_url(
+            "https://api.search.tinyfish.ai",
+            request,
+        )?)
+        .map_err(|e| format!("Invalid TinyFish base URL: {e}"))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("query", &request.query);
+            if request.search_type != SearchType::Web {
+                qp.append_pair("domain_type", request.search_type.as_str());
+            }
+            if let Some(c) = &request.country {
+                qp.append_pair("location", c);
+            }
+            if let Some(l) = &request.language {
+                qp.append_pair("language", l);
+            }
+            let (includes, excludes) = parse_domain_filter(&request.domain_filter);
+            if !includes.is_empty() {
+                qp.append_pair("include_domains", &includes.join(","));
+            }
+            if !excludes.is_empty() {
+                qp.append_pair("exclude_domains", &excludes.join(","));
+            }
+            if let Some(offset) = request.offset.filter(|&o| o > 0) {
+                if offset >= 110 {
+                    return Err("TinyFish search offset exceeds available pages".to_string());
+                }
+                if offset % 10 + request.max_results > 10 {
+                    return Err(
+                        "TinyFish search offset and max_results must fit within one page"
+                            .to_string(),
+                    );
+                }
+                qp.append_pair("page", &(offset / 10).to_string());
+            }
+        }
+        Ok(url.into())
+    }
+    fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
+        let token = require_token(request, "tinyfish")?;
+        let mut h = accept_json();
+        h.insert(
+            "x-api-key",
+            HeaderValue::from_str(token).map_err(|e| e.to_string())?,
+        );
+        Ok(h)
+    }
+    fn normalize(&self, body: &Value, request: &SearchRequest<'_>) -> SearchResultSet {
+        let now = now_iso();
+        let items = body
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // 9router search/index.js: fixed 10-result pages — slice the
+        // within-page offset locally, then cap at max_results.
+        let page_offset = request
+            .offset
+            .filter(|&o| o > 0)
+            .map(|o| (o % 10) as usize)
+            .unwrap_or(0);
+        let results: Vec<SearchResult> = items
+            .iter()
+            .skip(page_offset)
+            .take(request.max_results as usize)
+            .enumerate()
+            .map(|(idx, item)| {
+                let authors = item.get("authors").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| a.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
+                make_result(
+                    "tinyfish",
+                    item.get("title").and_then(|v| v.as_str()),
+                    item.get("url").and_then(|v| v.as_str()),
+                    item.get("snippet").and_then(|v| v.as_str()),
+                    None,
+                    item.get("date").and_then(|v| v.as_str()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    authors.as_deref().filter(|s| !s.is_empty()),
+                    item.get("publisher").and_then(|v| v.as_str()),
+                    idx as u32,
+                    &now,
+                )
+            })
+            .collect();
+        let total = body.get("total_results").and_then(|v| v.as_u64());
+        SearchResultSet {
+            results,
+            total_results: total,
         }
     }
 }

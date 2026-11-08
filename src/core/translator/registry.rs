@@ -376,15 +376,25 @@ pub fn get_target_format_for_provider(provider: &str) -> Format {
     }
     match provider {
         "openai" => Format::OpenAi,
-        "anthropic" | "claude" | "glm" | "kimi" | "minimax" | "minimax-cn" | "kimi-coding" => {
-            Format::Claude
-        }
+        "anthropic"
+        | "claude"
+        | "glm"
+        | "kimi"
+        | "minimax"
+        | "minimax-cn"
+        | "kimi-coding"
+        | "minimax-code"
+        | "minimax-code-global" => Format::Claude,
         "gemini" => Format::Gemini,
         "gemini-cli" => Format::GeminiCli,
         "vertex" | "vertex-partner" => Format::Vertex,
         "codex" | "grok-cli" | "gcli" | "gb" | "perplexity-agent" => Format::OpenAiResponses,
         "cursor" | "cu" => Format::Cursor,
         "kiro" => Format::Kiro,
+        // 9router registry/bedrock.js transport.format = "claude": Anthropic
+        // Messages on Bedrock. bedrock-xai deliberately stays OpenAi — Grok on
+        // Bedrock ignores anthropic_version and returns Chat Completions.
+        "bedrock" | "br" | "aws-bedrock" => Format::Claude,
         "ollama" | "ollama-local" | "ollama-cloud" => Format::Ollama,
         "antigravity" => Format::Antigravity,
         "commandcode" | "command-code" => Format::CommandCode,

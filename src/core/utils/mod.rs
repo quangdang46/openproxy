@@ -17,3 +17,4 @@ pub mod session_manager;
 pub mod stream_flags;
 pub mod thinking_suffix;
 pub mod tool_deduper;
+pub mod web_cookie;

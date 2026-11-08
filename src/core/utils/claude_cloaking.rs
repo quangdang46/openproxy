@@ -32,7 +32,9 @@ fn generate_billing_header(payload: &Value) -> String {
     rand::thread_rng().fill_bytes(&mut buf);
     let build_hash = hex::encode(buf);
     let build_hash = &build_hash[..3];
-    format!("x-anthropic-billing-header: cc_version={CLAUDE_VERSION}.{build_hash}; cc_entrypoint={CC_ENTRYPOINT}; cch={cch};")
+    format!(
+        "x-anthropic-billing-header: cc_version={CLAUDE_VERSION}.{build_hash}; cc_entrypoint={CC_ENTRYPOINT}; cch={cch};"
+    )
 }
 
 /// Build the fake user-id JSON blob used for `metadata.user_id`. The

@@ -23,6 +23,9 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("cl", "cline"),
         ("oc", "opencode"),
         ("ocg", "opencode-go"),
+        // 9router registry/opencode-zen.js:2-9 — `alias: "ocz"`,
+        // `uiAlias: "ocz"`.
+        ("ocz", "opencode-zen"),
         ("el", "elevenlabs"),
         ("openai", "openai"),
         ("anthropic", "anthropic"),
@@ -164,6 +167,19 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("llm-7", "llm7"),
         ("mimo", "xiaomi-mimo"),
         ("mimo-desktop", "xiaomi-mimo"),
+        // Muse (Meta Model API) — 9router registry/muse.js aliases.
+        ("muse", "muse"),
+        ("muse-ai", "muse"),
+        ("meta-model-api", "muse"),
+        ("muse-code", "muse"),
+        ("muse-subscription", "muse"),
+        // AWS Bedrock — 9router registry/{bedrock,bedrock-xai}.js aliases.
+        ("br", "bedrock"),
+        ("bedrock", "bedrock"),
+        ("aws-bedrock", "bedrock"),
+        ("brx", "bedrock-xai"),
+        ("bedrock-xai", "bedrock-xai"),
+        ("bedrock-grok", "bedrock-xai"),
         ("morphllm", "morph"),
         ("pplx-agent", "perplexity-agent"),
         ("pplx-responses", "perplexity-agent"),
@@ -174,6 +190,12 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("samba", "sambanova"),
         ("sambanova-ai", "sambanova"),
         ("sensenova", "sensenova"),
+        // OpenAI-compatible aggregators (9router registry/{dahl,atria,agnes,bai}.js,
+        // commit 06112c1). Each `aliases:` entry folds into the provider id.
+        ("dahl-inference", "dahl"),
+        ("atria-asi", "atria"),
+        ("agnes-ai", "agnes"),
+        ("b-ai", "bai"),
         ("tencent-hunyuan", "tencent"),
         ("vercel", "vercel-ai-gateway"),
         ("vn", "venice"),
@@ -200,8 +222,20 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("marscode", "trae"),
         ("polly", "aws-polly"),
         ("qd", "qoder"),
+        ("qdcn", "qoder-cn"),
         ("stability", "stability-ai"),
+        ("th", "tokenharbor"),
+        ("thh", "tokenharbor"),
         ("tr", "trae"),
+        ("mm", "minimax-code"),
+        ("mmg", "minimax-code-global"),
+        // 9router registry/v1m.js: the System One (Jev) decision provider
+        // answers `systemone/` and `jev/` model prefixes as well as `v1m/`.
+        // It has no PROVIDER_CONFIGS entry — the /v1/systemone media route
+        // dispatches on the registry `systemoneConfig`, not the chat
+        // executor — so the PROVIDER_CONFIGS caveat above does not apply.
+        ("systemone", "v1m"),
+        ("jev", "v1m"),
     ])
 });
 
@@ -422,6 +456,22 @@ fn infer_provider_from_model_name(model_name: &str) -> &'static str {
         return "codex";
     }
 
+    // 9router MODEL_PREFIX_PROVIDERS (open-sse/services/model.js:136-140,
+    // commits 8f9ff44/7878f53): Codex-backend GPT slugs that the OpenAI API
+    // does not serve — bare ids from the Codex CLI /model picker must stay on
+    // OAuth Codex or they 404 for users with no OpenAI API key (#4405).
+    // Ranges: gpt-5.x, gpt-6.x, gpt-6-*, gpt-daybreak-*, gpt-reserve*.
+    // Plain gpt-4*/gpt-3.5*/gpt-4o* still fall through to the gpt-* → openai
+    // rule below.
+    if model_name.starts_with("gpt-5.")
+        || model_name.starts_with("gpt-6.")
+        || model_name.starts_with("gpt-6-")
+        || model_name.starts_with("gpt-daybreak-")
+        || model_name.starts_with("gpt-reserve")
+    {
+        return "codex";
+    }
+
     if model_name.starts_with("claude-") {
         "anthropic"
     } else if model_name.starts_with("gemini-") {
@@ -609,6 +659,13 @@ mod prefix_inference_parity {
             ("o3-mini", "openai"),
             ("deepseek-chat", "openrouter"),
             ("codex-auto-review", "codex"),
+            // 9router MODEL_PREFIX_PROVIDERS (model.js:136-140): bare Codex
+            // GPT slugs route to OAuth Codex, not the openai fallback (#4405).
+            ("gpt-6-astra", "codex"),
+            ("gpt-6.1-sol", "codex"),
+            ("gpt-5.6-terra", "codex"),
+            ("gpt-daybreak-blue-latest", "codex"),
+            ("gpt-reserve", "codex"),
         ] {
             assert_eq!(
                 get_model_info(model, &db).provider.as_deref(),

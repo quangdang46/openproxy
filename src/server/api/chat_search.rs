@@ -49,6 +49,7 @@ fn resolve_search_provider(alias: &str) -> Option<&'static str> {
         // direction: ollama-search.js:21 reuses the ollama chat key).
         "ollama-search" | "ollama_search" => "ollama-search",
         "glm" => "glm",
+        "tinyfish" => "tinyfish",
         "antigravity" | "ag" => "antigravity",
         _ => return None,
     };
@@ -151,7 +152,7 @@ fn select_search_connection(
 }
 
 /// Canonical search-provider order used for cross-provider failover
-/// (mirrors the 15-provider registry in [`resolve_search_provider`]).
+/// (mirrors the registry in [`resolve_search_provider`]).
 const SEARCH_FAILOVER_ORDER: &[&str] = &[
     "serper",
     "serpingapi",
@@ -167,6 +168,7 @@ const SEARCH_FAILOVER_ORDER: &[&str] = &[
     "xquik",
     "ollama-search",
     "glm",
+    "tinyfish",
     "antigravity",
 ];
 

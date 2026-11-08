@@ -156,6 +156,94 @@ fn extract_text_content(content: &Value) -> String {
     }
 }
 
+/// Parse a `data:<mime>;base64,<payload>` URI → (mimeType, base64), mirroring
+/// 9router `parseDataUri` (translator/concerns/image.js).
+fn parse_data_uri(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    // Upstream DATA_URI_RE = /^data:([^;]+);base64,([\s\S]+)$/ — mime may not
+    // contain ';', and the payload must be non-empty-ish (any chars allowed).
+    let (mime, payload) = rest.split_once(";base64,")?;
+    if mime.is_empty() || mime.contains(';') || payload.is_empty() {
+        return None;
+    }
+    Some((mime.to_string(), payload.to_string()))
+}
+
+/// Convert an OpenAI `image_url` part URL into a Claude image `source` object.
+/// Returns None when the URL is neither a base64 data URI nor http(s).
+fn image_url_to_source(url: &str) -> Option<Value> {
+    if let Some((mime, data)) = parse_data_uri(url) {
+        Some(serde_json::json!({
+            "type": "base64",
+            "media_type": mime,
+            "data": data,
+        }))
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        Some(serde_json::json!({ "type": "url", "url": url }))
+    } else {
+        None
+    }
+}
+
+/// Port of 9router `convertToolResultContent` (openai-to-claude.js:200-228).
+/// A tool message may carry an OpenAI content array (text + image_url parts).
+/// Claude tool_result content accepts image blocks but not OpenAI image_url
+/// parts. Strings and non-array content pass through untouched; if nothing in
+/// the array is convertible the original payload is kept rather than sending
+/// an empty result.
+fn convert_tool_result_content(content: &Value) -> Value {
+    let arr = match content.as_array() {
+        Some(a) => a,
+        None => return content.clone(),
+    };
+
+    let mut parts: Vec<Value> = Vec::new();
+    for part in arr {
+        let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match part_type {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        }));
+                    }
+                }
+            }
+            "image_url" => {
+                if let Some(url) = part
+                    .get("image_url")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Some(source) = image_url_to_source(url) {
+                        parts.push(serde_json::json!({
+                            "type": "image",
+                            "source": source,
+                        }));
+                    }
+                }
+            }
+            "image" => {
+                if let Some(source) = part.get("source") {
+                    parts.push(serde_json::json!({
+                        "type": "image",
+                        "source": source,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        content.clone()
+    } else {
+        Value::Array(parts)
+    }
+}
+
 fn try_parse_json<T: for<'de> Deserialize<'de>>(str: &str) -> Option<T> {
     serde_json::from_str(str).ok()
 }
@@ -170,7 +258,8 @@ fn get_content_blocks_from_message(msg: &Value) -> Vec<ClaudeContentBlock> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let content = msg.get("content").cloned().unwrap_or(Value::Null);
+        let content =
+            convert_tool_result_content(&msg.get("content").cloned().unwrap_or(Value::Null));
         blocks.push(ClaudeContentBlock::ToolResult {
             tool_use_id: tool_call_id,
             content,
@@ -215,28 +304,8 @@ fn get_content_blocks_from_message(msg: &Value) -> Vec<ClaudeContentBlock> {
                             .and_then(|v| v.get("url"))
                             .and_then(|v| v.as_str())
                         {
-                            if url.starts_with("data:") {
-                                if let Some(comma_pos) = url.find(";base64,") {
-                                    let prefix = &url[5..comma_pos];
-                                    let data = &url[comma_pos + 8..];
-                                    blocks.push(ClaudeContentBlock::Image {
-                                        source: ImageSource {
-                                            source_type: "base64".to_string(),
-                                            media_type: Some(prefix.to_string()),
-                                            data: Some(data.to_string()),
-                                            url: None,
-                                        },
-                                    });
-                                }
-                            } else if url.starts_with("http://") || url.starts_with("https://") {
-                                blocks.push(ClaudeContentBlock::Image {
-                                    source: ImageSource {
-                                        source_type: "url".to_string(),
-                                        media_type: None,
-                                        data: None,
-                                        url: Some(url.to_string()),
-                                    },
-                                });
+                            if let Some(source) = image_url_to_source(url) {
+                                blocks.push(ClaudeContentBlock::Image { source });
                             }
                         }
                     }
@@ -1262,6 +1331,126 @@ mod tests {
         assert_eq!(
             tool_choice.get("name").unwrap().as_str().unwrap(),
             "my_tool"
+        );
+    }
+
+    #[test]
+    fn tool_result_image_url_data_uri_becomes_claude_image_block() {
+        // 9router openai-to-claude.js convertToolResultContent (#5125): a
+        // role:tool message with OpenAI image_url parts must become Claude
+        // image blocks inside tool_result content.
+        let mut body: Value = serde_json::from_str(r#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "look"},
+                {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "id": "call_1", "function": {"name": "screenshot", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "text", "text": "screenshot taken"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+                ]}
+            ]
+        }"#).unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let tool_result_msg = messages
+            .iter()
+            .find(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("tool_result message");
+        let block = &tool_result_msg
+            .get("content")
+            .and_then(|c| c.as_array())
+            .unwrap()[0];
+        assert_eq!(block.get("type").unwrap().as_str().unwrap(), "tool_result");
+        let content = block.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].get("type").unwrap().as_str().unwrap(), "text");
+        assert_eq!(content[1].get("type").unwrap().as_str().unwrap(), "image");
+        let source = content[1].get("source").unwrap();
+        assert_eq!(source.get("type").unwrap().as_str().unwrap(), "base64");
+        assert_eq!(
+            source.get("media_type").unwrap().as_str().unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            source.get("data").unwrap().as_str().unwrap(),
+            "iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn tool_result_image_url_http_url_becomes_url_source() {
+        let mut body: Value = serde_json::from_str(r#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "look"},
+                {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "id": "call_1", "function": {"name": "screenshot", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/shot.png"}}
+                ]}
+            ]
+        }"#).unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let block = messages
+            .iter()
+            .find_map(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())?
+                    .iter()
+                    .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    .cloned()
+            })
+            .expect("tool_result block");
+        let content = block.get("content").unwrap().as_array().unwrap();
+        assert_eq!(content[0].get("type").unwrap().as_str().unwrap(), "image");
+        let source = content[0].get("source").unwrap();
+        assert_eq!(source.get("type").unwrap().as_str().unwrap(), "url");
+        assert_eq!(
+            source.get("url").unwrap().as_str().unwrap(),
+            "https://example.com/shot.png"
+        );
+    }
+
+    #[test]
+    fn tool_result_unconvertible_content_falls_back_to_original() {
+        // Non-array and non-image content must pass through untouched.
+        let mut body: Value = serde_json::from_str(r#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "look"},
+                {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "id": "call_1", "function": {"name": "screenshot", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "plain result"}
+            ]
+        }"#).unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let block = messages
+            .iter()
+            .find_map(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())?
+                    .iter()
+                    .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    .cloned()
+            })
+            .expect("tool_result block");
+        assert_eq!(
+            block.get("content").unwrap().as_str().unwrap(),
+            "plain result"
         );
     }
 }

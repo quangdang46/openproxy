@@ -342,6 +342,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "antigravity"
                 | "github"
                 | "qoder"
+                | "qoder-cn"
                 | "openai"
                 | "openrouter"
                 | "opencode-zen"
@@ -384,12 +385,20 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "baseten"
                 | "runcrate"
                 | "sensenova"
+                | "dahl"
+                | "atria"
+                | "agnes"
+                | "bai"
                 | "nous"
                 | "nous-research"
                 | "glhf"
                 | "kilocode"
                 | "deepseek-web"
                 | "ds-web"
+                | "qoder-cn"
+                | "tokenharbor"
+                | "minimax-code"
+                | "minimax-code-global"
         )
 }
 
@@ -511,6 +520,35 @@ async fn fetch_provider_models_response(
             fetch_first_party_openai_style_models(connection, "https://api.qoder.com/v1/models")
                 .await
         }
+        // Qoder CN's live catalog is the same COSY-signed model/list the
+        // executor fetches — a deeper port already deferred for intl qoder.
+        // Serve the static `qdcn` catalog (16 regional models) so the
+        // Providers page still lists them instead of erroring.
+        "qoder-cn" => Ok(static_catalog_models_response(connection, "qdcn")),
+        // Token Harbor: OpenAI-compatible /v1/models (upstream modelsFetcher
+        // type "openai"; validateUrl is the same endpoint).
+        "tokenharbor" => {
+            fetch_first_party_openai_style_models(connection, "https://tokenharbor.ai/v1/models")
+                .await
+        }
+        // MiniMax Code live catalog is a public (unauthenticated) Mavis
+        // endpoint returning {providers:[{providerId:"minimax",config:
+        // {models:{<id>:{name,limit:{context}}}}}]} — the "minimax-code"
+        // filter in upstream suggested-models/filters.js.
+        "minimax-code" => {
+            fetch_minimax_code_models(
+                connection,
+                "https://agent.minimax.cn/mavis/api/v1/models?region=cn&buildEnv=prod",
+            )
+            .await
+        }
+        "minimax-code-global" => {
+            fetch_minimax_code_models(
+                connection,
+                "https://agent.minimax.io/mavis/api/v1/models?region=en&buildEnv=prod",
+            )
+            .await
+        }
         // Zed's catalog is account-scoped and only reachable through its own
         // cloud API, so it needs `resolve_zed_models` rather than an
         // OpenAI-shaped listing. Without this arm Zed fell through to the
@@ -575,10 +613,13 @@ async fn fetch_provider_models_response(
         // are NOT matched by the `openai-compatible-*` prefix branch above and
         // previously fell through to the catch-all — which is why the
         // "Import from /models" button returned 400 for both.
-        "cline" | "clinepass" => {
-            fetch_first_party_openai_style_models(connection, "https://api.cline.bot/api/v1/models")
-                .await
-        }
+        //
+        // Upstream open-sse/services/clinepassModels.js: `cline` returns the
+        // whole catalog plus the `cline-free/*` ids merged in from Cline's
+        // unauthenticated recommended-models feed (the /models endpoint never
+        // lists them); `clinepass` keeps only the `cline-pass/` prefix.
+        "cline" => fetch_cline_models(connection, false).await,
+        "clinepass" => fetch_cline_models(connection, true).await,
         // deepseek-web has no /models endpoint — it is a web-cookie
         // provider, so discovery returns the static registry model list
         // (OmniRoute registry/deepseek/web/index.ts, 14 models).
@@ -750,6 +791,32 @@ async fn fetch_provider_models_response(
         "runcrate" => {
             fetch_first_party_openai_style_models(connection, "https://api.runcrate.ai/v1/models")
                 .await
+        }
+        // 9router registry/dahl.js modelsFetcher — the live catalogue is
+        // public (no auth), so a token is attached only when one exists.
+        "dahl" => {
+            fetch_public_openai_style_models(connection, "https://inference.dahl.global/v1/models")
+                .await
+        }
+        // 9router registry/atria.js transport.validateUrl.
+        "atria" => {
+            fetch_first_party_openai_style_models(connection, "https://api.atria-asi.ai/v1/models")
+                .await
+        }
+        // 9router registry/agnes.js transport.validateUrl — the live
+        // catalogue requires a token (401 without one), so this is the
+        // authenticated fetcher.
+        "agnes" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://apihub.agnes-ai.com/v1/models",
+            )
+            .await
+        }
+        // 9router registry/bai.js modelsFetcher — large rotating catalogue,
+        // fetched live; any model id is accepted via passthroughModels.
+        "bai" => {
+            fetch_first_party_openai_style_models(connection, "https://api.b.ai/v1/models").await
         }
         "nous" | "nous-research" => fetch_nous_models(connection).await,
         "glhf" => {
@@ -933,6 +1000,124 @@ async fn fetch_first_party_openai_style_models(
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token, false).await
+}
+
+const CLINE_MODELS_URL: &str = "https://api.cline.bot/api/v1/models";
+/// Cline's free tier is published here, not in /api/v1/models: the catalog
+/// endpoint carries no `cline-free/*` ids at all. The feed is unauthenticated
+/// (Cline's own SDK calls it without a token), so no auth header is sent.
+const CLINE_RECOMMENDED_MODELS_URL: &str =
+    "https://api.cline.bot/api/v1/ai/cline/recommended-models";
+
+/// Cline/ClinePass model discovery — port of upstream
+/// `open-sse/services/clinepassModels.js` `resolveClineModels` /
+/// `resolveClinepassModels` plus the customResolvers in
+/// `src/app/api/providers/[id]/models/route.js`:
+/// - `clinepass` keeps only the `cline-pass/` prefix subset;
+/// - `cline` returns the whole catalog AND merges the feed's `free[]` tier
+///   (`cline-free/*` ids never appear in /api/v1/models);
+/// - either falls back to the static catalog with a warning when live
+///   discovery yields nothing.
+async fn fetch_cline_models(
+    connection: &ProviderConnection,
+    clinepass: bool,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let static_fallback = |warning: &str| {
+        let alias = if clinepass { "clinepass" } else { "cl" };
+        let models = crate::core::model::catalog::provider_catalog()
+            .models_for_alias(alias)
+            .unwrap_or(&[])
+            .iter()
+            .map(|m| ProviderModel {
+                id: m.id.clone(),
+                name: m.name.clone().unwrap_or_else(|| m.id.clone()),
+                extra: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        response_with_models(
+            connection,
+            models,
+            Some(format!("{warning}; falling back to static catalog.")),
+        )
+    };
+
+    let mut response =
+        match fetch_first_party_openai_style_models(connection, CLINE_MODELS_URL).await {
+            Ok(response) => response,
+            Err(_) => {
+                return Ok(static_fallback(if clinepass {
+                    "ClinePass returned no live models"
+                } else {
+                    "Cline returned no live models"
+                }))
+            }
+        };
+
+    if clinepass {
+        response
+            .models
+            .retain(|model| model.id.starts_with("cline-pass/"));
+    } else {
+        // Free tier: /api/v1/models lists no `cline-free/*` ids, so merge the
+        // feed's free[] in. First writer wins on a shared id. The feed is
+        // additive — a dead feed must never take the catalog down with it.
+        let mut seen: std::collections::BTreeSet<String> =
+            response.models.iter().map(|m| m.id.clone()).collect();
+        for model in fetch_cline_free_tier_models().await {
+            if seen.insert(model.id.clone()) {
+                response.models.push(model);
+            }
+        }
+    }
+
+    if response.models.is_empty() {
+        return Ok(static_fallback(if clinepass {
+            "ClinePass returned no live models"
+        } else {
+            "Cline returned no live models"
+        }));
+    }
+    Ok(response)
+}
+
+/// Fetch Cline's recommended-models feed and return only its `free[]` tier.
+/// Returns an empty vec on any failure — the free tier is additive.
+async fn fetch_cline_free_tier_models() -> Vec<ProviderModel> {
+    let Ok(client) = http_client() else {
+        return Vec::new();
+    };
+    let Ok(payload) = fetch_json(
+        client
+            .get(CLINE_RECOMMENDED_MODELS_URL)
+            .header(ACCEPT, "application/json"),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    payload
+        .get("free")
+        .and_then(Value::as_array)
+        .map(|free| {
+            free.iter()
+                .filter_map(|model| {
+                    let id = model.get("id").and_then(Value::as_str)?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(ProviderModel {
+                        id: id.to_string(),
+                        name: model
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(id)
+                            .to_string(),
+                        extra: BTreeMap::new(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn positive_u64(value: Option<&Value>) -> Option<u64> {
@@ -2171,6 +2356,137 @@ fn resolve_ollama_local_host(connection: &ProviderConnection) -> String {
         .unwrap_or_else(|| OLLAMA_LOCAL_DEFAULT_HOST.to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+/// MiniMax Code (mcode) live catalog — port of the `"minimax-code"` filter in
+/// upstream `src/app/api/providers/suggested-models/filters.js`.
+///
+/// The Mavis `/models` endpoint is public (no auth header upstream), returns
+/// `{providers:[{providerId:"minimax",config:{models:{<id>:{name,
+/// limit:{context}}}}}]}`. On any failure or empty result, fall back to the
+/// static `mm`/`mmg` catalog with a warning.
+async fn fetch_minimax_code_models(
+    connection: &ProviderConnection,
+    url: &str,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let alias = if connection.provider == "minimax-code-global" {
+        "mmg"
+    } else {
+        "mm"
+    };
+    let fallback = || -> Result<ProviderModelsResponse, RouteError> {
+        Ok(static_catalog_models_response(connection, alias))
+    };
+
+    let client = match http_client() {
+        Ok(c) => c,
+        Err(_) => return fallback(),
+    };
+    let json = match fetch_json(
+        client
+            .get(url)
+            .header("Accept", "application/json")
+            .header("User-Agent", "MiniMaxAgent"),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "MINIMAX_CODE_MODELS fetch failed: {}",
+                fetch_json_error_message(e)
+            );
+            return fallback();
+        }
+    };
+
+    // Upstream wraps the object-shaped catalog in a single-element array.
+    let env = if json.is_array() {
+        json.as_array()
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(json)
+    } else {
+        json
+    };
+    let providers = env.get("providers").and_then(Value::as_array);
+    let entry = providers.and_then(|list| {
+        list.iter()
+            .find(|p| p.get("providerId").and_then(Value::as_str) == Some("minimax"))
+    });
+    let models_obj = entry
+        .and_then(|p| p.get("config"))
+        .and_then(|c| c.get("models"))
+        .and_then(Value::as_object);
+
+    let mut models: Vec<(u64, ProviderModel)> = models_obj
+        .map(|obj| {
+            obj.iter()
+                .filter(|(id, m)| !id.trim().is_empty() && m.is_object())
+                .map(|(id, m)| {
+                    let name = m
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id.as_str())
+                        .to_string();
+                    let context = m
+                        .get("limit")
+                        .and_then(|l| l.get("context"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let mut extra = BTreeMap::new();
+                    if context > 0 {
+                        extra.insert("contextLength".to_string(), json!(context));
+                    }
+                    (
+                        context,
+                        ProviderModel {
+                            id: id.clone(),
+                            name,
+                            extra,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if models.is_empty() {
+        return fallback();
+    }
+    // Upstream sorts by contextLength descending.
+    models.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(response_with_models(
+        connection,
+        models.into_iter().map(|(_, m)| m).collect(),
+        None,
+    ))
+}
+
+/// ProviderModelsResponse built from the static provider catalog for `alias`
+/// (used when the live listing needs a deeper port, e.g. qoder-cn's
+/// COSY-signed catalog).
+fn static_catalog_models_response(
+    connection: &ProviderConnection,
+    alias: &str,
+) -> ProviderModelsResponse {
+    let models = crate::core::model::catalog::provider_catalog()
+        .models_for_alias(alias)
+        .unwrap_or(&[])
+        .iter()
+        .map(|m| ProviderModel {
+            id: m.id.clone(),
+            name: m.name.clone().unwrap_or_else(|| m.id.clone()),
+            extra: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    response_with_models(
+        connection,
+        models,
+        Some(format!(
+            "Live model listing unavailable; serving the static {alias} catalog."
+        )),
+    )
 }
 
 fn response_with_models(

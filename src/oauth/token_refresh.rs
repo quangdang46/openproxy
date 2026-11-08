@@ -919,6 +919,95 @@ pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, 
     Err("Qoder does not support token refresh".to_string())
 }
 
+/// Refresh a MiniMax Code (mcode) access token.
+///
+/// 9router parity: `services/tokenRefresh/providers.js`
+/// `refreshMiniMaxCodeToken` — POST form to the per-site token endpoint with
+/// `client_id=mcode-public`, `scope=agent.default`, `audience=agent-backend`.
+/// MiniMax refresh tokens are SINGLE-USE: `invalid_grant` (HTTP 400) means
+/// the sign-in is gone; every other failure is transient and the caller
+/// keeps the current access token (surfaced here as an error so the chat
+/// path moves on, matching upstream's `null` → skip-refresh behavior).
+/// `dedup_refresh` in the dispatcher keys on the spent token value, matching
+/// upstream's dedup-by-token for the same single-use constraint.
+pub async fn refresh_minimax_code_token(
+    provider: &str,
+    refresh_token: &str,
+) -> Result<RefreshResult, String> {
+    let token_url = match provider {
+        "minimax-code" => "https://account.minimax.cn/oauth2/token",
+        "minimax-code-global" => "https://account.minimax.io/oauth2/token",
+        other => return Err(format!("Unknown MiniMax Code provider: {other}")),
+    };
+    if refresh_token.is_empty() {
+        return Err("MiniMax Code: no refresh token".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(token_url)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(ACCEPT, "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", "mcode-public"),
+            ("scope", "agent.default"),
+            ("audience", "agent-backend"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("MiniMax token refresh request failed ({provider}): {e}"))?;
+
+    let status = resp.status();
+    let data: Option<Value> = resp.json().await.ok();
+    let api_error = data
+        .as_ref()
+        .and_then(|d| d.get("error"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if !status.is_success() || api_error.is_some() {
+        if status.as_u16() == 400 && api_error.as_deref() == Some("invalid_grant") {
+            // The ONLY answer meaning the sign-in is gone (upstream returns
+            // {error:"invalid_grant"} so the account is treated as dead).
+            return Err(format!(
+                "invalid_grant: MiniMax refresh token spent/rejected ({provider})"
+            ));
+        }
+        let code = api_error.unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+        return Err(format!("MiniMax token refresh failed ({provider}): {code}"));
+    }
+
+    let access_token = data
+        .as_ref()
+        .and_then(|d| d.get("access_token"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("MiniMax refresh returned no access_token ({provider})"))?
+        .to_string();
+    // MiniMax rotates the refresh token on every refresh; keep the old one
+    // only if the answer oddly omits it (upstream parity).
+    let new_refresh = data
+        .as_ref()
+        .and_then(|d| d.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| Some(refresh_token.to_string()));
+    let expires_in = data
+        .as_ref()
+        .and_then(|d| d.get("expires_in"))
+        .and_then(Value::as_i64);
+
+    Ok(RefreshResult {
+        access_token,
+        refresh_token: new_refresh,
+        expires_in,
+    })
+}
+
 /// Refresh a Trae (ByteDance marscode) access token.
 ///
 /// 9router parity: `open-sse/services/tokenRefresh/providers.js:619-688`.
@@ -1317,6 +1406,15 @@ pub async fn dispatch_oauth_refresh(
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
                 async move { refresh_nous_token(&rt).await }
+            })
+            .await
+        }
+        "minimax-code" | "minimax-code-global" => {
+            let rt = refresh_token.to_string();
+            let provider = provider.to_string();
+            dedup_refresh(provider.as_str(), refresh_token, move || {
+                let (rt, provider) = (rt.clone(), provider.clone());
+                async move { refresh_minimax_code_token(&provider, &rt).await }
             })
             .await
         }

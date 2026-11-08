@@ -38,6 +38,9 @@ use crate::core::executor::{CodexExecutionRequest, CodexExecutor, UpstreamRespon
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::tunnel::TunnelProvider;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
+use crate::server::api::quota_ping_schedule::{
+    get_due_ping_slot_default, normalize_ping_schedule, PingSchedule,
+};
 use crate::server::api::usage::fetch_oauth_quota;
 use crate::server::state::AppState;
 use crate::types::{ProviderConnection, Settings};
@@ -158,7 +161,8 @@ async fn run_tick_inner(state: &AppState) -> Value {
 
     for (provider, cfg) in [("claude", CLAUDE_CFG), ("codex", CODEX_CFG)] {
         let enabled_map = auto_ping_connections(settings, cfg.settings_key);
-        if enabled_map.is_empty() {
+        let schedule_map = auto_ping_schedules(settings, cfg.settings_key);
+        if enabled_map.is_empty() && schedule_map.is_empty() {
             continue;
         }
 
@@ -167,12 +171,19 @@ async fn run_tick_inner(state: &AppState) -> Value {
             .iter()
             .filter(|c| c.provider == provider && c.is_active() && c.auth_type == "oauth")
         {
-            if enabled_map.get(&conn.id) != Some(&true) {
+            // A schedule stands on its own: an account can run only on its
+            // slots, with the reactive ping left off (9router
+            // `runQuotaAutoPingTick` targets filter).
+            let schedule = schedule_map
+                .get(&conn.id)
+                .and_then(|raw| normalize_ping_schedule(Some(raw)));
+            let reactive = enabled_map.get(&conn.id) == Some(&true);
+            if !reactive && schedule.is_none() {
                 continue;
             }
             target_count += 1;
 
-            match process_connection(state, conn, provider, cfg).await {
+            match process_connection(state, conn, provider, cfg, schedule, reactive).await {
                 TickOutcome::Observe {
                     reset_at,
                     near_reset,
@@ -263,6 +274,8 @@ async fn process_connection(
     conn: &ProviderConnection,
     provider: &str,
     cfg: ProviderPingConfig,
+    schedule: Option<PingSchedule>,
+    reactive: bool,
 ) -> TickOutcome {
     let key = cache_key(provider, &conn.id);
 
@@ -279,8 +292,10 @@ async fn process_connection(
         }
     }
 
-    // Claude: skip far from reset using cached resetAt (refreshAheadMs)
-    if !cfg.ping_when_reset_at_slides {
+    // Claude: skip far from reset using cached resetAt (refreshAheadMs).
+    // An anchored schedule needs a fresh look every tick, since its slots do
+    // not depend on resetAt (9router quotaAutoPing.js:200).
+    if schedule.is_none() && !cfg.ping_when_reset_at_slides {
         let st = AUTO_PING_STATE.lock();
         if let Some(cached) = st.reset_cache.get(&key) {
             if let Some(reset_ms) = parse_reset_ms(cached) {
@@ -371,17 +386,16 @@ async fn process_connection(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let Some(reset_at) = reset_at else {
-        return TickOutcome::Skip {
-            reason: "no_reset_at".into(),
-            reset_at: None,
-        };
-    };
-
+    // resetAt is stable for time-based windows; Codex polls every tick because
+    // inactive windows slide forward. A schedule needs a fresh look every tick,
+    // since its slots do not depend on resetAt — a missing resetAt must not
+    // block a due slot (9router quotaAutoPing.js:221-233).
     let previous_cached = {
         let mut st = AUTO_PING_STATE.lock();
         let prev = st.reset_cache.get(&key).cloned();
-        st.reset_cache.insert(key.clone(), reset_at.clone());
+        if let Some(ra) = &reset_at {
+            st.reset_cache.insert(key.clone(), ra.clone());
+        }
         prev
     };
 
@@ -390,55 +404,104 @@ async fn process_connection(
     {
         return TickOutcome::Skip {
             reason: "blocking_quota_exhausted".into(),
-            reset_at: Some(reset_at),
+            reset_at: reset_at.clone(),
         };
     }
 
     if is_quota_exhausted(&quota) {
         return TickOutcome::Skip {
             reason: "session_quota_exhausted".into(),
-            reset_at: Some(reset_at),
+            reset_at: reset_at.clone(),
         };
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let should_ping = should_ping_for_reset(cfg, previous_cached.as_deref(), &reset_at, now_ms);
-    if !should_ping {
-        let near = !cfg.ping_when_reset_at_slides
-            && parse_reset_ms(&reset_at).is_some_and(|ms| now_ms >= ms - PING_LEAD_MS);
-        return TickOutcome::Observe {
-            reset_at: Some(reset_at),
-            near_reset: near,
-        };
-    }
 
-    if let Some(interval_ms) = cfg.min_ping_interval_ms {
-        if was_pinged_recently(&connection, interval_ms, now_ms) {
+    // Anchored schedule runs alongside the reactive path: it fires on its own
+    // wall-clock slots, whether or not the provider reported a reset.
+    let due_slot = schedule
+        .as_ref()
+        .and_then(|s| get_due_ping_slot_default(s, now_ms));
+    let slot_pending = due_slot.as_ref().is_some_and(|slot| {
+        connection
+            .extra
+            .get("lastPingedSlotKey")
+            .and_then(|v| v.as_str())
+            != Some(slot.key.as_str())
+    });
+
+    // What a successful ping records: the slot key for schedule fires, and the
+    // reset markers whenever a resetAt was observed (9router writes both on a
+    // slot ping too — `...(resetAt ? {...} : {})`).
+    let mut ping_slot_key: Option<String> = None;
+    let mut ping_reset_key: Option<(String, String)> = None;
+
+    if slot_pending {
+        if let Some(interval_ms) = cfg.min_ping_interval_ms {
+            if was_pinged_recently(&connection, interval_ms, now_ms) {
+                return TickOutcome::Skip {
+                    reason: "min_ping_interval".into(),
+                    reset_at: reset_at.clone(),
+                };
+            }
+        }
+        ping_slot_key = due_slot.map(|slot| slot.key);
+        if let Some(ra) = &reset_at {
+            ping_reset_key = Some((ra.clone(), normalize_reset_key(ra)));
+        }
+    } else {
+        // Reactive path needs the reactive toggle AND a reported resetAt.
+        let Some(reset_at_value) = reset_at.clone() else {
             return TickOutcome::Skip {
-                reason: "min_ping_interval".into(),
-                reset_at: Some(reset_at),
+                reason: "no_reset_at".into(),
+                reset_at: None,
+            };
+        };
+        if !reactive {
+            return TickOutcome::Observe {
+                reset_at: Some(reset_at_value),
+                near_reset: false,
             };
         }
-    }
 
-    let reset_key = normalize_reset_key(&reset_at);
-    let last_pinged_key = connection
-        .extra
-        .get("lastPingedResetKey")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            connection
-                .extra
-                .get("lastPingedResetAt")
-                .and_then(|v| v.as_str())
-                .map(normalize_reset_key)
-        });
-    if last_pinged_key.as_deref() == Some(reset_key.as_str()) {
-        return TickOutcome::Skip {
-            reason: "already_pinged_this_reset".into(),
-            reset_at: Some(reset_at),
-        };
+        if !should_ping_for_reset(cfg, previous_cached.as_deref(), &reset_at_value, now_ms) {
+            let near = !cfg.ping_when_reset_at_slides
+                && parse_reset_ms(&reset_at_value).is_some_and(|ms| now_ms >= ms - PING_LEAD_MS);
+            return TickOutcome::Observe {
+                reset_at: Some(reset_at_value),
+                near_reset: near,
+            };
+        }
+
+        if let Some(interval_ms) = cfg.min_ping_interval_ms {
+            if was_pinged_recently(&connection, interval_ms, now_ms) {
+                return TickOutcome::Skip {
+                    reason: "min_ping_interval".into(),
+                    reset_at: Some(reset_at_value),
+                };
+            }
+        }
+
+        let reset_key = normalize_reset_key(&reset_at_value);
+        let last_pinged_key = connection
+            .extra
+            .get("lastPingedResetKey")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                connection
+                    .extra
+                    .get("lastPingedResetAt")
+                    .and_then(|v| v.as_str())
+                    .map(normalize_reset_key)
+            });
+        if last_pinged_key.as_deref() == Some(reset_key.as_str()) {
+            return TickOutcome::Skip {
+                reason: "already_pinged_this_reset".into(),
+                reset_at: Some(reset_at_value),
+            };
+        }
+        ping_reset_key = Some((reset_at_value, reset_key));
     }
 
     let ping_result = match provider {
@@ -452,16 +515,21 @@ async fn process_connection(
             clear_failure(&key);
             let pinged_at = chrono::Utc::now().to_rfc3339();
             let conn_id = connection.id.clone();
-            let reset_at_store = reset_at.clone();
-            let reset_key_store = reset_key.clone();
+            let reset_key_store = ping_reset_key.clone();
+            let slot_key_store = ping_slot_key.clone();
             let _ = state
                 .db
                 .update(move |db| {
                     if let Some(c) = db.provider_connections.iter_mut().find(|c| c.id == conn_id) {
-                        c.extra
-                            .insert("lastPingedResetAt".into(), json!(reset_at_store));
-                        c.extra
-                            .insert("lastPingedResetKey".into(), json!(reset_key_store));
+                        if let Some((reset_at_store, reset_key_store)) = &reset_key_store {
+                            c.extra
+                                .insert("lastPingedResetAt".into(), json!(reset_at_store));
+                            c.extra
+                                .insert("lastPingedResetKey".into(), json!(reset_key_store));
+                        }
+                        if let Some(slot_key) = &slot_key_store {
+                            c.extra.insert("lastPingedSlotKey".into(), json!(slot_key));
+                        }
                         c.extra.insert("lastPingAt".into(), json!(pinged_at));
                         c.updated_at = Some(chrono::Utc::now().to_rfc3339());
                     }
@@ -471,12 +539,13 @@ async fn process_connection(
                 target: "openproxy::auto_ping",
                 provider = provider,
                 connection_id = %connection.id,
-                reset_at = %reset_at,
+                slot = ?ping_slot_key,
+                reset_at = ?reset_at,
                 "quota auto-ping: warm ping sent"
             );
             TickOutcome::Ping {
                 ok: true,
-                reset_at: Some(reset_at),
+                reset_at,
                 error: None,
             }
         }
@@ -486,13 +555,13 @@ async fn process_connection(
                 target: "openproxy::auto_ping",
                 provider = provider,
                 connection_id = %connection.id,
-                reset_at = %reset_at,
+                reset_at = ?reset_at,
                 error = %e,
                 "quota auto-ping: warm ping failed"
             );
             TickOutcome::Ping {
                 ok: false,
-                reset_at: Some(reset_at),
+                reset_at,
                 error: Some(e),
             }
         }
@@ -727,6 +796,22 @@ fn auto_ping_connections(settings: &Settings, key: &str) -> BTreeMap<String, boo
     connections
         .iter()
         .filter_map(|(id, v)| v.as_bool().map(|b| (id.clone(), b)))
+        .collect()
+}
+
+/// Raw `schedules` map (`{connectionId: schedule}`) from the auto-ping settings
+/// object — normalized per-connection at tick time (9router `schedules` parity).
+fn auto_ping_schedules(settings: &Settings, key: &str) -> BTreeMap<String, Value> {
+    let value = settings.extra.get(key);
+    let Some(obj) = value.and_then(|v| v.as_object()) else {
+        return BTreeMap::new();
+    };
+    let Some(schedules) = obj.get("schedules").and_then(|v| v.as_object()) else {
+        return BTreeMap::new();
+    };
+    schedules
+        .iter()
+        .map(|(id, v)| (id.clone(), v.clone()))
         .collect()
 }
 

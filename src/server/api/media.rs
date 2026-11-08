@@ -314,6 +314,374 @@ pub async fn embeddings(
     with_cors_response(generic_media_handler(state, headers, body, "embeddings").await)
 }
 
+/// POST /v1/systemone — System One (Jev) decision endpoint
+/// (9router `src/sse/handlers/systemone.js` wrapping
+/// `open-sse/handlers/systemoneCore.js`). Decision models have no chat
+/// translation layer: `state` + `questions` forward untouched, the JSON
+/// reply passes through verbatim, and usage is metered when upstream
+/// reports it.
+pub async fn systemone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(systemone_handler(state, headers, body).await)
+}
+
+async fn systemone_handler(
+    state: AppState,
+    headers: HeaderMap,
+    body_result: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    // Same /v1 gate as the other media routes (generic_media_handler):
+    // requireApiKey, not requireLogin.
+    if state.db.snapshot().settings.require_api_key() {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
+            return auth_error_response(error);
+        }
+    }
+
+    let Json(body) = match body_result {
+        Ok(body) => body,
+        Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+    };
+
+    // Upstream validates in this order (systemone.js:56-72) before any
+    // model resolution or credential lookup.
+    let Some(model_str) = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return json_error_response(StatusCode::BAD_REQUEST, "Missing model");
+    };
+    if body.get("state").is_none_or(Value::is_null) {
+        return json_error_response(StatusCode::BAD_REQUEST, "Missing required field: state");
+    }
+    match body.get("questions") {
+        Some(questions) if questions.is_object() => {}
+        _ => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing required field: questions",
+            )
+        }
+    }
+
+    let snapshot = state.db.snapshot();
+    let resolved = get_model_info(model_str, &snapshot);
+    let Some(provider) = resolved.provider.clone() else {
+        return json_error_response(StatusCode::BAD_REQUEST, "Invalid model format");
+    };
+
+    // Per-key access control on the resolved pair — the same gate the
+    // generic media handler applies (9router enforceKeyAccessResolved).
+    let key_access_ctx = crate::core::key_access::context_for_presented_key(
+        extract_api_key(&headers).as_deref(),
+        &snapshot,
+    );
+    if let Err(message) = crate::core::key_access::enforce_key_access_resolved(
+        key_access_ctx.as_ref(),
+        model_str,
+        Some(provider.as_str()),
+        Some(resolved.model.as_str()),
+        &snapshot,
+    ) {
+        return json_error_response(StatusCode::FORBIDDEN, &message);
+    }
+
+    let Some(cfg) = crate::core::media::systemone::systemone_config(&provider) else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Provider '{provider}' does not support System One."),
+        );
+    };
+
+    // Catalog remap: Cloudflare's `@cf/cloudflare/clef-flash` declares
+    // `upstreamModelId: "clef-flash"`, which is the short selector the
+    // decision body expects (systemoneCore.js `requestBody.model =
+    // getModelUpstreamId(...)`). The URL `{model}` placeholder keeps the
+    // catalog id — Workers AI `ai/run/{model}` takes the full `@cf/...`
+    // selector, exactly as upstream expands it with `modelInfo.model`.
+    let upstream_model = crate::core::model::catalog::provider_catalog()
+        .find_model(&provider, &resolved.model)
+        .and_then(|entry| entry.upstream_model_id.clone())
+        .unwrap_or_else(|| resolved.model.clone());
+
+    // Credential selection + fallback, mirroring the embeddings loop:
+    // active connections ordered by priority, rotate on 401/403/429.
+    let mut connections = select_media_connections(&snapshot, &provider);
+    if connections.is_empty() {
+        // 9router's noAuth lanes (opencode / opencode-zen free tier,
+        // ollama-local daemon) answer System One without a stored
+        // credential — the credential stub carries accessToken "public"
+        // for the Zen lanes and `credentials: null` for ollama-local. A
+        // stored active connection is still reused so its
+        // providerSpecificData (host override, accountId) applies; only
+        // the credential requirement is waived.
+        if matches!(
+            provider.as_str(),
+            "opencode" | "opencode-zen" | "ollama-local"
+        ) {
+            connections.push(
+                snapshot
+                    .provider_connections
+                    .iter()
+                    .find(|c| c.provider == provider && c.is_active())
+                    .cloned()
+                    .unwrap_or_else(|| crate::types::ProviderConnection {
+                        id: provider.clone(),
+                        provider: provider.clone(),
+                        auth_type: "apikey".to_string(),
+                        ..Default::default()
+                    }),
+            );
+        } else {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("No credentials for provider: {provider}"),
+            );
+        }
+    }
+
+    let mut last_error = None;
+    for connection in &connections {
+        let response = execute_systemone_on_connection(
+            &state,
+            &provider,
+            &cfg,
+            &resolved.model,
+            &upstream_model,
+            &body,
+            connection,
+        )
+        .await;
+        let status = response.status().as_u16();
+        if !matches!(status, 401 | 403 | 429) || connections.len() == 1 {
+            return response;
+        }
+        tracing::warn!(
+            "SYSTEMONE-ROTATE provider={} connection={} status={} trying next",
+            provider,
+            connection.id,
+            status
+        );
+        last_error = Some(response);
+    }
+    last_error.expect("the connection list was checked non-empty above")
+}
+
+/// One System One attempt against a single connection — the Rust port of
+/// `handleSystemoneCore`'s fetch block: URL expansion, header assembly,
+/// verbatim body forward (with the `model` field rewritten to the catalog
+/// upstream id), JSON pass-through, and usage metering.
+async fn execute_systemone_on_connection(
+    state: &AppState,
+    provider: &str,
+    cfg: &crate::core::media::systemone::SystemoneConfig,
+    model_id: &str,
+    upstream_model: &str,
+    body: &Value,
+    connection: &crate::types::ProviderConnection,
+) -> Response {
+    let snapshot = state.db.snapshot();
+    let provider_specific_data = &connection.provider_specific_data;
+
+    let url = crate::core::media::systemone::build_systemone_url(
+        provider_specific_data
+            .get("baseUrl")
+            .and_then(Value::as_str),
+        cfg,
+    );
+    let url = match crate::core::media::systemone::expand_systemone_url(
+        &url,
+        provider_specific_data
+            .get("accountId")
+            .and_then(Value::as_str),
+        model_id,
+    ) {
+        Ok(url) => url,
+        Err(message) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Provider '{provider}' {message}."),
+            )
+        }
+    };
+
+    let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
+    let client = match state.client_pool.get(provider, proxy.as_ref()) {
+        Ok(client) => client,
+        Err(error) => return json_error_response(StatusCode::BAD_GATEWAY, &error.to_string()),
+    };
+
+    // noAuth free lanes carry accessToken "public" from the credential stub
+    // (systemoneCore.js comment); ollama-local sends no Authorization at all.
+    let token = connection
+        .api_key
+        .as_deref()
+        .or(connection.access_token.as_deref())
+        .map(str::to_string)
+        .or_else(|| matches!(provider, "opencode" | "opencode-zen").then(|| "public".to_string()));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    if let Some(token) = token {
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
+            headers.insert(header::AUTHORIZATION, value);
+        }
+    }
+    for &(name, value) in cfg.headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    // Zen lanes expect the official client session header
+    // (`OPENCODE_PROVIDERS` in systemoneCore.js).
+    if cfg.opencode_session {
+        if let Ok(value) =
+            HeaderValue::from_str(&crate::core::executor::opencode_generate_session_id())
+        {
+            headers.insert(HeaderName::from_static("x-opencode-session"), value);
+        }
+    }
+
+    // `body.model` is rewritten to the upstream id; every other field —
+    // `state`, `questions`, and anything else the client sent — forwards
+    // untouched.
+    let mut request_body = body.clone();
+    if let Some(obj) = request_body.as_object_mut() {
+        obj.insert("model".to_string(), json!(upstream_model));
+    }
+
+    let response = match client
+        .post(&url)
+        .headers(headers)
+        .json(&request_body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return json_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("[{provider}] systemone request failed: {error}"),
+            )
+        }
+    };
+
+    let status = response.status();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return proxy_upstream_response_raw(status),
+    };
+
+    if !status.is_success() {
+        // 9router `parseUpstreamError` + `formatProviderError`: surface the
+        // upstream message inside openproxy's standard error envelope.
+        let message = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|parsed| {
+                parsed
+                    .get("error")
+                    .and_then(|e| {
+                        e.get("message")
+                            .and_then(Value::as_str)
+                            .or_else(|| e.as_str())
+                    })
+                    .or_else(|| parsed.get("message").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| {
+                String::from_utf8_lossy(&bytes)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            });
+        return json_error_response(
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            &format!("[{}]: {}", status.as_u16(), message),
+        );
+    }
+
+    // Meter usage when upstream reports it — systemoneCore.js maps
+    // input_tokens/output_tokens onto prompt/completion (saveRequestUsage in
+    // systemone.js:123-135).
+    if let Ok(parsed) = serde_json::from_slice::<Value>(&bytes) {
+        track_systemone_usage(state, connection, provider, upstream_model, &url, &parsed).await;
+    }
+    rebuild_json_response(status, bytes.to_vec())
+}
+
+/// Record System One token usage from a successful upstream body.
+/// `usage.input_tokens`/`output_tokens` map onto prompt/completion; anything
+/// else is ignored rather than fabricating numbers (same discipline as
+/// [`track_embeddings_usage`]).
+async fn track_systemone_usage(
+    state: &AppState,
+    connection: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    url: &str,
+    parsed: &Value,
+) {
+    let usage = parsed.get("usage").filter(|v| v.is_object());
+    let Some(usage) = usage else { return };
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    let completion_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+    let Some(prompt_tokens) = prompt_tokens else {
+        return;
+    };
+
+    let connection_id = connection.id.as_str();
+    let api_key = connection
+        .api_key
+        .as_deref()
+        .map(String::from)
+        .or_else(|| connection.access_token.clone())
+        .unwrap_or_default();
+    let token_usage = crate::types::TokenUsage {
+        prompt_tokens: Some(prompt_tokens),
+        input_tokens: None,
+        completion_tokens: Some(completion_tokens),
+        output_tokens: None,
+        total_tokens,
+        reasoning_tokens: None,
+        cached_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        extra: Default::default(),
+    };
+    state
+        .usage_tracker()
+        .track_request(
+            provider,
+            model,
+            Some(&token_usage),
+            Some(connection_id),
+            Some(&api_key),
+            Some(url),
+            None,
+        )
+        .await;
+}
+
 pub async fn images_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1898,6 +2266,14 @@ async fn try_provider_adapter(
 
     let result: Option<Result<Value, MediaError>> = match route_kind {
         "images/generations" => {
+            // Executor-driven providers first (9router `imageProviders/*`
+            // with `useExecutor: true` → `executor.generateMedia`).
+            if let Some(result) =
+                try_executor_driven_image(state, connection, provider, request_body, proxy.as_ref())
+                    .await
+            {
+                return Some(result);
+            }
             image::dispatch(&client, connection, provider, model, request_body).await
         }
         "audio/speech" => tts::dispatch(&client, connection, provider, model, request_body).await,
@@ -1911,6 +2287,118 @@ async fn try_provider_adapter(
     };
 
     Some(result?)
+}
+
+/// Map an executor media error message to an HTTP status — mirrors
+/// upstream `statusForAdapterError` / `statusForError` heuristics.
+fn executor_media_status(message: &str) -> u16 {
+    let m = message.to_ascii_lowercase();
+    if m.contains("quota") || m.contains("rate-limit") || m.contains("rate limit") || m.contains("429") {
+        return 429;
+    }
+    if m.contains("storage state") || m.contains("credentials") || m.contains("cookie") {
+        return 401;
+    }
+    if m.contains("prompt") || m.contains("request") || m.contains("content policy") {
+        return 400;
+    }
+    502
+}
+
+/// Executor-driven image generation (9router `handlers/imageGenerationCore.js`
+/// `useExecutor` path → `executor.generateMedia({kind:"image"})`).
+///
+/// Currently wired providers: `grok-web` and `chatgpt-web`/`cg` — the two
+/// web-cookie executors with a pure-HTTP media path. `uc-web` /
+/// `veoaifree-web` land with their provider beads; `gemini-web` / `muse-web`
+/// stay parked on the deferred browser substrate (bead openproxy-4d5h.8).
+/// Returns `None` for providers that use a regular image adapter.
+async fn try_executor_driven_image(
+    state: &AppState,
+    connection: &crate::types::ProviderConnection,
+    provider: &str,
+    request_body: &Value,
+    proxy: Option<&crate::core::proxy::ProxyTarget>,
+) -> Option<Result<Value, crate::core::media::MediaError>> {
+    use crate::core::media::MediaError;
+
+    let is_executor_driven = matches!(provider, "grok-web" | "chatgpt-web" | "cg");
+    if !is_executor_driven {
+        return None;
+    }
+    let prompt = request_body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let size = request_body
+        .get("size")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let n = request_body
+        .get("n")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 4) as usize;
+
+    let assets: Result<Vec<(String, String)>, (u16, String)> = match provider {
+        "grok-web" => {
+            let executor =
+                crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_media(
+                    &prompt,
+                    "image",
+                    size.as_deref(),
+                    None,
+                    n,
+                    connection,
+                    proxy,
+                )
+                .await
+                .map(|v| {
+                    v.into_iter()
+                        .map(|a| (a.b64, a.mime))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
+        }
+        _ => {
+            let executor =
+                crate::core::executor::ChatGptWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_image(&prompt, size.as_deref(), n, connection, proxy)
+                .await
+                .map(|v| {
+                    v.into_iter()
+                        .map(|a| (a.b64, a.mime))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| {
+                    let (status, message) = match &e {
+                        crate::core::executor::ChatGptWebError::Http { status, message } => {
+                            (*status, message.clone())
+                        }
+                        _ => (executor_media_status(&e.to_string()), e.to_string()),
+                    };
+                    (status, message)
+                })
+        }
+    };
+
+    Some(match assets {
+        Ok(items) if !items.is_empty() => Ok(json!({
+            "created": chrono::Utc::now().timestamp(),
+            "data": items
+                .iter()
+                .map(|(b64, mime)| json!({ "b64_json": b64, "mime_type": mime }))
+                .collect::<Vec<_>>(),
+        })),
+        Ok(_) => Err(MediaError::Upstream(
+            "media generation produced no assets".into(),
+        )),
+        Err((status, message)) => Err(MediaError::Http { status, message }),
+    })
 }
 
 /// Tag an upstream embeddings error with the status it arrived under.
@@ -2004,6 +2492,79 @@ fn with_cors_response(mut response: Response) -> Response {
         HeaderValue::from_static("POST, OPTIONS"),
     );
     response
+}
+
+/// Executor-driven video creation — port of 9router videoCore.js
+/// `executeExecutorDrivenVideo`. The provider executor returns the mp4
+/// synchronously as base64; the response is the completed-job shape with a
+/// `data:video/mp4;base64,…` URL (no async job / polling).
+async fn executor_driven_video(
+    state: &AppState,
+    connection: &crate::types::ProviderConnection,
+    body: &Value,
+) -> Result<Response, Response> {
+    let prompt = body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return Err(video_error_response(
+            StatusCode::BAD_REQUEST,
+            "[grok-web] video request requires a prompt",
+        ));
+    }
+    let size = body.get("size").and_then(Value::as_str);
+    let duration = body
+        .get("seconds")
+        .or_else(|| body.get("duration"))
+        .and_then(Value::as_f64);
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("grok-web");
+
+    let snapshot = state.db.snapshot();
+    let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
+    let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
+    match executor
+        .generate_media(prompt.trim(), "video", size, duration, 1, connection, proxy.as_ref())
+        .await
+    {
+        Ok(assets) => {
+            let asset = assets.into_iter().next().ok_or_else(|| {
+                video_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "[grok-web] video generation produced no asset",
+                )
+            })?;
+            let mime = if asset.mime.is_empty() {
+                "video/mp4"
+            } else {
+                asset.mime.as_str()
+            };
+            Ok(with_cors_response(
+                Json(json!({
+                    "id": format!("video-grok-web-{}", chrono::Utc::now().timestamp_millis()),
+                    "object": "video.generation",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model,
+                    "status": "completed",
+                    "video": { "url": format!("data:{mime};base64,{}", asset.b64) },
+                }))
+                .into_response(),
+            ))
+        }
+        Err(e) => {
+            let message = e.to_string();
+            let status = executor_media_status(&message);
+            Err(video_error_response(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                &format!("[grok-web] {message}"),
+            ))
+        }
+    }
 }
 
 fn with_cors_get_response(mut response: Response) -> Response {
@@ -2218,6 +2779,24 @@ async fn video_create_handler(
     let mut last_error: Option<Response> = None;
 
     for connection in &connections {
+        // Executor-driven video (9router videoCore.js
+        // `executeExecutorDrivenVideo`): the provider's `videoConfig.
+        // executorDriven` flag routes generations/edits through
+        // `executor.generateMedia({kind:"video"})`, which returns the mp4
+        // synchronously as base64 — no async job, no polling.
+        if canonical_provider == "grok-web" && matches!(action, "generations" | "edits") {
+            match executor_driven_video(&state, connection, &body).await {
+                Ok(mut resp) => {
+                    with_connection_header(&mut resp, &connection.id);
+                    return resp;
+                }
+                Err(resp) => {
+                    last_error = Some(resp);
+                    continue;
+                }
+            }
+        }
+
         // Vertex resolves auth (SA mint or access token) per connection before
         // any upstream call — raw API keys are not supported (vertex.js resolveAuth).
         let vertex_token: Option<String> = if canonical_provider == "vertex" {
@@ -2589,7 +3168,9 @@ fn video_provider_supported(provider: &str) -> bool {
     // { openrouter, vertex } — everything else keeps the xAI default shape.
     // `vertex-partner` has no videoConfig key (only transport.baseUrl), so
     // getVideoConfig returns null and videoGeneration.js rejects it.
-    matches!(provider, "xai" | "openrouter" | "vertex")
+    // `grok-web` is executor-driven (videoConfig.executorDriven) — handled
+    // inside the connection loop before any upstream HTTP call.
+    matches!(provider, "xai" | "openrouter" | "vertex" | "grok-web")
 }
 
 /// Video request headers: registry `headers` merged over the bearer auth

@@ -153,7 +153,19 @@ async fn validate_provider(
         )
             .into_response();
     }
-    if api_key.is_empty() {
+    // Bedrock profile/SSO mode carries no API key at all — the credential
+    // lives in the local AWS config (9router `apiKeyOptionalWith: "profile"`).
+    let aws_profile_mode = matches!(
+        provider.as_str(),
+        "bedrock" | "bedrock-xai" | "br" | "brx" | "aws-bedrock" | "bedrock-grok"
+    ) && req
+        .provider_specific_data
+        .as_ref()
+        .and_then(|d| d.get("profile"))
+        .and_then(Value::as_str)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if api_key.is_empty() && !aws_profile_mode {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "API key is required" })),
@@ -175,6 +187,12 @@ async fn validate_provider(
         // deepseek-web: web-cookie provider — validate the userToken via
         // GET /api/v0/users/current (OmniRoute webProvidersA.ts parity).
         "deepseek-web" | "ds-web" => validate_deepseek_web(&client, &api_key).await,
+        // webIdentity.js probes for the other shipped web-cookie providers:
+        // grok-web / perplexity-web / chatgpt-web all authenticate through
+        // GET /api/auth/session.
+        "grok-web" => validate_grok_web_session(&client, &api_key).await,
+        "perplexity-web" => validate_perplexity_web_session(&client, &api_key).await,
+        "chatgpt-web" | "cg" => validate_chatgpt_web_session(&client, &api_key).await,
         "groq" => validate_bearer(&client, "https://api.groq.com/openai/v1/models", &api_key).await,
         "openrouter" => validate_bearer(&client, "https://openrouter.ai/api/v1/models", &api_key).await,
         "mistral" => validate_bearer(&client, "https://api.mistral.ai/v1/models", &api_key).await,
@@ -281,6 +299,66 @@ async fn validate_provider(
         "baseten" => validate_bearer(&client, "https://inference.baseten.co/v1/models", &api_key).await,
         "publicai" => validate_bearer(&client, "https://api.publicai.co/v1/models", &api_key).await,
         "nous" | "nous-research" => validate_nous(&client, &api_key).await,
+        // 9router registry/muse.js validateUrl — bearer GET /v1/models with
+        // the museHeaders x-api-version (sent for subscription keys; harmless
+        // for pay-as-you-go keys).
+        "muse" => {
+            match client
+                .get(crate::oauth::muse::MODELS_URL)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("x-api-version", crate::oauth::muse::API_VERSION)
+                .send()
+                .await
+            {
+                Ok(resp) => (resp.status().is_success(), None),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        // AWS Bedrock (bedrock.js probeBedrockCredentials): signed GET
+        // /foundation-models on the control-plane host. Works for both static
+        // keys and profile/SSO mode (api key may be empty).
+        "bedrock" | "bedrock-xai" | "br" | "brx" | "aws-bedrock" | "bedrock-grok" => {
+            let canonical = match provider.as_str() {
+                "bedrock-xai" | "brx" | "bedrock-grok" => "bedrock-xai",
+                _ => "bedrock",
+            };
+            let mut conn = crate::types::ProviderConnection {
+                provider: canonical.to_string(),
+                api_key: if api_key.is_empty() {
+                    None
+                } else {
+                    Some(api_key.clone())
+                },
+                ..Default::default()
+            };
+            if let Some(psd) = &req.provider_specific_data {
+                conn.provider_specific_data = psd
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+            }
+            let executor = crate::core::executor::BedrockExecutor::new(
+                std::sync::Arc::new(crate::core::executor::ClientPool::new()),
+                canonical.to_string(),
+            );
+            // No-redirect client: a 3xx would replay the signed probe
+            // (including x-amz-security-token) at whatever origin it names.
+            let probe_client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => return Json(json!({ "valid": false, "error": e.to_string() })).into_response(),
+            };
+            match executor {
+                Ok(executor) => match executor.probe_credentials(&conn, &probe_client).await {
+                    Ok(_) => (true, None),
+                    Err(e) => (false, Some(e.to_string())),
+                },
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
         "glhf" => validate_bearer(&client, "https://glhf.chat/api/openai/v1/models", &api_key).await,
         "uncloseai" => (true, None),
         "enally" => {
@@ -680,9 +758,164 @@ async fn validate_deepseek_web(client: &reqwest::Client, api_key: &str) -> (bool
         Ok(resp) => {
             let code = resp.status().as_u16();
             if code == 401 || code == 403 {
-                (false, Some("Invalid userToken".into()))
-            } else {
-                (resp.status().is_success(), None)
+                return (false, Some("Invalid userToken".into()));
+            }
+            if !resp.status().is_success() {
+                return (false, Some(format!("DeepSeek returned HTTP {code}")));
+            }
+            // webIdentity.js deepseek-web probe: auth failures also arrive as
+            // HTTP 200 with application-level `code: 40003`, and a healthy
+            // payload carries `data.biz_data.token`.
+            match resp.json::<Value>().await {
+                Ok(json) => {
+                    if json.get("code").and_then(Value::as_i64) == Some(40003) {
+                        (false, Some("userToken is invalid or expired".into()))
+                    } else if json
+                        .pointer("/data/biz_data/token")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                    {
+                        (true, None)
+                    } else {
+                        (false, Some("DeepSeek rejected the userToken".into()))
+                    }
+                }
+                Err(e) => (false, Some(format!("DeepSeek returned invalid JSON: {e}"))),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// webIdentity.js `grok-web` probe: GET grok.com/api/auth/session with the
+/// pasted credential as the Cookie header; `status == "authenticated"` is
+/// the only healthy answer.
+async fn validate_grok_web_session(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+    let cookie = crate::core::utils::web_cookie::strip_cookie_input_prefix(api_key);
+    if cookie.is_empty() {
+        return (false, Some("Missing sso cookie".into()));
+    }
+    match client
+        .get("https://grok.com/api/auth/session")
+        .header("Accept", "application/json")
+        .header("Cookie", cookie)
+        .header("Origin", "https://grok.com")
+        .header("Referer", "https://grok.com/")
+        .header(
+            "User-Agent",
+            crate::core::executor::GROK_WEB_USER_AGENT,
+        )
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 401 || code == 403 {
+                return (false, Some("sso cookie is invalid or expired".into()));
+            }
+            if !resp.status().is_success() {
+                return (false, Some(format!("Grok returned HTTP {code}")));
+            }
+            match resp.json::<Value>().await {
+                Ok(payload)
+                    if payload.get("status").and_then(Value::as_str) == Some("authenticated") =>
+                {
+                    (true, None)
+                }
+                Ok(_) => (false, Some("Grok session is not signed in".into())),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// webIdentity-style perplexity-web probe: normalize the pasted session
+/// cookie, then GET /api/auth/session and require a `user` object.
+async fn validate_perplexity_web_session(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> (bool, Option<String>) {
+    let cookie = crate::core::utils::web_cookie::normalize_session_cookie_header(
+        api_key,
+        "__Secure-next-auth.session-token",
+    );
+    if cookie.is_empty() {
+        return (false, Some("Missing session cookie".into()));
+    }
+    match client
+        .get("https://www.perplexity.ai/api/auth/session")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        )
+        .header("Cookie", cookie)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return (false, Some("Invalid session cookie".into()));
+            }
+            match resp.json::<Value>().await {
+                Ok(payload) if payload.get("user").is_some() => (true, None),
+                Ok(_) => (false, Some("Session expired — re-paste cookie".into())),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// ChatGPT Web probe: storage-state JSON / Cookie blob / bare session token
+/// → cookie header → GET /api/auth/session must return a non-empty
+/// `accessToken` (same probe the executor's fetchAccessToken performs).
+async fn validate_chatgpt_web_session(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> (bool, Option<String>) {
+    // The storage-state parser only needs provider_specific_data.storageState
+    // or api_key — a default connection carrying the raw key suffices.
+    let mut connection = crate::types::ProviderConnection::default();
+    connection.provider = "chatgpt-web".to_string();
+    connection.api_key = Some(api_key.to_string());
+    let cookie = match crate::core::executor::chatgpt_web_cookie_header(&connection) {
+        Ok(c) => c,
+        Err(e) => return (false, Some(e.to_string())),
+    };
+    match client
+        .get("https://chatgpt.com/api/auth/session")
+        .header("Accept", "application/json")
+        .header(
+            "User-Agent",
+            crate::core::executor::CHATGPT_WEB_DEFAULT_USER_AGENT,
+        )
+        .header("Cookie", cookie)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 401 || code == 403 {
+                return (false, Some("ChatGPT session cookie is invalid or expired".into()));
+            }
+            if !resp.status().is_success() {
+                return (false, Some(format!("ChatGPT returned HTTP {code}")));
+            }
+            match resp.json::<Value>().await {
+                Ok(payload)
+                    if payload
+                        .get("accessToken")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false) =>
+                {
+                    (true, None)
+                }
+                Ok(_) => (false, Some("ChatGPT session is not signed in".into())),
+                Err(e) => (false, Some(e.to_string())),
             }
         }
         Err(e) => (false, Some(e.to_string())),
@@ -1030,6 +1263,17 @@ const WEB_PROBES: &[(&str, ServiceProbe)] = &[
             method: ProbeMethod::Post,
             auth: BEARER,
             body: ProbeBody::WebPing,
+        },
+    ),
+    // registry/tinyfish.js searchConfig.validateUrl — GET /usage?limit=1
+    // with the `x-api-key` header.
+    (
+        "tinyfish",
+        ServiceProbe::Fetch {
+            url: "https://api.search.tinyfish.ai/usage?limit=1",
+            method: ProbeMethod::Get,
+            auth: X_API_KEY,
+            body: ProbeBody::None,
         },
     ),
     (

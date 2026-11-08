@@ -92,13 +92,20 @@ impl RequestPlan {
             upstream_model_id = stripped;
         }
 
-        // 9router chatCore `useTransport` guard: only use the sourceFormat-matched
-        // transport when the model declares support for that sourceFormat —
-        // opencode-go models differ in endpoint support (kimi/glm only do
-        // /chat/completions). Undeclared models keep the upstream default
-        // (use the transport).
-        let transport = resolve_transport(provider, source_format)
-            .filter(|_| model_supports_source_format(provider, &upstream_model_id, source_format));
+        // 9router chatCore.js:91-104 `useTransport` guard + modelTargetTransport
+        // fallback: when the model declares supportedFormats that exclude the
+        // client's sourceFormat, fall back to the transport for the model's
+        // declared targetFormat so the URL always matches the translated body
+        // (a Responses-only model must not get an OpenAI body POSTed to
+        // /chat/completions). When the guard passes, the sourceFormat-matched
+        // transport wins even if absent (upstream `runtimeTransport` may be
+        // null → provider default URL).
+        let transport = if model_supports_source_format(provider, &upstream_model_id, source_format)
+        {
+            resolve_transport(provider, source_format)
+        } else {
+            model_target.and_then(|fmt| resolve_transport(provider, fmt))
+        };
         // Transport first, then the model target, then the provider default —
         // 9router's order (chatCore.js: `useTransport?.format || modelTargetFormat
         // || getTargetFormat(...)`).
@@ -176,10 +183,30 @@ fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, Strin
     // Muse Spark models on opencode-family providers route to
     // /zen/v1/responses, even ones the static catalog hasn't registered yet
     // (e.g. future 1.4/2.0 versions — the JS test pins exactly this).
-    // Scoped to opencode providers only (incl. short aliases oc/ocg);
+    // Scoped to opencode providers only (incl. short aliases oc/ocg/ocz);
     // other providers keep Chat Completions routing.
-    if matches!(provider, "opencode" | "opencode-go" | "oc" | "ocg") && is_muse_spark_model(model) {
+    if matches!(
+        provider,
+        "opencode" | "opencode-go" | "oc" | "ocg" | "opencode-zen" | "ocz"
+    ) && is_muse_spark_model(model)
+    {
         return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
+    }
+    // 9router `opencodeFamilyFormats` (helpers.js:56): on opencode-zen the
+    // grok/gpt family prefix also pins /responses for ids the curated
+    // catalog hasn't registered (modelsFetcher / passthrough). Scoped to
+    // zen — opencode-go keeps its own narrower table above and `opencode`
+    // owns the free lane.
+    if matches!(provider, "opencode-zen" | "ocz") {
+        let base = model
+            .trim()
+            .rsplit('/')
+            .next()
+            .unwrap_or(model.trim())
+            .to_lowercase();
+        if base.starts_with("grok") || base.starts_with("gpt") {
+            return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
+        }
     }
     // 9router opencode-go.js registry: grok-4.6 + gpt-5.6-luna are
     // responses-only (`targetFormat: openai-responses`,
@@ -297,17 +324,82 @@ fn opencode_go_supported_formats(model_id: &str) -> Option<&'static [Format]> {
     None
 }
 
+/// Per-model endpoint support on opencode-zen (9router registry
+/// opencode-zen.js `supportedFormats` + helpers.js `OPENCODE_FAMILIES`
+/// fallback for modelsFetcher/passthrough ids). Registry entries win over
+/// the family regex; unknown ids default to `[openai]` like upstream
+/// `getModelSupportedFormats`.
+fn opencode_zen_supported_formats(model: &str) -> &'static [Format] {
+    use Format::*;
+    let mut clean = model.trim();
+    if let Some(open) = clean.rfind('(') {
+        if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
+            clean = clean[..open].trim_end();
+        }
+    }
+    let base = clean.rsplit('/').next().unwrap_or(clean).to_lowercase();
+
+    // Registry-pinned Claude-only ids (supportedFormats: ["claude"]).
+    // `claude-*` also matches the family regex; qwen/union-alpha are
+    // registry overrides of the broader minimax|qwen family.
+    if base.starts_with("claude-")
+        || matches!(
+            base.as_str(),
+            "qwen3.5-plus" | "qwen3.6-plus" | "union-alpha"
+        )
+    {
+        return &[Claude];
+    }
+    // Responses-only: muse-spark + the gpt/grok family (registry declares
+    // supportedFormats:["openai-responses"] for every gpt-*/grok-* entry).
+    if is_muse_spark_model(&base) || base.starts_with("gpt") || base.starts_with("grok") {
+        return &[OpenAiResponses];
+    }
+    // deepseek-v4 family: registry pins the four curated ids to ["openai"];
+    // unknown deepseek-v4-(pro|flash) ids keep the family triple.
+    if matches!(
+        base.as_str(),
+        "deepseek-v4-pro"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-flash-vision-exp"
+            | "deepseek-v4-flash-free"
+    ) {
+        return &[OpenAi];
+    }
+    if base.starts_with("deepseek-v4-pro") || base.starts_with("deepseek-v4-flash") {
+        return &[OpenAi, Claude, OpenAiResponses];
+    }
+    // minimax/qwen family declares [openai, claude]; the three curated
+    // minimax registry entries are ["openai"]-only.
+    if matches!(
+        base.as_str(),
+        "minimax-m3" | "minimax-m2.7" | "minimax-m2.5"
+    ) {
+        return &[OpenAi];
+    }
+    if base.starts_with("minimax") || base.starts_with("qwen") {
+        return &[OpenAi, Claude];
+    }
+    // Everything else (gemini, glm, kimi, big-pickle, *-free, jev, …)
+    // rides /chat/completions — the upstream `[FORMATS.OPENAI]` default.
+    &[OpenAi]
+}
+
 /// 9router chatCore `useTransport` guard: when a model declares
 /// supportedFormats, only use the sourceFormat-matched transport if that
-/// format is declared. Scoped to opencode-go/ocg (the only provider whose
-/// registry models declare supportedFormats); every other provider — and
-/// undeclared opencode-go models — keeps the upstream default (true).
+/// format is declared. Scoped to opencode-go/ocg and opencode-zen/ocz (the
+/// providers whose registry models declare supportedFormats); every other
+/// provider — and undeclared opencode-go models — keeps the upstream
+/// default (true).
 fn model_supports_source_format(provider: &str, model: &str, source: Format) -> bool {
     if matches!(provider, "opencode-go" | "ocg") {
         return match opencode_go_supported_formats(model) {
             Some(formats) => formats.contains(&source),
             None => true,
         };
+    }
+    if matches!(provider, "opencode-zen" | "ocz") {
+        return opencode_zen_supported_formats(model).contains(&source);
     }
     // Muse registry models declare `supportedFormats: ["openai-responses"]`
     // (9router registry muse.js) — the chat/completions transport must not
@@ -429,6 +521,18 @@ pub(crate) fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 thinking_format: None,
             },
         ],
+        // 9router registry/minimax-code{,-global}.js transport: Claude format on
+        // the mavis agent gateway (single transport, no OpenAI leg upstream).
+        "minimax-code" => vec![TransportMatch {
+            format: Format::Claude,
+            base_url: "https://agent.minimax.cn/mavis/api/v1/llm/v1/messages".into(),
+            thinking_format: None,
+        }],
+        "minimax-code-global" => vec![TransportMatch {
+            format: Format::Claude,
+            base_url: "https://agent.minimax.io/mavis/api/v1/llm/v1/messages".into(),
+            thinking_format: None,
+        }],
         "xiaomi-mimo" | "mimo" => vec![
             TransportMatch {
                 format: Format::OpenAi,
@@ -488,6 +592,28 @@ pub(crate) fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 format: Format::OpenAiResponses,
                 base_url: "https://opencode.ai/zen/go/v1/responses".into(),
                 thinking_format: Some(ThinkingNative::OpenAiResponses),
+            },
+        ],
+        // opencode-zen 3-leg transports (9router registry opencode-zen.js
+        // `transports[]`): openai → /zen/v1/chat/completions,
+        // claude → /zen/v1/messages (x-api-key + anthropic-version),
+        // openai-responses → /zen/v1/responses. The registry declares no
+        // thinkingFormat on the responses leg.
+        "opencode-zen" | "ocz" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://opencode.ai/zen/v1/chat/completions".into(),
+                thinking_format: None,
+            },
+            TransportMatch {
+                format: Format::Claude,
+                base_url: "https://opencode.ai/zen/v1/messages".into(),
+                thinking_format: None,
+            },
+            TransportMatch {
+                format: Format::OpenAiResponses,
+                base_url: "https://opencode.ai/zen/v1/responses".into(),
+                thinking_format: None,
             },
         ],
         // Muse (Meta Model API) dual transport (9router registry muse.js):

@@ -357,6 +357,8 @@ mod pending_oauth_flow_kiro_tests {
                 client_id: "registered_client_id".to_string(),
                 client_secret: "registered_client_secret".to_string(),
             }),
+            poll_token: None,
+            extra_data: None,
         }
     }
 
@@ -386,6 +388,8 @@ mod pending_oauth_flow_kiro_tests {
             created_at: now,
             expires_at: now + 900,
             kiro_credentials: None,
+            poll_token: None,
+            extra_data: None,
         };
         assert!(flow.kiro_credentials.is_none());
         assert_eq!(flow.provider, "github");

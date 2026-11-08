@@ -28,8 +28,13 @@ const QODER_CHAT_URL_ENCODED: &str = "https://api3.qoder.sh/algo/api/v2/service/
 /// jt- tokens route to api2 (9router QODER_CHAT_BASE_ALT + QODER_CHAT_SIG_PATH).
 const QODER_CHAT_URL_ALT: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 
-/// Live model catalog (9router getQoderModelConfig).
+/// CN (qoder-cn) serves every token kind from the single gateway host — there
+/// is no api2-style split (9router shared/qoder/constants.js QODER_REGION_CN).
+const QODER_CHAT_URL_CN: &str = "https://gateway.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+
+/// Live model catalog (9router getQoderModelConfig / qoderModelListUrl).
 const QODER_MODEL_LIST_URL: &str = "https://api3.qoder.sh/algo/api/v2/model/list";
+const QODER_MODEL_LIST_URL_CN: &str = "https://gateway.qoder.com.cn/algo/api/v2/model/list";
 
 // ─── PAT → job-token exchange (ported from 9router v0.5.45 qoder.js) ────────
 // PATs (pt-...) cannot sign COSY requests directly. Exchange them for a
@@ -38,13 +43,93 @@ const QODER_MODEL_LIST_URL: &str = "https://api3.qoder.sh/algo/api/v2/model/list
 // until near-expiry.
 const QODER_JOB_TOKEN_EXCHANGE_URL: &str = "https://openapi.qoder.sh/api/v1/jobToken/exchange";
 const QODER_USERINFO_URL: &str = "https://openapi.qoder.sh/api/v1/userinfo";
+const QODER_JOB_TOKEN_EXCHANGE_URL_CN: &str =
+    "https://openapi.qoder.com.cn/api/v1/jobToken/exchange";
+const QODER_USERINFO_URL_CN: &str = "https://openapi.qoder.com.cn/api/v1/userinfo";
+
+/// Regional split mirrored from 9router `qoderRegionOf(providerId)` —
+/// `qoder-cn` hits the .com.cn hosts, everything else stays on .sh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QoderRegion {
+    Intl,
+    Cn,
+}
+
+impl QoderRegion {
+    /// Region for a provider id — "cn" for qoder-cn, "intl" otherwise.
+    pub fn of(provider: &str) -> Self {
+        if provider == "qoder-cn" {
+            Self::Cn
+        } else {
+            Self::Intl
+        }
+    }
+
+    /// Inference base host (no path). CN serves every token kind from the
+    /// single gateway; intl splits jt- onto api2 (see `inference_base_for`).
+    pub fn chat_base(self) -> &'static str {
+        match self {
+            Self::Intl => "https://api3.qoder.sh",
+            Self::Cn => "https://gateway.qoder.com.cn",
+        }
+    }
+
+    /// COSY-signed chat URL for this region.
+    pub fn chat_url(self, credentials: &ProviderConnection) -> String {
+        match self {
+            Self::Cn => QODER_CHAT_URL_CN.to_string(),
+            Self::Intl => {
+                if Self::uses_alt_host(credentials) {
+                    QODER_CHAT_URL_ALT.to_string()
+                } else {
+                    QODER_CHAT_URL_ENCODED.to_string()
+                }
+            }
+        }
+    }
+
+    pub fn model_list_url(self) -> &'static str {
+        match self {
+            Self::Intl => QODER_MODEL_LIST_URL,
+            Self::Cn => QODER_MODEL_LIST_URL_CN,
+        }
+    }
+
+    pub fn job_token_exchange_url(self) -> &'static str {
+        match self {
+            Self::Intl => QODER_JOB_TOKEN_EXCHANGE_URL,
+            Self::Cn => QODER_JOB_TOKEN_EXCHANGE_URL_CN,
+        }
+    }
+
+    pub fn userinfo_url(self) -> &'static str {
+        match self {
+            Self::Intl => QODER_USERINFO_URL,
+            Self::Cn => QODER_USERINFO_URL_CN,
+        }
+    }
+
+    /// jt- tokens (that are not `pt-`) use the alternate intl host.
+    fn uses_alt_host(credentials: &ProviderConnection) -> bool {
+        let raw = credentials
+            .api_key
+            .as_deref()
+            .or(credentials.access_token.as_deref())
+            .unwrap_or("");
+        !raw.starts_with("pt-") && raw.starts_with("jt-")
+    }
+}
 const PAT_REFRESH_BUFFER_SECS: u64 = 5 * 60;
 
 static PAT_JOB_CACHE: Lazy<Mutex<HashMap<String, (String, String, u64)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Resolve a PAT to `(job_token, user_id)`, using the per-PAT cache when fresh.
-async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
+/// `region` selects the openapi host (intl .sh vs cn .com.cn).
+async fn resolve_pat_credential(
+    pat: &str,
+    region: QoderRegion,
+) -> Result<(String, String), String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -64,7 +149,7 @@ async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let response = client
-        .post(QODER_JOB_TOKEN_EXCHANGE_URL)
+        .post(region.job_token_exchange_url())
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("User-Agent", "qodercli/1.0.0")
@@ -107,7 +192,7 @@ async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
 
     // Resolve userId from userinfo (best-effort).
     let user_id = match client
-        .get(QODER_USERINFO_URL)
+        .get(region.userinfo_url())
         .header("Authorization", format!("Bearer {job_token}"))
         .header("Accept", "application/json")
         .header("User-Agent", "qodercli/1.0.0")
@@ -258,6 +343,7 @@ pub struct QoderExecutorResponse {
 pub struct QoderExecutor {
     pool: Arc<ClientPool>,
     provider_node: Option<ProviderNode>,
+    region: QoderRegion,
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,14 +1696,22 @@ fn strip_qoder_message_data_uris(msg: &mut Value) {
 }
 
 impl QoderExecutor {
+    /// `provider` selects the regional endpoint set (`qoder-cn` → .com.cn
+    /// hosts); anything else stays on the international .sh hosts.
     pub fn new(
         pool: Arc<ClientPool>,
         provider_node: Option<ProviderNode>,
+        provider: &str,
     ) -> Result<Self, QoderExecutorError> {
         Ok(Self {
             pool,
             provider_node,
+            region: QoderRegion::of(provider),
         })
+    }
+
+    pub fn region(&self) -> QoderRegion {
+        self.region
     }
 
     pub fn pool(&self) -> &Arc<ClientPool> {
@@ -1878,18 +1972,10 @@ impl QoderExecutor {
     // -----------------------------------------------------------------------
 
     /// 9router qoder.js buildUrl: `jt-` tokens (that are not `pt-`) route to
-    /// api2.qoder.sh; everything else uses api3.
+    /// api2.qoder.sh on intl; qoder-cn serves every token kind from the
+    /// single gateway.qoder.com.cn host.
     fn build_url(&self, credentials: &ProviderConnection) -> String {
-        let raw = credentials
-            .api_key
-            .as_deref()
-            .or(credentials.access_token.as_deref())
-            .unwrap_or("");
-        if !raw.starts_with("pt-") && raw.starts_with("jt-") {
-            QODER_CHAT_URL_ALT.to_string()
-        } else {
-            QODER_CHAT_URL_ENCODED.to_string()
-        }
+        self.region.chat_url(credentials)
     }
 
     fn build_headers(
@@ -2319,7 +2405,8 @@ impl QoderExecutor {
             .map_err(|e| QoderExecutorError::MissingCredentials(e.to_string()))?;
         // The model-list GET is signed with an empty body against the
         // model-list URL (9router signs the catalog request the same way).
-        let cosy = Self::build_cosy_headers(b"", QODER_MODEL_LIST_URL, creds)?;
+        let model_list_url = self.region.model_list_url();
+        let cosy = Self::build_cosy_headers(b"", model_list_url, creds)?;
         let mut headers = HeaderMap::new();
         for (name, value) in [
             ("Authorization", &cosy.authorization),
@@ -2348,11 +2435,7 @@ impl QoderExecutor {
             );
         }
 
-        let response = client
-            .get(QODER_MODEL_LIST_URL)
-            .headers(headers)
-            .send()
-            .await;
+        let response = client.get(model_list_url).headers(headers).send().await;
         let response = match response {
             Ok(r) => r,
             Err(e) => {
@@ -2558,7 +2641,7 @@ impl QoderExecutor {
             .unwrap_or("")
             .to_string();
         if raw_token.starts_with("pt-") {
-            match resolve_pat_credential(&raw_token).await {
+            match resolve_pat_credential(&raw_token, self.region).await {
                 Ok((job_token, user_id)) => {
                     request.credentials.access_token = Some(job_token);
                     request.credentials.api_key = None;
@@ -2641,7 +2724,7 @@ impl QoderExecutor {
             .to_string();
 
         let client = self.pool.get("qoder", request.proxy.as_ref())?;
-        let inference_base = Self::inference_base(&request.credentials);
+        let inference_base = Self::inference_base_for(&request.credentials, self.region);
 
         // Attachment rewrite BEFORE payload build (9router
         // rewriteQoderMessageAttachments in buildQoderRequestBody): upload
@@ -2854,7 +2937,14 @@ impl QoderExecutor {
         let mut headers = HeaderMap::new();
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Accept-Encoding", HeaderValue::from_static("identity"));
-        // qodercli correlates the poll with the original inference.
+        // qodercli correlates the poll with the original inference
+        // (queue.js fetchQueueStatus): X-Request-ID carries the payload's
+        // request_id, X-Session-ID the session.
+        if let Some(request_id) = payload.get("request_id").and_then(Value::as_str) {
+            if let Ok(v) = HeaderValue::from_str(request_id) {
+                headers.insert("X-Request-ID", v);
+            }
+        }
         if let Some(session_id) = payload.get("session_id").and_then(Value::as_str) {
             if let Ok(v) = HeaderValue::from_str(session_id) {
                 headers.insert("X-Session-ID", v);
@@ -2875,22 +2965,34 @@ impl QoderExecutor {
     /// dials. Qoder serves two hosts and the choice depends on the token
     /// prefix, so re-deriving it here would drift.
     pub fn inference_base(credentials: &ProviderConnection) -> String {
-        let raw = credentials
-            .api_key
-            .as_deref()
-            .or(credentials.access_token.as_deref())
-            .unwrap_or("");
-        if !raw.starts_with("pt-")
-            && (raw.starts_with("jt-")
-                || credentials
-                    .access_token
+        Self::inference_base_for(credentials, QoderRegion::Intl)
+    }
+
+    /// Region-aware inference base (9router `qoderInferenceBase`): CN serves
+    /// every token kind from gateway.qoder.com.cn; intl splits jt- onto
+    /// api2.qoder.sh and everything else onto api3.
+    pub fn inference_base_for(credentials: &ProviderConnection, region: QoderRegion) -> String {
+        match region {
+            QoderRegion::Cn => region.chat_base().to_string(),
+            QoderRegion::Intl => {
+                let raw = credentials
+                    .api_key
                     .as_deref()
-                    .unwrap_or("")
-                    .starts_with("jt-"))
-        {
-            "https://api2.qoder.sh".to_string()
-        } else {
-            "https://api3.qoder.sh".to_string()
+                    .or(credentials.access_token.as_deref())
+                    .unwrap_or("");
+                let alt = !raw.starts_with("pt-")
+                    && (raw.starts_with("jt-")
+                        || credentials
+                            .access_token
+                            .as_deref()
+                            .unwrap_or("")
+                            .starts_with("jt-"));
+                if alt {
+                    "https://api2.qoder.sh".to_string()
+                } else {
+                    "https://api3.qoder.sh".to_string()
+                }
+            }
         }
     }
 
@@ -3596,7 +3698,7 @@ mod tests {
 
     #[test]
     fn test_build_url_jt_token_uses_api2() {
-        let executor = QoderExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let executor = QoderExecutor::new(Arc::new(ClientPool::new()), None, "qoder").unwrap();
         let mut creds = ProviderConnection::default();
         creds.api_key = Some("jt-abc".to_string());
         let url = executor.build_url(&creds);
@@ -3622,6 +3724,45 @@ mod tests {
         creds.access_token = Some("jt-tok".to_string());
         let url = executor.build_url(&creds);
         assert!(url.starts_with("https://api2.qoder.sh"), "got: {url}");
+    }
+
+    #[test]
+    fn test_qoder_cn_region_endpoints() {
+        // 9router qoderRegionOf("qoder-cn") === "cn": every token kind is
+        // served from the single gateway.qoder.com.cn host — no api2 split.
+        let executor = QoderExecutor::new(Arc::new(ClientPool::new()), None, "qoder-cn").unwrap();
+        assert_eq!(executor.region(), QoderRegion::Cn);
+
+        for token in ["jt-abc", "dt-abc", "pt-abc"] {
+            let mut creds = ProviderConnection::default();
+            creds.api_key = Some(token.to_string());
+            let url = executor.build_url(&creds);
+            assert!(
+                url.starts_with("https://gateway.qoder.com.cn/"),
+                "{token} must route to the CN gateway, got: {url}"
+            );
+            assert_eq!(
+                QoderExecutor::inference_base_for(&creds, QoderRegion::Cn),
+                "https://gateway.qoder.com.cn"
+            );
+        }
+
+        assert_eq!(
+            QoderRegion::Cn.model_list_url(),
+            "https://gateway.qoder.com.cn/algo/api/v2/model/list"
+        );
+        assert_eq!(
+            QoderRegion::Cn.job_token_exchange_url(),
+            "https://openapi.qoder.com.cn/api/v1/jobToken/exchange"
+        );
+        assert_eq!(
+            QoderRegion::Cn.userinfo_url(),
+            "https://openapi.qoder.com.cn/api/v1/userinfo"
+        );
+
+        // Intl defaults stay untouched.
+        let intl = QoderExecutor::new(Arc::new(ClientPool::new()), None, "qoder").unwrap();
+        assert_eq!(intl.region(), QoderRegion::Intl);
     }
 
     #[test]
@@ -4241,7 +4382,7 @@ mod tests {
 
     #[test]
     fn test_transform_sends_full_catalog_entry() {
-        let exec = QoderExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let exec = QoderExecutor::new(Arc::new(ClientPool::new()), None, "qoder").unwrap();
         let entry = serde_json::json!({
             "key": "qmodel_38max",
             "display_name": "Qwen3.8-Max",

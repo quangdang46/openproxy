@@ -25,6 +25,9 @@ const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 struct TestModelTarget {
     id: String,
     name: String,
+    /// Catalog `kind` — `"systemone"` models ping through /v1/systemone
+    /// instead of chat completions (9router ping.js kind dispatch).
+    kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,7 +83,8 @@ pub(super) async fn test_provider_models(
             .into_iter()
             .map(|model| TestModelTarget {
                 name: model.name.clone(),
-                id: model.id,
+                id: model.id.clone(),
+                kind: None,
             })
             .collect();
     }
@@ -118,6 +122,76 @@ pub(super) async fn test_provider_models(
     .into_response()
 }
 
+/// 9router `pingModelByKind` systemone arm (models/test/ping.js:138-160):
+/// POST the fixed decision probe through the real `/v1/systemone` handler
+/// in-process so credential selection, provider resolution and the
+/// account-fallback loop all apply exactly as a client request would.
+async fn ping_systemone_model(
+    state: &AppState,
+    model_name: &str,
+    model_id: String,
+    name: String,
+    api_key: Option<&str>,
+) -> ProviderModelTestResult {
+    let start = Instant::now();
+    let mut ping_headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {api_key}")) {
+            ping_headers.insert(AUTHORIZATION, value);
+        }
+    }
+
+    let body = json!({
+        "model": model_name,
+        "state": "Customer: I was charged twice for my order this morning.",
+        "questions": {
+            "probe": {
+                "type": "noul",
+                "instructions": "Is the customer reporting a billing problem?"
+            }
+        }
+    });
+
+    let response = match timeout(
+        MODEL_TEST_TIMEOUT,
+        super::media::systemone(
+            State(state.clone()),
+            ping_headers,
+            Ok(Json(body)),
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return ProviderModelTestResult {
+                model_id,
+                name,
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: Some("Request timed out".to_string()),
+            };
+        }
+    };
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let status = response.status();
+    let ok = status.is_success();
+    let error = if ok {
+        None
+    } else {
+        Some(read_error_text(response, status).await)
+    };
+
+    ProviderModelTestResult {
+        model_id,
+        name,
+        ok,
+        latency_ms,
+        error,
+    }
+}
+
 fn static_models_for_provider(provider: &str) -> Vec<TestModelTarget> {
     let catalog = provider_catalog();
     let alias = provider_alias(provider);
@@ -128,6 +202,7 @@ fn static_models_for_provider(provider: &str) -> Vec<TestModelTarget> {
         .map(|model| TestModelTarget {
             id: model.id.clone(),
             name: model.name.clone().unwrap_or_else(|| model.id.clone()),
+            kind: Some(model.kind.clone()),
         })
         .collect()
 }
@@ -160,6 +235,21 @@ async fn ping_model(
     api_key: Option<&str>,
 ) -> ProviderModelTestResult {
     let model_name = format!("{alias}/{}", model.id);
+
+    // 9router ping.js dispatches on the model kind: `systemone` models are
+    // probed through POST /v1/systemone with a fixed decision body, not
+    // through chat completions (which they do not serve).
+    if model.kind.as_deref() == Some("systemone") {
+        return ping_systemone_model(
+            state,
+            &model_name,
+            model.id.clone(),
+            model.name.clone(),
+            api_key,
+        )
+        .await;
+    }
+
     let start = Instant::now();
     let mut ping_headers = HeaderMap::new();
     if let Some(api_key) = api_key {

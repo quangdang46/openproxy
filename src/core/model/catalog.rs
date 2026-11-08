@@ -28,6 +28,9 @@ pub struct ProviderCatalogModel {
     pub upstream_model_id: Option<String>,
     #[serde(default, alias = "contextLength")]
     pub context_window: Option<u32>,
+    /// Per-model output cap (9router `models[].maxOutputTokens`).
+    #[serde(default, alias = "maxOutputTokens")]
+    pub max_output_tokens: Option<u32>,
     /// Vector width for embedding models. 9router declares it on the catalog
     /// entries too (`buildInfo` copies it straight to `/v1/models/info`).
     #[serde(default)]
@@ -40,6 +43,12 @@ pub struct ProviderCatalogModel {
     /// Custom models may carry the same key in their `extra` blob.
     #[serde(default)]
     pub transport: Option<String>,
+    /// Per-model Vertex location override (9router registry
+    /// `models[].defaultLocation`, e.g. Argon's `"global"`). Vertex reads it
+    /// after `providerSpecificData.location` and before the `us-central1`
+    /// default so global-only models never hit a regional endpoint.
+    #[serde(default)]
+    pub default_location: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +112,15 @@ impl ProviderCatalog {
         self.models_for_alias(alias)?
             .iter()
             .find(|m| m.id == model_id)
+    }
+
+    /// Registry `models[].defaultLocation` for `provider_id`/`model_id`
+    /// (9router `getModelMeta(...).defaultLocation` — vertex.js:97).
+    pub fn model_default_location(&self, provider_id: &str, model_id: &str) -> Option<&str> {
+        self.find_model(provider_id, model_id)
+            .and_then(|m| m.default_location.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
     /// Resolve the STT transport marker for `provider_id`/`model_id`

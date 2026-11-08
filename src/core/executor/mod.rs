@@ -1,6 +1,8 @@
 pub mod antigravity;
 mod api_key;
 mod azure;
+mod bedrock;
+mod chatgpt_web;
 mod client_pool;
 mod codebuddy_cn;
 mod codebuddy_intl;
@@ -22,6 +24,7 @@ mod mimo_free;
 mod ollama;
 mod opencode;
 mod opencode_go;
+mod opencode_zen;
 mod project_id_cache;
 mod provider;
 pub mod qoder;
@@ -32,6 +35,7 @@ mod windsurf;
 mod xai;
 mod zed;
 
+pub(crate) use crate::core::utils::web_cookie::build_grok_cookie_header;
 pub use antigravity::{
     AntigravityExecutionRequest, AntigravityExecutor, AntigravityExecutorError,
     AntigravityExecutorResponse, ANTIGRAVITY_BASE_URL,
@@ -41,6 +45,15 @@ pub use api_key::{
     ApiKeyExecutorError, ApiKeyExecutorResponse,
 };
 pub use azure::{AzureExecutionRequest, AzureExecutor, AzureExecutorError, AzureExecutorResponse};
+pub use bedrock::{
+    resolve_aws_credentials, resolve_region, sign_aws_request, BedrockExecutionRequest,
+    BedrockExecutor, BedrockExecutorError, BedrockExecutorResponse, BedrockWireFormat,
+    ResolvedAwsCredentials,
+};
+pub use chatgpt_web::{
+    chatgpt_web_cookie_header, ChatGptWebError, ChatGptWebExecutionRequest, ChatGptWebExecutor,
+    ChatGptWebExecutorResponse, DEFAULT_USER_AGENT as CHATGPT_WEB_DEFAULT_USER_AGENT,
+};
 pub use client_pool::{
     ClientPool, ClientTimeout, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT,
     CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE, DEFAULT_CONNECT_TIMEOUT,
@@ -90,8 +103,10 @@ pub use grok_cli::{
     resolve_grok_cli_turn_idx, GrokCliExecutionRequest, GrokCliExecutor, GrokCliExecutorError,
     GrokCliExecutorResponse, GROK_CLI_RESPONSES_URL,
 };
+pub(crate) use grok_web::GROK_USER_AGENT as GROK_WEB_USER_AGENT;
 pub use grok_web::{
-    GrokWebExecutionRequest, GrokWebExecutor, GrokWebExecutorError, GrokWebExecutorResponse,
+    GrokMediaAsset, GrokWebExecutionRequest, GrokWebExecutor, GrokWebExecutorError,
+    GrokWebExecutorResponse,
     PerplexityWebExecutionRequest, PerplexityWebExecutor, PerplexityWebExecutorError,
     PerplexityWebExecutorResponse,
 };
@@ -106,11 +121,16 @@ pub use ollama::{
     OllamaExecutionRequest, OllamaExecutor, OllamaExecutorError, OllamaExecutorResponse,
 };
 pub use opencode::{
-    OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeExecutorError, OpenCodeExecutorResponse,
+    generate_session_id as opencode_generate_session_id, OpenCodeExecutionRequest,
+    OpenCodeExecutor, OpenCodeExecutorError, OpenCodeExecutorResponse,
 };
 pub use opencode_go::{
     OpenCodeGoExecutionRequest, OpenCodeGoExecutor, OpenCodeGoExecutorError,
     OpenCodeGoExecutorResponse,
+};
+pub use opencode_zen::{
+    OpenCodeZenExecutionRequest, OpenCodeZenExecutor, OpenCodeZenExecutorError,
+    OpenCodeZenExecutorResponse,
 };
 pub use provider::{
     LogEntry, LogLevel, ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutor,

@@ -82,6 +82,14 @@ const CODEX_RESET_CREDITS_URL: &str =
 const CODEX_RESET_CREDITS_CONSUME_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 
+// Claude "limit reset" grants (Anthropic program id `cedar_ember`). The reset
+// surface is gated by UA: only `claude-cli/<ver> (external, cli)` is eligible
+// (9router open-sse/services/usage/claude.js CLAUDE_CONFIG).
+const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+const CLAUDE_RESET_URL_TEMPLATE: &str =
+    "https://api.anthropic.com/api/organizations/{org_id}/reset_rate_limits";
+const CLAUDE_CLI_RESET_USER_AGENT: &str = "claude-cli/2.1.280 (external, cli)";
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -1530,11 +1538,11 @@ fn opencode_go_percent(value: &Value) -> Option<f64> {
     }
 }
 
-/// Build the OpenCode Go Rolling/Weekly/Monthly quota rows from a parsed
-/// `data.usage` object. Pure fn for testability.
-/// 9router `opencode-go.js` quota loop: `used = clamp(percent)`,
-/// `total = 100`, `resetAt = parseResetTime(quota.resetsAt)`.
-fn opencode_go_quota_rows(usage: &Value) -> Value {
+/// Build the Rolling/Weekly/Monthly quota rows from a parsed `data.usage`
+/// object. Pure fn for testability.
+/// 9router `opencode-go.js`/`opencode-zen.js` quota loop:
+/// `used = clamp(percent)`, `total = 100`, `resetAt = parseResetTime(quota.resetsAt)`.
+fn opencode_quota_rows(usage: &Value, plan: &str) -> Value {
     let mut quotas = serde_json::Map::new();
     for (period, name) in [
         ("rolling", "Rolling"),
@@ -1563,11 +1571,15 @@ fn opencode_go_quota_rows(usage: &Value) -> Value {
     }
     if quotas.is_empty() {
         return json!({
-            "plan": "OpenCode Go",
-            "message": "OpenCode Go usage response did not contain valid quota data.",
+            "plan": plan,
+            "message": format!("{plan} usage response did not contain valid quota data."),
         });
     }
-    json!({ "plan": "OpenCode Go", "quotas": Value::Object(quotas) })
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+
+fn opencode_go_quota_rows(usage: &Value) -> Value {
+    opencode_quota_rows(usage, "OpenCode Go")
 }
 
 /// Fetch OpenCode Go subscription usage: rolling, weekly, and monthly
@@ -1619,6 +1631,417 @@ pub async fn fetch_opencode_go_quota(api_key: &str) -> Value {
         return json!({ "plan": "OpenCode Go", "message": "OpenCode Go usage response did not contain quota data." });
     };
     opencode_go_quota_rows(usage)
+}
+
+/// OpenCode Zen usage endpoint (9router `opencode-zen.js` registry
+/// `transport.usage.url` — the keyed PAYG lane, `ocz`).
+const OPENCODE_ZEN_USAGE_URL: &str = "https://opencode.ai/zen/v1/usage";
+
+/// 9router `services/usage/opencode-zen.js getOpenCodeZenUsage` — same
+/// Rolling/Weekly/Monthly shape as Go, different plan label and the 403
+/// copy says "billing required" instead of "subscription required".
+pub async fn fetch_opencode_zen_quota(api_key: &str) -> Value {
+    let token = api_key.trim();
+    if token.is_empty() {
+        return json!({ "message": "OpenCode Zen API key not available. Add a key to view usage." });
+    }
+    let client = http_client();
+    let resp = match client
+        .get(OPENCODE_ZEN_USAGE_URL)
+        .bearer_auth(token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("OpenCode Zen error: {e}") }),
+    };
+    let status = resp.status().as_u16();
+    if status == 401 {
+        return json!({ "plan": "OpenCode Zen", "message": "OpenCode Zen authentication failed. Check the API key." });
+    }
+    if status == 403 {
+        let err_body: Value = resp.json().await.unwrap_or(Value::Null);
+        let billing_required = err_body
+            .get("error")
+            .and_then(|e| e.get("type"))
+            .and_then(|v| v.as_str())
+            == Some("EntitlementError");
+        return json!({
+            "plan": "OpenCode Zen",
+            "message": if billing_required {
+                "OpenCode Zen billing required for this API key."
+            } else {
+                "OpenCode Zen access forbidden for this API key."
+            },
+        });
+    }
+    if !(200..300).contains(&status) {
+        return json!({ "plan": "OpenCode Zen", "message": format!("OpenCode Zen usage API error ({status}).") });
+    }
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    let Some(usage) = data.get("usage").filter(|v| v.is_object()) else {
+        return json!({ "plan": "OpenCode Zen", "message": "OpenCode Zen usage response did not contain quota data." });
+    };
+    opencode_quota_rows(usage, "OpenCode Zen")
+}
+
+// ─── Cursor IDE quota (9router open-sse/services/usage/cursor.js) ───
+//
+// DashboardService Connect JSON on api2.cursor.sh:
+//   POST GetCurrentPeriodUsage — spend in USD cents (Pro/Team/Ultra)
+//   GET  /auth/usage           — Enterprise request buckets (fallback)
+//   POST GetPlanInfo           — plan label (fail-open)
+
+const CURSOR_USAGE_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+const CURSOR_PLAN_INFO_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo";
+const CURSOR_AUTH_USAGE_URL: &str = "https://api2.cursor.sh/auth/usage";
+
+/// Connect-JSON header bundle for the Cursor DashboardService — the same
+/// fields `cursor_checksum::build_cursor_headers` produces for the chat
+/// executor, but `content-type`/`accept` are `application/json` (upstream
+/// `connectJsonHeaders` overrides the connect+proto defaults).
+fn cursor_usage_headers(
+    access_token: &str,
+    machine_id: Option<&str>,
+) -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let h =
+        crate::core::utils::cursor_checksum::build_cursor_headers(access_token, machine_id, true);
+    let mut map = HeaderMap::new();
+    let mut insert = |name: &str, value: String| {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .expect("static cursor header name"),
+                v,
+            );
+        }
+    };
+    insert("authorization", h.authorization);
+    insert("connect-accept-encoding", "gzip".to_string());
+    insert("connect-protocol-version", "1".to_string());
+    insert("content-type", "application/json".to_string());
+    insert("accept", "application/json".to_string());
+    insert("user-agent", "connect-es/1.6.1".to_string());
+    insert("x-amzn-trace-id", format!("Root={}", uuid::Uuid::new_v4()));
+    insert("x-client-key", h.client_key);
+    insert("x-cursor-checksum", h.checksum);
+    insert("x-cursor-client-version", "3.12.17".to_string());
+    insert(
+        "x-cursor-client-commit",
+        "0fb762053c34788bb7760d5673f8a6d4c8589d50".to_string(),
+    );
+    insert("x-cursor-client-type", "ide".to_string());
+    insert("x-cursor-client-os", h.os.to_string());
+    insert("x-cursor-client-arch", h.arch.to_string());
+    insert("x-cursor-client-device-type", "desktop".to_string());
+    insert("x-cursor-config-version", uuid::Uuid::new_v4().to_string());
+    insert(
+        "x-cursor-timezone",
+        crate::core::executor::cursor::resolve_system_timezone(),
+    );
+    insert("x-ghost-mode", "true".to_string());
+    insert("x-request-id", uuid::Uuid::new_v4().to_string());
+    insert("x-session-id", h.session_id);
+    map
+}
+
+fn cursor_cents_to_usd(cents: f64) -> f64 {
+    (cents / 100.0 * 100.0).round() / 100.0
+}
+
+fn cursor_remaining_from_percent_used(percent_used: f64) -> f64 {
+    let used = percent_used.clamp(0.0, 100.0);
+    (100.0 - used).max(0.0)
+}
+
+fn cursor_to_finite_number(value: Option<&Value>, default: f64) -> f64 {
+    value
+        .and_then(|v| {
+            v.as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(default)
+}
+
+/// `addPlanSpendQuotas` — planUsage spend buckets from GetCurrentPeriodUsage.
+fn cursor_add_plan_spend_quotas(quotas: &mut serde_json::Map<String, Value>, data: &Value) {
+    let Some(plan_usage) = data.get("planUsage").filter(|v| v.is_object()) else {
+        return;
+    };
+    let limit_cents = cursor_to_finite_number(plan_usage.get("limit"), 0.0);
+    let used_cents = cursor_to_finite_number(
+        plan_usage
+            .get("includedSpend")
+            .or_else(|| plan_usage.get("totalSpend")),
+        0.0,
+    );
+    let remaining_cents = cursor_to_finite_number(
+        plan_usage.get("remaining"),
+        (limit_cents - used_cents).max(0.0),
+    );
+    let reset_at = data.get("billingCycleEnd").and_then(parse_reset_time);
+
+    if limit_cents > 0.0 {
+        let total = cursor_cents_to_usd(limit_cents);
+        let used = cursor_cents_to_usd(used_cents);
+        let remaining_usd = cursor_cents_to_usd(remaining_cents);
+        let remaining_pct = plan_usage
+            .get("totalPercentUsed")
+            .and_then(|v| v.as_f64())
+            .map(cursor_remaining_from_percent_used)
+            .unwrap_or_else(|| {
+                if total > 0.0 {
+                    (remaining_usd / total) * 100.0
+                } else {
+                    0.0
+                }
+            });
+        quotas.insert(
+            "Plan (USD)".to_string(),
+            json!({
+                "used": used,
+                "total": total,
+                "remaining": remaining_usd,
+                "remainingPercentage": remaining_pct,
+                "resetAt": reset_at,
+                "unlimited": false,
+            }),
+        );
+    } else if let Some(total_pct) = plan_usage.get("totalPercentUsed").and_then(|v| v.as_f64()) {
+        let used = total_pct;
+        quotas.insert(
+            "Included usage".to_string(),
+            json!({
+                "used": used,
+                "total": 100,
+                "remaining": 100.0 - used,
+                "remainingPercentage": cursor_remaining_from_percent_used(used),
+                "resetAt": reset_at,
+                "unlimited": false,
+            }),
+        );
+    }
+
+    for (key, label) in [
+        ("autoPercentUsed", "Auto models (%)"),
+        ("apiPercentUsed", "Named models (%)"),
+    ] {
+        if let Some(pct) = plan_usage.get(key).and_then(|v| v.as_f64()) {
+            let used = pct;
+            quotas.insert(
+                label.to_string(),
+                json!({
+                    "used": used,
+                    "total": 100,
+                    "remaining": 100.0 - used,
+                    "remainingPercentage": cursor_remaining_from_percent_used(used),
+                    "resetAt": reset_at,
+                    "unlimited": false,
+                }),
+            );
+        }
+    }
+}
+
+/// `addOnDemandQuota` — spendLimitUsage individual/pooled buckets.
+fn cursor_add_on_demand_quota(quotas: &mut serde_json::Map<String, Value>, data: &Value) {
+    let Some(spend) = data.get("spendLimitUsage").filter(|v| v.is_object()) else {
+        return;
+    };
+    let individual_limit = cursor_to_finite_number(spend.get("individualLimit"), 0.0);
+    let pooled_limit = cursor_to_finite_number(spend.get("pooledLimit"), 0.0);
+    let reset_at = data.get("billingCycleEnd").and_then(parse_reset_time);
+
+    let insert_usd = |quotas: &mut serde_json::Map<String, Value>,
+                      label: &str,
+                      used_cents: f64,
+                      limit_cents: f64,
+                      remaining_cents: Option<f64>| {
+        let used = cursor_cents_to_usd(used_cents);
+        let total = cursor_cents_to_usd(limit_cents);
+        let remaining_usd = cursor_cents_to_usd(
+            remaining_cents.unwrap_or_else(|| (limit_cents - used_cents).max(0.0)),
+        );
+        quotas.insert(
+            label.to_string(),
+            json!({
+                "used": used,
+                "total": total,
+                "remaining": remaining_usd,
+                "remainingPercentage": if total > 0.0 { (remaining_usd / total) * 100.0 } else { 0.0 },
+                "resetAt": reset_at,
+                "unlimited": false,
+            }),
+        );
+    };
+
+    if individual_limit > 0.0 {
+        insert_usd(
+            quotas,
+            "On-demand (USD)",
+            cursor_to_finite_number(spend.get("individualUsed"), 0.0),
+            individual_limit,
+            spend.get("individualRemaining").and_then(|v| v.as_f64()),
+        );
+        return;
+    }
+    if pooled_limit > 0.0 {
+        insert_usd(
+            quotas,
+            "Team on-demand (USD)",
+            cursor_to_finite_number(spend.get("pooledUsed"), 0.0),
+            pooled_limit,
+            spend.get("pooledRemaining").and_then(|v| v.as_f64()),
+        );
+    }
+}
+
+/// `addAuthUsageQuotas` — GET /auth/usage Enterprise request buckets.
+fn cursor_add_auth_usage_quotas(quotas: &mut serde_json::Map<String, Value>, data: &Value) -> bool {
+    if !data.is_object() {
+        return false;
+    }
+    let reset_at = data.get("startOfMonth").and_then(parse_reset_time);
+    let mut added = false;
+    if let Some(obj) = data.as_object() {
+        for (key, bucket) in obj {
+            if !bucket.is_object() || bucket.is_array() {
+                continue;
+            }
+            let total = cursor_to_finite_number(bucket.get("maxRequestUsage"), 0.0);
+            if total <= 0.0 {
+                continue;
+            }
+            let used = cursor_to_finite_number(bucket.get("numRequests"), 0.0);
+            quotas.insert(
+                format!("{key} requests"),
+                json!({
+                    "used": used,
+                    "total": total,
+                    "remaining": (total - used).max(0.0),
+                    "remainingPercentage": if total > 0.0 { ((total - used).max(0.0) / total) * 100.0 } else { 0.0 },
+                    "resetAt": reset_at,
+                    "unlimited": false,
+                }),
+            );
+            added = true;
+        }
+    }
+    added
+}
+
+/// 9router `getCursorUsage` — Cursor IDE DashboardService quota.
+pub async fn fetch_cursor_quota(
+    access_token: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Value {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return json!({ "message": "Cursor access token not available. Reconnect Cursor to view quota." });
+    }
+    let machine_id = provider_specific_data
+        .get("machineId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let client = http_client();
+    let period_response = client
+        .post(CURSOR_USAGE_URL)
+        .headers(cursor_usage_headers(token, machine_id))
+        .body("{}")
+        .send()
+        .await;
+
+    let period_response = match period_response {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Cursor error: {e}") }),
+    };
+    let period_status = period_response.status().as_u16();
+    if period_status == 401 || period_status == 403 {
+        return json!({
+            "plan": "Cursor",
+            "message": "Cursor authentication failed. Reconnect the Cursor provider.",
+        });
+    }
+
+    let mut quotas = serde_json::Map::new();
+    let mut period_data: Option<Value> = None;
+
+    if (200..300).contains(&period_status) {
+        period_data = period_response.json::<Value>().await.ok();
+        if let Some(data) = &period_data {
+            cursor_add_plan_spend_quotas(&mut quotas, data);
+            cursor_add_on_demand_quota(&mut quotas, data);
+        }
+    }
+
+    if quotas.is_empty() {
+        // Enterprise request buckets fallback: GET /auth/usage with a plain
+        // Bearer token (the "id::token" pair form strips to the token half).
+        let bearer = token.split("::").nth(1).unwrap_or(token);
+        if let Ok(auth_response) = client
+            .get(CURSOR_AUTH_USAGE_URL)
+            .header("Authorization", format!("Bearer {bearer}"))
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            if auth_response.status().is_success() {
+                if let Ok(data) = auth_response.json::<Value>().await {
+                    cursor_add_auth_usage_quotas(&mut quotas, &data);
+                }
+            } else if !(200..300).contains(&period_status) {
+                let err_text = auth_response.text().await.unwrap_or_default();
+                let snippet: String = err_text.chars().take(120).collect();
+                return json!({
+                    "plan": "Cursor",
+                    "message": format!("Cursor usage API error ({period_status}): {snippet}"),
+                });
+            }
+        }
+    }
+
+    if quotas.is_empty() {
+        let display = period_data
+            .as_ref()
+            .and_then(|d| d.get("displayMessage"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Cursor connected. No quota data returned for this plan.");
+        return json!({
+            "plan": "Cursor",
+            "message": display,
+        });
+    }
+
+    // Plan label via GetPlanInfo (fail-open).
+    let mut plan = "Cursor".to_string();
+    if let Ok(plan_response) = client
+        .post(CURSOR_PLAN_INFO_URL)
+        .headers(cursor_usage_headers(token, machine_id))
+        .body("{}")
+        .send()
+        .await
+    {
+        if plan_response.status().is_success() {
+            if let Ok(plan_data) = plan_response.json::<Value>().await {
+                if let Some(name) = plan_data
+                    .get("planInfo")
+                    .and_then(|p| p.get("planName"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    plan = format!("Cursor {name}");
+                }
+            }
+        }
+    }
+
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
 }
 
 pub async fn fetch_vercel_ai_gateway_quota(api_key: &str) -> Value {
@@ -2008,6 +2431,14 @@ mod claude_cache {
         let guard = CACHE.lock().await;
         guard.entries.get(token).map(|e| e.result.clone())
     }
+
+    /// Drop cached + in-flight state for a token — the next read must hit the
+    /// network (9router `usageCache.delete(accessToken)` after a reset grant).
+    pub async fn invalidate(token: &str) {
+        let mut guard = CACHE.lock().await;
+        guard.entries.remove(token);
+        guard.in_flight.remove(token);
+    }
 }
 
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
@@ -2032,11 +2463,14 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
 
     // Fetch fresh data.
     let client = http_client();
+    // `?cedar_ember=1` adds the "limit reset" grant block (same flag Claude
+    // Code sends); the grant surface is gated on the cli UA below.
     let response = match client
-        .get("https://api.anthropic.com/api/oauth/usage")
+        .get("https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
         .bearer_auth(access_token)
         .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "oauth-2025-04-20")
+        .header("user-agent", CLAUDE_CLI_RESET_USER_AGENT)
         .header("Accept", "application/json")
         .send()
         .await
@@ -2178,15 +2612,226 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
         }
     }
 
+    // 9router claude.js parity: `plan` is the literal "Claude Code" on the
+    // OAuth path, `extraUsage` passes through, and `cedar_ember` carries the
+    // free "limit reset" grants surfaced as `resetCredits`.
+    let reset_credits = parse_claude_reset_grants(body.get("cedar_ember"));
+    let extra_usage = body.get("extra_usage").cloned();
+
     if quotas.is_empty() {
-        let result = json!({ "message": "Claude connected. No quota data was returned." });
-        claude_cache::complete_fetch(access_token, result.clone()).await;
-        return result;
+        let mut out = json!({
+            "message": "Claude connected. No quota data was returned.",
+            "plan": "Claude Code",
+            "quotas": {},
+        });
+        if let Some(eu) = extra_usage {
+            out["extraUsage"] = eu;
+        }
+        if let Some(rc) = reset_credits {
+            out["resetCredits"] = rc;
+        }
+        claude_cache::complete_fetch(access_token, out.clone()).await;
+        return out;
     }
 
-    let result = json!({ "quotas": Value::Object(quotas) });
+    let mut result = json!({
+        "plan": "Claude Code",
+        "quotas": Value::Object(quotas),
+    });
+    if let Some(eu) = extra_usage {
+        result["extraUsage"] = eu;
+    }
+    if let Some(rc) = reset_credits {
+        result["resetCredits"] = rc;
+    }
     claude_cache::complete_fetch(access_token, result.clone()).await;
     result
+}
+
+/// Free "limit reset" grants (Anthropic program id `cedar_ember`).
+///
+/// Shape: `{ eligible, next_grant_id, grants: [{ id, resets_left, ends_at,
+/// paused, clears, ... }] }`. 9router `parseClaudeResetGrants` parity — returns
+/// `None` unless the block is eligible with a grants array.
+fn parse_claude_reset_grants(block: Option<&Value>) -> Option<Value> {
+    let block = block?;
+    if block.get("eligible").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let grants = block.get("grants")?.as_array()?;
+
+    let usable: Vec<&Value> = grants
+        .iter()
+        .filter(|g| {
+            g.get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+                && g.get("paused").and_then(|v| v.as_bool()) != Some(true)
+                && g.get("resets_left")
+                    .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok()))
+                    .unwrap_or(0.0)
+                    > 0.0
+        })
+        .collect();
+
+    let next_grant_id = block.get("next_grant_id").and_then(|v| v.as_str());
+    let next = usable
+        .iter()
+        .find(|g| g.get("id").and_then(|v| v.as_str()) == next_grant_id)
+        .or_else(|| usable.first())
+        .copied();
+
+    let available_count: f64 = usable
+        .iter()
+        .map(|g| {
+            g.get("resets_left")
+                .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok()))
+                .unwrap_or(0.0)
+        })
+        .sum();
+
+    let grant_number = |g: &Value, key: &str| -> f64 {
+        g.get(key)
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            })
+            .unwrap_or(0.0)
+    };
+    let grant_json = |g: &Value| {
+        json!({
+            "id": g.get("id").cloned().unwrap_or(Value::Null),
+            "label": g.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+            "resetsLeft": grant_number(g, "resets_left"),
+            "resetsTotal": grant_number(g, "resets_total"),
+            "startsAt": g.get("starts_at").cloned().unwrap_or(Value::Null),
+            "endsAt": g.get("ends_at").cloned().unwrap_or(Value::Null),
+            "clears": g.get("clears").filter(|v| v.is_array()).cloned().unwrap_or_else(|| json!([])),
+            "paused": g.get("paused").and_then(|v| v.as_bool()).unwrap_or(false),
+            "usableNow": g.get("usable_now").and_then(|v| v.as_bool()).unwrap_or(false),
+            "useRequiresLimit": g.get("use_requires_limit").and_then(|v| v.as_bool()).unwrap_or(true),
+        })
+    };
+
+    Some(json!({
+        "availableCount": available_count,
+        "nextGrantId": next.and_then(|g| g.get("id")).cloned().unwrap_or(Value::Null),
+        "expiresAt": next.and_then(|g| g.get("ends_at")).cloned().unwrap_or(Value::Null),
+        "clears": next.and_then(|g| g.get("clears")).cloned().unwrap_or_else(|| json!([])),
+        "cooldownUntil": block.get("cooldown_until").cloned().unwrap_or(Value::Null),
+        "weeklyResetsAt": block.get("weekly_resets_at").cloned().unwrap_or(Value::Null),
+        "grants": grants
+            .iter()
+            .filter(|g| g.get("id").and_then(|v| v.as_str()).is_some())
+            .map(grant_json)
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// Result of spending one Claude "limit reset" grant (irreversible).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeResetResult {
+    pub ok: bool,
+    pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_left: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn is_valid_claude_grant_id(grant_id: &str) -> bool {
+    // 9router: /^[a-z0-9_-]{1,40}$/
+    !grant_id.is_empty()
+        && grant_id.len() <= 40
+        && grant_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Spend one free Claude "limit reset" grant — refills the limits listed in
+/// `grant.clears`. Irreversible. 9router `consumeClaudeResetGrant` parity:
+/// resolve org via the OAuth profile endpoint, then POST `reset_rate_limits`
+/// with program `cedar_ember`.
+pub async fn consume_claude_reset_grant(
+    access_token: &str,
+    grant_id: &str,
+) -> Result<ClaudeResetResult, String> {
+    if access_token.trim().is_empty() {
+        return Err(
+            "No Claude access token available. Please re-authorize the connection.".to_string(),
+        );
+    }
+    if !is_valid_claude_grant_id(grant_id) {
+        return Err("Invalid reset grant id.".to_string());
+    }
+
+    let client = http_client();
+    let auth_headers = |req: reqwest::RequestBuilder| {
+        req.bearer_auth(access_token)
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("anthropic-version", "2023-06-01")
+            .header("user-agent", CLAUDE_CLI_RESET_USER_AGENT)
+    };
+
+    let profile_res = auth_headers(client.get(CLAUDE_PROFILE_URL))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Claude profile request failed: {e}"))?;
+    let profile_status = profile_res.status().as_u16();
+    let profile: Value = profile_res.json().await.unwrap_or(Value::Null);
+    let org_id = profile
+        .get("organization")
+        .and_then(|o| o.get("uuid"))
+        .and_then(|v| v.as_str());
+    let Some(org_id) = org_id.filter(|s| !s.is_empty()) else {
+        return Err(format!(
+            "Cannot resolve Claude organization ({profile_status})."
+        ));
+    };
+
+    let reset_url = CLAUDE_RESET_URL_TEMPLATE.replace("{org_id}", org_id);
+    let res = auth_headers(client.post(&reset_url))
+        .header("content-type", "application/json")
+        .json(&json!({
+            "program": "cedar_ember",
+            "grant_id": grant_id,
+            "request_id": uuid::Uuid::new_v4().to_string(),
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Claude reset request failed: {e}"))?;
+
+    let status = res.status().as_u16();
+    let data: Value = res.json().await.unwrap_or(Value::Null);
+
+    // Next read must show refilled limits.
+    claude_cache::invalidate(access_token).await;
+
+    Ok(ClaudeResetResult {
+        ok: (200..300).contains(&status)
+            && data.get("result").and_then(|v| v.as_str()) == Some("reset"),
+        status,
+        result: data
+            .get("result")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        reason: data
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        resets_left: data.get("resets_left").cloned(),
+        message: data
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
 }
 
 const KIRO_DEFAULT_PROFILE_ARN: &str =
@@ -5352,5 +5997,151 @@ mod tests {
         );
         assert_eq!(commandcode_plan_cap("individual-go-v1"), 10.0);
         assert_eq!(commandcode_plan_name("individual-goat"), Some("GOAT"));
+    }
+
+    #[test]
+    fn claude_reset_grants_parse_eligible_block() {
+        let block = json!({
+            "eligible": true,
+            "next_grant_id": "g2",
+            "cooldown_until": "2026-01-01T00:00:00Z",
+            "weekly_resets_at": "2026-01-05T00:00:00Z",
+            "grants": [
+                {
+                    "id": "g1",
+                    "label": "Reset A",
+                    "resets_left": 1,
+                    "resets_total": 2,
+                    "starts_at": "2026-01-01T00:00:00Z",
+                    "ends_at": "2026-02-01T00:00:00Z",
+                    "clears": ["five_hour"],
+                    "paused": false,
+                    "usable_now": true,
+                    "use_requires_limit": true
+                },
+                {
+                    "id": "g2",
+                    "label": "Reset B",
+                    "resets_left": 3,
+                    "resets_total": 3,
+                    "ends_at": "2026-03-01T00:00:00Z",
+                    "clears": ["seven_day"],
+                    "paused": false
+                },
+                { "id": "g3", "resets_left": 0, "paused": false }
+            ]
+        });
+        let parsed = parse_claude_reset_grants(Some(&block)).expect("eligible block parses");
+        // availableCount sums only usable (unpaused, resets_left > 0) grants.
+        assert_eq!(parsed["availableCount"].as_f64(), Some(4.0));
+        assert_eq!(parsed["nextGrantId"], json!("g2"));
+        assert_eq!(parsed["expiresAt"], json!("2026-03-01T00:00:00Z"));
+        assert_eq!(parsed["clears"], json!(["seven_day"]));
+        assert_eq!(parsed["weeklyResetsAt"], json!("2026-01-05T00:00:00Z"));
+        // All grants with an id are listed for the status table (incl. used).
+        assert_eq!(parsed["grants"].as_array().unwrap().len(), 3);
+        assert_eq!(parsed["grants"][1]["resetsLeft"].as_f64(), Some(3.0));
+        assert_eq!(parsed["grants"][1]["useRequiresLimit"], json!(true));
+    }
+
+    #[test]
+    fn claude_reset_grants_reject_ineligible() {
+        assert!(parse_claude_reset_grants(None).is_none());
+        assert!(
+            parse_claude_reset_grants(Some(&json!({"eligible": false, "grants": []}))).is_none()
+        );
+        assert!(parse_claude_reset_grants(Some(&json!({"eligible": true}))).is_none());
+        // Eligible but every grant paused/exhausted → still parses (count 0).
+        let block = json!({
+            "eligible": true,
+            "grants": [{"id": "g1", "resets_left": 0, "paused": false}]
+        });
+        let parsed = parse_claude_reset_grants(Some(&block)).unwrap();
+        assert_eq!(parsed["availableCount"].as_f64(), Some(0.0));
+        assert_eq!(parsed["nextGrantId"], Value::Null);
+    }
+
+    #[test]
+    fn claude_grant_id_validation_matches_upstream_regex() {
+        for ok in ["abc", "a-b_c-1", &"x".repeat(40)] {
+            assert!(is_valid_claude_grant_id(ok), "{ok} should be valid");
+        }
+        for bad in ["", &"x".repeat(41), "Abc", "a b", "a.b", "grant!"] {
+            assert!(!is_valid_claude_grant_id(bad), "{bad} should be invalid");
+        }
+    }
+
+    // ── Cursor IDE quota (9router services/usage/cursor.js) ──
+
+    #[test]
+    fn cursor_plan_spend_quotas_from_period_usage() {
+        // Pro plan: planUsage.limit/includedSpend in USD cents + percent buckets.
+        let data = json!({
+            "planUsage": {
+                "limit": 2000,
+                "includedSpend": 500,
+                "remaining": 1500,
+                "totalPercentUsed": 25,
+                "autoPercentUsed": 10,
+                "apiPercentUsed": 40
+            },
+            "billingCycleEnd": "2026-11-01T00:00:00Z"
+        });
+        let mut quotas = serde_json::Map::new();
+        cursor_add_plan_spend_quotas(&mut quotas, &data);
+        let plan = &quotas["Plan (USD)"];
+        assert_eq!(plan["used"], 5.0);
+        assert_eq!(plan["total"], 20.0);
+        assert_eq!(plan["remainingPercentage"], 75.0);
+        assert_eq!(plan["resetAt"], "2026-11-01T00:00:00Z");
+        assert_eq!(quotas["Auto models (%)"]["remainingPercentage"], 90.0);
+        assert_eq!(quotas["Named models (%)"]["remainingPercentage"], 60.0);
+    }
+
+    #[test]
+    fn cursor_on_demand_individual_wins_over_pooled() {
+        let data = json!({
+            "spendLimitUsage": {
+                "individualLimit": 5000,
+                "individualUsed": 1000,
+                "individualRemaining": 4000,
+                "pooledLimit": 99999,
+                "pooledUsed": 1
+            },
+            "billingCycleEnd": 1767225600000i64
+        });
+        let mut quotas = serde_json::Map::new();
+        cursor_add_on_demand_quota(&mut quotas, &data);
+        assert!(quotas.contains_key("On-demand (USD)"));
+        assert!(!quotas.contains_key("Team on-demand (USD)"));
+        assert_eq!(quotas["On-demand (USD)"]["total"], 50.0);
+        assert_eq!(quotas["On-demand (USD)"]["remainingPercentage"], 80.0);
+    }
+
+    #[test]
+    fn cursor_auth_usage_request_buckets() {
+        let data = json!({
+            "startOfMonth": "2026-10-01T00:00:00Z",
+            "premiumRequests": { "maxRequestUsage": 500, "numRequests": 100 },
+            "emptyBucket": { "maxRequestUsage": 0, "numRequests": 3 }
+        });
+        let mut quotas = serde_json::Map::new();
+        assert!(cursor_add_auth_usage_quotas(&mut quotas, &data));
+        assert_eq!(quotas["premiumRequests requests"]["total"], 500.0);
+        assert_eq!(
+            quotas["premiumRequests requests"]["remainingPercentage"],
+            80.0
+        );
+        assert!(!quotas.contains_key("emptyBucket requests"));
+    }
+
+    #[test]
+    fn cursor_percent_only_plan_gets_included_usage_row() {
+        // No spend limit → totalPercentUsed maps to "Included usage".
+        let data = json!({ "planUsage": { "totalPercentUsed": 40 } });
+        let mut quotas = serde_json::Map::new();
+        cursor_add_plan_spend_quotas(&mut quotas, &data);
+        assert_eq!(quotas["Included usage"]["remainingPercentage"], 60.0);
+        assert!(!quotas.contains_key("Plan (USD)"));
     }
 }

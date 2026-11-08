@@ -252,7 +252,79 @@ pub fn parse_retry_after_from_body(body: &[u8]) -> Option<DateTime<Utc>> {
     if let Some(secs) = retry_after.as_f64() {
         return Utc::now().checked_add_signed(chrono::Duration::seconds(secs as i64));
     }
-    None
+    // 9router codebuddy-cn/intl `parseError` (commit e706e4f): a `{code:6004}`
+    // body is a frequency limit whose reset instant rides inside `msg` — there
+    // is no `retryAfter` field, so fall back to the CodeBuddy parser.
+    parse_codebuddy_rate_limit(body).and_then(|e| e.resets_at)
+}
+
+/// Parsed CodeBuddy frequency-limit error (9router `parseError` in
+/// `open-sse/executors/codebuddy-cn.js` / `codebuddy-intl.js`, commit
+/// e706e4f). Upstream maps these to HTTP 429 and extracts `resetsAtMs` from
+/// the human-readable reset datetime embedded in `msg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodebuddyRateLimit {
+    /// Reset instant parsed from `msg` (`null` upstream when the datetime
+    /// does not match — the 429 classification still applies).
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+/// 9router codebuddy `parseError` gate: `data?.code === 6004 ||
+/// /超出频率限制|frequency limit|限额/i.test(msg)` where
+/// `msg = data.msg || data.message || data.error.message`.
+pub fn parse_codebuddy_rate_limit(body: &[u8]) -> Option<CodebuddyRateLimit> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let msg = value
+        .get("msg")
+        .or_else(|| value.get("message"))
+        .or_else(|| value.get("error").and_then(|e| e.get("message")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let code_6004 = value.get("code").and_then(Value::as_i64) == Some(6004);
+    let msg_hit = msg.contains("超出频率限制")
+        || msg.contains("限额")
+        || msg.to_lowercase().contains("frequency limit");
+    if !code_6004 && !msg_hit {
+        return None;
+    }
+    Some(CodebuddyRateLimit {
+        resets_at: codebuddy_resets_at_ms(msg),
+    })
+}
+
+/// Extract the reset instant from a CodeBuddy 6004 `msg`, porting the JS
+/// `msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i)`
+/// + `new Date("<date>T<time><tz>")` logic. The timezone group defaults to
+/// `+08:00` (CodeBuddy CN); `UTC+8` / `UTC+08:00` / bare `8` forms all land
+/// on the same offset.
+fn codebuddy_resets_at_ms(msg: &str) -> Option<DateTime<Utc>> {
+    static RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(r"(?i)(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?")
+            .expect("codebuddy reset regex")
+    });
+    let caps = RE.captures(msg)?;
+    let date = caps.get(1)?.as_str();
+    let time = caps.get(2)?.as_str();
+    // JS: tz with ":" keeps its sign (prepends "+" when missing); a bare
+    // hour is padded to "+HH:00"; absent → "+08:00".
+    let tz = match caps.get(3).map(|m| m.as_str()) {
+        Some(raw) if raw.contains(':') => {
+            let (sign, rest) = match raw.as_bytes().first() {
+                Some(b'+') | Some(b'-') => (raw[..1].to_string(), &raw[1..]),
+                _ => ("+".to_string(), raw),
+            };
+            // RFC3339 needs a two-digit offset hour: "+8:00" → "+08:00".
+            let mut parts = rest.splitn(2, ':');
+            let hour = parts.next().unwrap_or("");
+            let minute = parts.next().unwrap_or("");
+            format!("{sign}{hour:0>2}:{minute}")
+        }
+        Some(raw) => format!("+{:0>2}:00", raw),
+        None => "+08:00".to_string(),
+    };
+    DateTime::parse_from_rfc3339(&format!("{date}T{time}{tz}"))
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1462,6 +1534,45 @@ mod tests {
         let body = br#"{"error":{"message":"boom"}}"#;
         assert!(parse_retry_after_from_body(body).is_none());
         assert!(parse_retry_after_from_body(b"not json").is_none());
+    }
+
+    /// 9router codebuddy-cn/intl `parseError` (commit e706e4f): `{code:6004}`
+    /// with a `msg` reset datetime yields a 429-classified limit whose
+    /// `resetsAtMs` equivalent parses out of the message text.
+    #[test]
+    fn codebuddy_6004_reset_instant_parsed() {
+        let body = r#"{"code":6004,"msg":"请求过于频繁，2026-10-22 08:30:00 UTC+8 后重试"}"#;
+        let limit = parse_codebuddy_rate_limit(body).expect("6004 body must classify");
+        let resets = limit.resets_at.expect("reset instant must parse");
+        // 2026-10-22 08:30:00 +08:00 == 2026-10-22 00:30:00 UTC.
+        assert_eq!(
+            resets,
+            DateTime::parse_from_rfc3339("2026-10-22T00:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        // The body-level retryAfter fallback picks the same instant up.
+        assert_eq!(parse_retry_after_from_body(body), Some(resets));
+    }
+
+    #[test]
+    fn codebuddy_frequency_limit_msg_without_code() {
+        // Upstream also matches on the message text alone.
+        let body =
+            br#"{"message":"frequency limit reached, retry after 2026-10-22 09:00:00 UTC+08:00"}"#;
+        let limit = parse_codebuddy_rate_limit(body).expect("msg match must classify");
+        assert!(limit.resets_at.is_some());
+    }
+
+    #[test]
+    fn codebuddy_non_limit_body_does_not_classify() {
+        let body = br#"{"code":11101,"msg":"request illegal"}"#;
+        assert!(parse_codebuddy_rate_limit(body).is_none());
+        assert!(parse_codebuddy_rate_limit(b"not json").is_none());
+        // 6004 with no parseable datetime still classifies, reset is null.
+        let bare = br#"{"code":6004,"msg":"slow down"}"#;
+        let limit = parse_codebuddy_rate_limit(bare).expect("6004 classifies");
+        assert_eq!(limit.resets_at, None);
     }
 
     /// Run a combo where every member fails with a retryable 429, so the

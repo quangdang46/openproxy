@@ -38,6 +38,7 @@ mod provider_validate;
 pub mod providers;
 pub mod pxpipe;
 pub mod quota_auto_ping;
+pub mod quota_ping_schedule;
 pub mod sanitization;
 pub mod settings_payload_rules;
 pub mod shutdown;
@@ -202,6 +203,16 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/v1/v1/embeddings",
             post(media::embeddings).options(media::cors_options),
+        )
+        // System One (Jev) decision endpoint — 9router
+        // `src/app/api/v1/systemone/route.js`.
+        .route(
+            "/v1/systemone",
+            post(media::systemone).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/systemone",
+            post(media::systemone).options(media::cors_options),
         )
         .route(
             "/v1/images/generations",
@@ -3682,9 +3693,11 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "anthropic",
     "api-airforce",
     "assemblyai",
+    "atria",
     "aws-polly",
     "azure",
     "baidu",
+    "bai",
     "baseten",
     "bazaarlink",
     "black-forest-labs",
@@ -3705,6 +3718,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "commandcode",
     "completions",
     "coqui",
+    "dahl",
     "deepgram",
     "deepseek",
     "edge-tts",
@@ -3767,6 +3781,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "publicai",
     "puter",
     "qoder",
+    "qoder-cn",
     "recraft",
     "reka",
     "runwayml",
@@ -3785,10 +3800,13 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "tavily",
     "tencent",
     "together",
+    "tinyfish",
+    "tokenharbor",
     "tokenrouter",
     "topaz",
     "tortoise",
     "uncloseai",
+    "v1m",
     "venice",
     "vercel-ai-gateway",
     "vertex",

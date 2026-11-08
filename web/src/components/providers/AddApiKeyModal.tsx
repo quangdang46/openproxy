@@ -42,7 +42,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const providerRegions = providerCfg?.regions || null;
   const defaultRegion = providerCfg?.defaultRegion || providerRegions?.[0]?.id || "";
   const isXaiApiKey = provider === "xai" && !isCookie;
-  const credentialLabel = isCookie ? "Cookie Value" : "API Key";
+  const isAwsCredentialForm = providerCfg?.credentialForm === "aws";
+  const credentialLabel = isCookie ? "Cookie Value" : isAwsCredentialForm ? "AWS Secret Access Key" : "API Key";
   const credentialPlaceholder = isCookie
     ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
     : (isXaiApiKey ? "xai-..." : "");
@@ -62,6 +63,12 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [awsData, setAwsData] = useState({
+    profile: "",
+    region: "us-east-1",
+    accessKeyId: "",
+    sessionToken: "",
+  });
   const [region, setRegion] = useState<string>(defaultRegion);
   const [validating, setValidating] = useState<boolean>(false);
   const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
@@ -168,6 +175,17 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     if (isCloudflareAi) {
       return { accountId: cloudflareData.accountId };
     }
+    if (isAwsCredentialForm) {
+      // 9router registry bedrock.js providerSpecificData: profile wins over
+      // static keys; region/accessKeyId/sessionToken are all optional except
+      // in their respective modes (validated server-side).
+      const psd: Record<string, string> = {};
+      if (awsData.profile.trim()) psd.profile = awsData.profile.trim();
+      if (awsData.region.trim()) psd.region = awsData.region.trim();
+      if (awsData.accessKeyId.trim()) psd.accessKeyId = awsData.accessKeyId.trim();
+      if (awsData.sessionToken.trim()) psd.sessionToken = awsData.sessionToken.trim();
+      return Object.keys(psd).length ? psd : undefined;
+    }
     if (providerRegions && region) {
       return { region };
     }
@@ -191,9 +209,15 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     }
   };
 
+  // AWS profile/SSO mode needs no API key — the credential lives in the
+  // local AWS config (9router apiKeyOptionalWith: "profile").
+  const awsProfileMode =
+    isAwsCredentialForm && !!awsData.profile.trim();
+  const apiKeySatisfied = !isOllamaLocal && (formData.apiKey || awsProfileMode);
+
   const handleSubmit = async (): Promise<void> => {
     if (!provider) return;
-    if (!isOllamaLocal && !formData.apiKey) return;
+    if (!isOllamaLocal && !apiKeySatisfied) return;
     if (!isOllamaLocal) {
       // Non-ollama providers require a name
       if (!formData.name) return;
@@ -333,14 +357,52 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
               type={isCookie ? "text" : "password"}
               value={formData.apiKey}
               onChange={(e: ChangeEvent<HTMLInputElement>) => setFormData({ ...formData, apiKey: e.target.value })}
-              placeholder={credentialPlaceholder}
+              placeholder={isAwsCredentialForm ? (awsProfileMode ? "(not needed in profile mode)" : "AWS secret access key") : credentialPlaceholder}
               className="flex-1"
             />
             <div className="pt-6">
-              <Button onClick={handleValidate} disabled={!formData.apiKey || validating || saving} variant="secondary">
+              <Button onClick={handleValidate} disabled={(!formData.apiKey && !awsProfileMode) || validating || saving} variant="secondary">
                 {validating ? "Checking..." : "Check"}
               </Button>
             </div>
+          </div>
+        )}
+        {isAwsCredentialForm && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20 flex flex-col gap-3">
+            <h3 className="font-semibold text-sm">AWS Bedrock Credentials</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input
+                label="Profile"
+                value={awsData.profile}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setAwsData({ ...awsData, profile: e.target.value })}
+                placeholder="default"
+              />
+              <Input
+                label="Region"
+                value={awsData.region}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setAwsData({ ...awsData, region: e.target.value })}
+                placeholder="us-east-1"
+              />
+            </div>
+            <Input
+              label="Access Key ID"
+              value={awsData.accessKeyId}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setAwsData({ ...awsData, accessKeyId: e.target.value })}
+              placeholder="AKIA… / ASIA…"
+            />
+            <Input
+              label="Session Token"
+              type="password"
+              value={awsData.sessionToken}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => setAwsData({ ...awsData, sessionToken: e.target.value })}
+              placeholder="(temporary ASIA… keys only)"
+            />
+            <p className="text-xs text-text-muted leading-relaxed">
+              SSO / profile (recommended): fill in <b>Profile</b> and <b>Region</b>, leave the secret access key empty, then run{" "}
+              <code>aws sso login --profile &lt;name&gt;</code> — credentials refresh automatically.{" "}
+              Static keys: the AWS secret access key goes in the API key field above, the key id in <b>Access Key ID</b>, and{" "}
+              <b>Session Token</b> for temporary (ASIA…) keys. A profile, if set, takes precedence over static keys.
+            </p>
           </div>
         )}
         {isCookie && authHint && (
@@ -475,7 +537,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         </p>
 
         <div className="flex gap-2">
-          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !formData.apiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
+          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !apiKeySatisfied)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
             {saving ? "Saving..." : "Save"}
           </Button>
           <Button onClick={onClose} variant="ghost" fullWidth>

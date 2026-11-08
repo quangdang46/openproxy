@@ -404,33 +404,29 @@ pub fn resolve_kiro_thinking_budget(
 ///     major 4 with minor > 5)
 ///   - `None` otherwise
 pub fn resolve_kiro_effort_path(model: &str) -> Option<&'static str> {
-    let lower = model.to_lowercase();
-    let tokens: Vec<&str> = lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-
-    // GPT-5.6 family: "gpt" plus a "5" and a "6" version token.
-    if tokens.contains(&"gpt") && tokens.contains(&"5") && tokens.contains(&"6") {
+    // Upstream matches on the dash/dot-normalized id:
+    // `/(?:^|[/.])gpt[/.]5[/.]6(?:[/.]|$)/` — the 5 and 6 must be adjacent
+    // version tokens of the gpt id, not merely present anywhere.
+    let normalized = model.to_lowercase().replace('-', ".");
+    static GPT_56_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|[/.])gpt[/.]5[/.]6(?:[/.]|$)").expect("gpt-5.6 effort regex")
+    });
+    if GPT_56_RE.is_match(&normalized) {
         return Some("reasoning");
     }
 
     // Claude: parse the first numeric version run (`N` or `N.M`) after the
     // `claude` token — e.g. `4.6` in `claude-sonnet-4.6`, `4` in
     // `claude-opus-4-20250514`.
-    if lower.contains("claude") {
-        let rest = &lower[lower.find("claude").unwrap() + "claude".len()..];
-        let version = rest
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .find(|tok| !tok.is_empty() && tok.chars().any(|c| c.is_ascii_digit()));
-        if let Some(v) = version {
-            let mut parts = v.split('.');
-            let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-            let minor: Option<u32> = parts.next().and_then(|p| p.parse().ok());
-            let is_newer = major > 4 || (major == 4 && minor.is_some_and(|m| m > 5));
-            if is_newer {
-                return Some("output_config");
-            }
+    if normalized.contains("claude") {
+        let v = parse_claude_version(model)?;
+        let (major, minor) = v;
+        // Upstream: null for major < 4, or major 4 with minor null / <= 5 /
+        // date-suffix (>= 1000); output_config otherwise (major > 4, or
+        // major 4 with minor 6..=999).
+        let is_newer = major > 4 || (major == 4 && minor.is_some_and(|m| m > 5 && m < 1000));
+        if is_newer {
+            return Some("output_config");
         }
     }
 
