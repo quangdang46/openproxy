@@ -8,6 +8,7 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+import { parseSearchQuery, matchesSearch, type ParsedSearchQuery } from "@/shared/utils/modelSearchFilter";
 import { buildAvailableModels, fetchLiveModels, loadFreeOnly, useFavorites, type LiveModel } from "@/shared/models/availableModels";
 import React from "react";
 
@@ -66,6 +67,14 @@ interface ModelSelectModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (model: Model) => void;
+  // Optional deselect path used by batch "Deselect All". Parents whose
+  // onSelect toggles membership don't need this — the modal falls back to
+  // calling onSelect per added model (non-toggle parents no-op on re-add).
+  onDeselect?: (model: Model) => void;
+  // Batch variants (9router onSelectBatch/onDeselectBatch parity). When
+  // absent the modal falls back to per-model onSelect/onDeselect calls.
+  onSelectBatch?: (models: Model[]) => void;
+  onDeselectBatch?: (models: Model[]) => void;
   selectedModel?: string | string[];
   activeProviders?: ActiveProvider[];
   title?: string;
@@ -89,6 +98,9 @@ export default function ModelSelectModal({
   isOpen,
   onClose,
   onSelect,
+  onDeselect,
+  onSelectBatch,
+  onDeselectBatch,
   selectedModel,
   activeProviders = [],
   title = "Select Model",
@@ -493,15 +505,21 @@ export default function ModelSelectModal({
     return groups;
   }, [filteredActiveProviders, resolvedAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap, liveModelsByAlias, freeOnlyByAlias, catalogReady]);
 
+  // Parse search query into structured form — substring terms, /regex/,
+  // and !token / -token negation (9router modelSearchFilter.js parity).
+  const parsedQuery = useMemo<ParsedSearchQuery>(
+    () => parseSearchQuery(searchQuery),
+    [searchQuery],
+  );
+
   // Filter combos by search query (and hide combos when a kind or capability
   // filter is set — combos are LLM-only by design, and a capacity-adapter slot
   // must hold a concrete provider model).
   const filteredCombos = useMemo(() => {
     if (kindFilter || capFilter) return [];
-    if (!searchQuery.trim()) return combos;
-    const query = searchQuery.toLowerCase();
-    return combos.filter(c => c.name.toLowerCase().includes(query));
-  }, [combos, searchQuery, kindFilter, capFilter]);
+    if (parsedQuery.isEmpty) return combos;
+    return combos.filter(c => matchesSearch(c.name, parsedQuery));
+  }, [combos, parsedQuery, kindFilter, capFilter]);
 
   // Filter models by search query
   // Sort models alphabetically, with added models floated to top
@@ -512,8 +530,6 @@ export default function ModelSelectModal({
   };
 
   const filteredGroups = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-
     const filtered: Record<string, ModelGroup> = {};
 
     Object.entries(groupedModels).forEach(([providerId, group]) => {
@@ -523,34 +539,87 @@ export default function ModelSelectModal({
         models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
         if (models.length === 0) return;
       }
-      const matchedModels = query
-        ? models.filter(
-            (m) =>
-              m.name.toLowerCase().includes(query) ||
-              m.id.toLowerCase().includes(query) ||
-              m.value.toLowerCase().includes(query),
-          )
-        : sortModels(models);
 
-      // A provider-name hit should show that provider's models, not an empty
-      // group. Matching on the alias matters too: 39 of 105 providers have an
-      // alias that is not a substring of the display name ("kilo" -> Kilo Code).
-      const groupMatches = group.name.toLowerCase().includes(query) ||
-        group.alias.toLowerCase().includes(query);
-      const visibleModels = groupMatches ? sortModels(models) : matchedModels;
+      // 9router ModelSelectModal parity: a provider-name (or alias) hit shows
+      // that provider's models, not an empty group — unless negation terms
+      // still exclude a model. Matching on the alias matters too: 39 of 105
+      // providers have an alias that is not a substring of the display name
+      // ("kilo" -> Kilo Code). This is also the modal's provider filter:
+      // searching a provider name/alias narrows the list to that provider.
+      if (!parsedQuery.isEmpty) {
+        const providerMatches =
+          matchesSearch(group.name, parsedQuery) ||
+          matchesSearch(group.alias, parsedQuery);
+
+        models = models.filter((m) => {
+          if (matchesSearch(m, parsedQuery)) return true;
+          if (providerMatches) {
+            if (parsedQuery.negativeTerms.length > 0) {
+              // Provider matched, but negative exclusions still apply.
+              return matchesSearch(m, { ...parsedQuery, positiveTerms: [] });
+            }
+            return true;
+          }
+          return false;
+        });
+
+        if (models.length === 0) return;
+      }
 
       // Never emit a group with zero models — it renders a bare "(0)" header
       // and suppresses the "No models found" fallback.
-      if (visibleModels.length > 0) {
-        filtered[providerId] = {
-          ...group,
-          models: visibleModels,
-        };
-      }
+      filtered[providerId] = {
+        ...group,
+        models: sortModels(models),
+      };
     });
 
     return filtered;
-  }, [groupedModels, searchQuery, addedModelValues, capFilter]);
+  }, [groupedModels, parsedQuery, addedModelValues, capFilter]);
+
+  // Visible models available for batch actions (excluding placeholders) —
+  // 9router "Select All / Deselect All" parity.
+  const visibleModels = useMemo(() => {
+    const list: Model[] = [];
+    Object.values(filteredGroups).forEach((group) => {
+      group.models.forEach((m) => {
+        if (!m.isPlaceholder) list.push(m);
+      });
+    });
+    return list;
+  }, [filteredGroups]);
+
+  const visibleUnadded = useMemo(
+    () => visibleModels.filter((m) => !addedModelValues.includes(m.value)),
+    [visibleModels, addedModelValues],
+  );
+
+  const visibleAdded = useMemo(
+    () => visibleModels.filter((m) => addedModelValues.includes(m.value)),
+    [visibleModels, addedModelValues],
+  );
+
+  const handleSelectAllVisible = () => {
+    if (visibleUnadded.length === 0) return;
+    if (onSelectBatch) {
+      onSelectBatch(visibleUnadded);
+    } else {
+      visibleUnadded.forEach((model) => onSelect(model));
+    }
+  };
+
+  const handleDeselectAllVisible = () => {
+    if (visibleAdded.length === 0) return;
+    if (onDeselectBatch) {
+      onDeselectBatch(visibleAdded);
+    } else if (onDeselect) {
+      visibleAdded.forEach((model) => onDeselect(model));
+    } else {
+      // Toggle-style parents (onSelect adds/removes) still get a working
+      // Deselect All; add-only parents no-op on already-added values.
+      visibleAdded.forEach((model) => onSelect(model));
+    }
+  };
 
   const handleSelect = (model: Model) => {
     onSelect(model);
@@ -609,23 +678,78 @@ export default function ModelSelectModal({
       {/* Info bar */}
       <div className="flex items-center gap-2 mb-3 px-2.5 py-2 bg-primary/8 border border-primary/20 rounded-lg text-xs text-text-muted">
         <span className="material-symbols-outlined text-primary shrink-0" style={{ fontSize: "14px" }}>info</span>
-        <span>Click to add, click again to remove. Changes are saved automatically.</span>
+        <span>Click to add, click again to remove. Changes are saved automatically. Search supports exclusions (e.g. claude -haiku, !embed) and RegEx (/pattern/).</span>
       </div>
 
-      {/* Search - compact */}
-      <div className="mb-3">
+      {/* Search & batch actions */}
+      <div className="mb-3 space-y-2">
         <div className="relative">
           <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted text-[16px]">
             search
           </span>
           <input
             type="text"
-            placeholder="Search..."
+            placeholder="Search models (e.g. claude -haiku, !embed, /regex/)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-1.5 bg-surface border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
+            className="w-full pl-8 pr-20 py-1.5 bg-surface border border-border rounded text-xs focus:outline-none focus:ring-1 focus:ring-primary/50"
           />
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {parsedQuery.isRegex && (
+              <span className="text-[10px] px-1 py-0.2 rounded bg-primary/10 text-primary font-mono font-medium">
+                regex
+              </span>
+            )}
+            {parsedQuery.negativeTerms.length > 0 && !parsedQuery.isRegex && (
+              <span className="text-[10px] px-1 py-0.2 rounded bg-amber-500/10 text-amber-500 font-mono font-medium">
+                !exclude
+              </span>
+            )}
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="text-text-muted hover:text-text-main cursor-pointer p-0.5 rounded"
+                title="Clear search"
+              >
+                <span className="material-symbols-outlined text-[14px] leading-none">close</span>
+              </button>
+            )}
+          </div>
         </div>
+
+        {!closeOnSelect && visibleModels.length > 0 && (
+          <div className="flex items-center justify-between px-1 text-[11px] text-text-muted">
+            <span className="flex items-center gap-1.5">
+              <span>{visibleModels.length} models</span>
+              {addedModelValues.length > 0 && (
+                <span className="text-primary font-medium">({addedModelValues.length} selected)</span>
+              )}
+            </span>
+            <div className="flex items-center gap-1.5">
+              {visibleUnadded.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSelectAllVisible}
+                  className="px-2 py-0.5 rounded text-[11px] font-medium bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+                  title="Select all filtered models"
+                >
+                  Select All ({visibleUnadded.length})
+                </button>
+              )}
+              {visibleAdded.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleDeselectAllVisible}
+                  className="px-2 py-0.5 rounded text-[11px] font-medium bg-black/5 dark:bg-white/10 text-text-muted hover:text-text-main hover:bg-black/10 dark:hover:bg-white/20 transition-colors cursor-pointer"
+                  title="Deselect all filtered models"
+                >
+                  Deselect All ({visibleAdded.length})
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Provider outline - quick jump when many providers. Multi-select

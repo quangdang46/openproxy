@@ -1,6 +1,8 @@
 "use client";
 
-import React from "react";
+import { useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import Portal from "./Portal";
 
 type TooltipPosition = "top" | "bottom" | "left" | "right";
 
@@ -13,25 +15,46 @@ interface TooltipProps {
 }
 
 export default function Tooltip({ text, children, position = "top", color }: TooltipProps) {
-  const posClass: Record<TooltipPosition, string> = {
-    top: "bottom-full left-1/2 -translate-x-1/2 mb-1.5",
-    bottom: "top-full left-1/2 -translate-x-1/2 mt-1.5",
-    left: "right-full top-1/2 -translate-y-1/2 mr-1.5",
-    right: "left-full top-1/2 -translate-y-1/2 ml-1.5",
-  }[position];
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [style, setStyle] = useState<CSSProperties | null>(null);
 
-  const bgStyle = color ? { backgroundColor: color } : undefined;
-  const bgClass = color ? "" : "bg-gray-900";
+  // Render via portal + fixed positioning so overflow/scroll ancestors can't clip the bubble
+  const handleMouseEnter = () => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const midX = rect.left + rect.width / 2;
+    const midY = rect.top + rect.height / 2;
+    let pos: CSSProperties;
+    if (position === "bottom") {
+      pos = { top: rect.bottom + 6, left: midX, transform: "translateX(-50%)" };
+    } else if (position === "left") {
+      pos = { right: window.innerWidth - rect.left + 6, top: midY, transform: "translateY(-50%)" };
+    } else if (position === "right") {
+      pos = { left: rect.right + 6, top: midY, transform: "translateY(-50%)" };
+    } else {
+      pos = { bottom: window.innerHeight - rect.top + 6, left: midX, transform: "translateX(-50%)" };
+    }
+    setStyle({ position: "fixed", ...pos });
+  };
 
   return (
-    <div className="relative inline-flex group/tt">
+    <div
+      ref={anchorRef}
+      className="relative inline-flex"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={() => setStyle(null)}
+    >
       {children}
-      <div
-        className={`pointer-events-none absolute ${posClass} z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug ${bgClass} text-white opacity-0 group-hover/tt:opacity-100 transition-opacity duration-150 whitespace-normal`}
-        style={bgStyle}
-      >
-        {text}
-      </div>
+      {style && (
+        <Portal>
+          <div
+            className={`pointer-events-none z-50 w-max max-w-56 rounded px-2 py-1 text-[11px] leading-snug ${color ? "" : "bg-gray-900"} text-white whitespace-normal`}
+            style={{ ...style, ...(color ? { backgroundColor: color } : {}) }}
+          >
+            {text}
+          </div>
+        </Portal>
+      )}
     </div>
   );
 }
