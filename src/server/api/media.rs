@@ -580,7 +580,7 @@ async fn execute_systemone_on_connection(
     let status = response.status();
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,
-        Err(_) => return proxy_upstream_response_raw(status),
+        Err(_) => return proxy_upstream_response_raw(status).await,
     };
 
     if !status.is_success() {
@@ -2293,7 +2293,11 @@ async fn try_provider_adapter(
 /// upstream `statusForAdapterError` / `statusForError` heuristics.
 fn executor_media_status(message: &str) -> u16 {
     let m = message.to_ascii_lowercase();
-    if m.contains("quota") || m.contains("rate-limit") || m.contains("rate limit") || m.contains("429") {
+    if m.contains("quota")
+        || m.contains("rate-limit")
+        || m.contains("rate limit")
+        || m.contains("429")
+    {
         return 429;
     }
     if m.contains("storage state") || m.contains("credentials") || m.contains("cookie") {
@@ -2343,8 +2347,7 @@ async fn try_executor_driven_image(
 
     let assets: Result<Vec<(String, String)>, (u16, String)> = match provider {
         "grok-web" => {
-            let executor =
-                crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
+            let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
             executor
                 .generate_media(
                     &prompt,
@@ -2356,11 +2359,7 @@ async fn try_executor_driven_image(
                     proxy,
                 )
                 .await
-                .map(|v| {
-                    v.into_iter()
-                        .map(|a| (a.b64, a.mime))
-                        .collect::<Vec<_>>()
-                })
+                .map(|v| v.into_iter().map(|a| (a.b64, a.mime)).collect::<Vec<_>>())
                 .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
         }
         _ => {
@@ -2369,11 +2368,7 @@ async fn try_executor_driven_image(
             executor
                 .generate_image(&prompt, size.as_deref(), n, connection, proxy)
                 .await
-                .map(|v| {
-                    v.into_iter()
-                        .map(|a| (a.b64, a.mime))
-                        .collect::<Vec<_>>()
-                })
+                .map(|v| v.into_iter().map(|a| (a.b64, a.mime)).collect::<Vec<_>>())
                 .map_err(|e| {
                     let (status, message) = match &e {
                         crate::core::executor::ChatGptWebError::Http { status, message } => {
@@ -2529,7 +2524,15 @@ async fn executor_driven_video(
     let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
     let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
     match executor
-        .generate_media(prompt.trim(), "video", size, duration, 1, connection, proxy.as_ref())
+        .generate_media(
+            prompt.trim(),
+            "video",
+            size,
+            duration,
+            1,
+            connection,
+            proxy.as_ref(),
+        )
         .await
     {
         Ok(assets) => {

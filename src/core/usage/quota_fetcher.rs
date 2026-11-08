@@ -1741,7 +1741,7 @@ fn cursor_usage_headers(
     insert("x-cursor-config-version", uuid::Uuid::new_v4().to_string());
     insert(
         "x-cursor-timezone",
-        crate::core::executor::cursor::resolve_system_timezone(),
+        crate::core::executor::cursor_resolve_system_timezone(),
     );
     insert("x-ghost-mode", "true".to_string());
     insert("x-request-id", uuid::Uuid::new_v4().to_string());

@@ -1200,17 +1200,18 @@ mod tests {
 
     #[test]
     fn normalize_url_keeps_origin_only() {
+        // Upstream `new URL(input).origin` — origin only, no trailing slash.
         assert_eq!(
             normalize_server_url("http://host:4623/dashboard/providers").unwrap(),
-            "http://host:4623/"
+            "http://host:4623"
         );
         assert_eq!(
             normalize_server_url("https://example.com:8443/x?y=1").unwrap(),
-            "https://example.com:8443/"
+            "https://example.com:8443"
         );
         assert_eq!(
             normalize_server_url("192.168.1.5:4623").unwrap(),
-            "http://192.168.1.5:4623/"
+            "http://192.168.1.5:4623"
         );
     }
 

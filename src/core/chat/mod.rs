@@ -1301,4 +1301,117 @@ mod target_format_precedence {
             Format::Gemini
         );
     }
+
+    // ── opencode-zen (9router registry/opencode-zen.js + executors/
+    // opencode-zen.js, bead openproxy-9router-parity-v5104-sync-eidj.51) ──
+
+    #[test]
+    fn opencode_zen_three_legs_match_registry_urls() {
+        let t = resolve_transport("opencode-zen", Format::OpenAi).expect("zen openai");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/v1/chat/completions");
+        let t = resolve_transport("opencode-zen", Format::Claude).expect("zen claude");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/v1/messages");
+        let t = resolve_transport("opencode-zen", Format::OpenAiResponses).expect("zen responses");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/v1/responses");
+        // Short alias resolves the same table.
+        assert!(resolve_transport("ocz", Format::Claude).is_some());
+    }
+
+    #[test]
+    fn opencode_zen_supported_formats_follow_registry_and_family() {
+        use Format::*;
+        // Registry claude-only ids.
+        for m in ["claude-opus-5", "qwen3.6-plus", "union-alpha"] {
+            assert_eq!(
+                opencode_zen_supported_formats(m),
+                &[Claude],
+                "{m} must be claude-only"
+            );
+        }
+        // Responses-only gpt/grok/muse family.
+        for m in ["gpt-5.5", "grok-4.6", "muse-spark-1.3"] {
+            assert_eq!(
+                opencode_zen_supported_formats(m),
+                &[OpenAiResponses],
+                "{m} must be responses-only"
+            );
+        }
+        // Registry deepseek-v4 pins to openai; unknown variants keep family.
+        assert_eq!(opencode_zen_supported_formats("deepseek-v4-pro"), &[OpenAi]);
+        assert_eq!(
+            opencode_zen_supported_formats("deepseek-v4-flash-free"),
+            &[OpenAi]
+        );
+        assert_eq!(
+            opencode_zen_supported_formats("deepseek-v4-flash-2027"),
+            &[OpenAi, Claude, OpenAiResponses]
+        );
+        // Curated minimax is openai-only; other minimax/qwen keep the family pair.
+        assert_eq!(opencode_zen_supported_formats("minimax-m3"), &[OpenAi]);
+        assert_eq!(
+            opencode_zen_supported_formats("minimax-m9"),
+            &[OpenAi, Claude]
+        );
+        // Default lane.
+        for m in [
+            "big-pickle",
+            "glm-5.3",
+            "kimi-k2.6",
+            "mimo-v2.6-flash-free",
+            "gemini-3.5-flash",
+        ] {
+            assert_eq!(
+                opencode_zen_supported_formats(m),
+                &[OpenAi],
+                "{m} must default to openai"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_zen_transport_guard_blocks_unsupported_source_format() {
+        // A Claude-source request for a responses-only model must NOT take
+        // the /messages transport; it falls back to the model's responses
+        // target transport.
+        assert!(!model_supports_source_format(
+            "opencode-zen",
+            "gpt-5.5",
+            Format::Claude
+        ));
+        assert!(model_supports_source_format(
+            "opencode-zen",
+            "claude-opus-5",
+            Format::Claude
+        ));
+        assert!(model_supports_source_format(
+            "opencode-zen",
+            "big-pickle",
+            Format::OpenAi
+        ));
+        // Alias behaves identically.
+        assert!(!model_supports_source_format(
+            "ocz",
+            "gpt-5.5",
+            Format::OpenAi
+        ));
+    }
+
+    #[test]
+    fn opencode_zen_model_target_routes_gpt_family_to_responses() {
+        use crate::core::translator::registry::Format;
+        // Catalog-registered gpt model carries targetFormat openai-responses.
+        let (t, _, _) = resolve_model_metadata("opencode-zen", "gpt-5.5");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        // Unregistered passthrough id → family fallback.
+        let (t, _, _) = resolve_model_metadata("opencode-zen", "gpt-9.9-future");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        let (t, _, _) = resolve_model_metadata("ocz", "grok-9.9-future");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        // muse-spark guard covers zen too.
+        let (t, _, _) = resolve_model_metadata("opencode-zen", "muse-spark-9.9-foo");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        // Chat-lane models keep no model target.
+        let (t, _, _) = resolve_model_metadata("opencode-zen", "big-pickle");
+        assert_eq!(t, None);
+    }
 }

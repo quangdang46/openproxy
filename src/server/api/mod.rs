@@ -4073,7 +4073,7 @@ mod tests {
             "the cap filter must hide the Combos group"
         );
         assert!(
-            MODAL.contains("[combos, searchQuery, kindFilter, capFilter]"),
+            MODAL.contains("[combos, parsedQuery, kindFilter, capFilter]"),
             "capFilter must be a dependency of the filteredCombos memo"
         );
     }

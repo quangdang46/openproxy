@@ -657,20 +657,16 @@ impl GrokWebExecutor {
                 "prompt is required for media generation".into(),
             ));
         }
-        let cookie_header = build_grok_cookie_header(
-            credentials.api_key.as_deref().unwrap_or_default(),
-        );
+        let cookie_header =
+            build_grok_cookie_header(credentials.api_key.as_deref().unwrap_or_default());
         if cookie_header.is_empty() {
             return Err(GrokWebExecutorError::Media(
-                "Grok Web requires the grok.com Cookie header (sso) pasted into the connection".into(),
+                "Grok Web requires the grok.com Cookie header (sso) pasted into the connection"
+                    .into(),
             ));
         }
 
-        let iterations = if kind == "video" {
-            1
-        } else {
-            n.clamp(1, 4)
-        };
+        let iterations = if kind == "video" { 1 } else { n.clamp(1, 4) };
         let client = self.pool.get("grok-web", proxy)?;
         let mut results = Vec::with_capacity(iterations);
 
@@ -722,10 +718,7 @@ impl GrokWebExecutor {
                 IMAGE_TURN_TIMEOUT
             };
             let mut headers = media_headers(&cookie_header, &request_id);
-            headers.insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            );
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
             let response = client
                 .post(GROK_CHAT_API)
@@ -737,11 +730,16 @@ impl GrokWebExecutor {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
             if !(200..300).contains(&status) || is_cloudflare_challenge(&text) {
-                return Err(GrokWebExecutorError::Media(if is_cloudflare_challenge(&text) {
-                    "Grok returned a Cloudflare challenge — re-copy the full Cookie header (with cf_clearance) from a logged-in grok.com browser on this machine".into()
-                } else {
-                    format!("grok {kind} request failed: HTTP {status} {}", &text[..text.len().min(200)])
-                }));
+                return Err(GrokWebExecutorError::Media(
+                    if is_cloudflare_challenge(&text) {
+                        "Grok returned a Cloudflare challenge — re-copy the full Cookie header (with cf_clearance) from a logged-in grok.com browser on this machine".into()
+                    } else {
+                        format!(
+                            "grok {kind} request failed: HTTP {status} {}",
+                            &text[..text.len().min(200)]
+                        )
+                    },
+                ));
             }
 
             if kind == "video" {
@@ -851,7 +849,9 @@ fn build_grok_video_payload(prompt: &str, size: Option<&str>, duration: Option<f
                 && parts[1].chars().all(|c| c.is_ascii_digit())
         })
         .unwrap_or("16:9");
-    let duration = duration.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(6.0);
+    let duration = duration
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .unwrap_or(6.0);
     json!({
         "modelName": "imagine-video-gen",
         "message": format!("{prompt} --mode=custom"),

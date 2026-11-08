@@ -1411,9 +1411,10 @@ pub async fn dispatch_oauth_refresh(
         }
         "minimax-code" | "minimax-code-global" => {
             let rt = refresh_token.to_string();
-            let provider = provider.to_string();
-            dedup_refresh(provider.as_str(), refresh_token, move || {
-                let (rt, provider) = (rt.clone(), provider.clone());
+            let provider_owned = provider.to_string();
+            let dedup_provider = provider_owned.clone();
+            dedup_refresh(dedup_provider.as_str(), refresh_token, move || {
+                let (rt, provider) = (rt.clone(), provider_owned.clone());
                 async move { refresh_minimax_code_token(&provider, &rt).await }
             })
             .await

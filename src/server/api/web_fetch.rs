@@ -970,6 +970,59 @@ mod tests {
         assert_eq!(resolve_fetch_provider("exa"), "exa");
         assert_eq!(resolve_fetch_provider("jina-reader"), "jina-reader");
         assert_eq!(resolve_fetch_provider("FC"), "firecrawl");
+        assert_eq!(resolve_fetch_provider("tf"), "tinyfish");
+        assert_eq!(resolve_fetch_provider("TinyFish"), "tinyfish");
+    }
+
+    #[test]
+    fn normalize_tinyfish_extracts_text_title_and_metadata() {
+        let body = json!({
+            "results": [{
+                "text": "# Page\n\nBody text",
+                "title": "Tiny Page",
+                "author": "Jane",
+                "published_date": "2026-01-02",
+                "language": "en"
+            }]
+        });
+        let result = normalize_fetch_response(
+            "tinyfish",
+            "https://example.com",
+            "markdown",
+            1000,
+            body,
+            120,
+            40,
+        )
+        .unwrap();
+        assert_eq!(result["provider"], "tinyfish");
+        assert_eq!(result["title"], "Tiny Page");
+        assert!(result["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Body text"));
+        assert_eq!(result["metadata"]["author"], "Jane");
+        assert_eq!(result["metadata"]["published_at"], "2026-01-02");
+        assert_eq!(result["metadata"]["language"], "en");
+    }
+
+    #[test]
+    fn normalize_tinyfish_surfaces_embedded_errors() {
+        // runTinyfish: per-URL failures arrive inside a 200 as errors[0].
+        let body =
+            json!({"errors": [{"url": "https://x.com", "status": 404, "error": "not found"}]});
+        let err =
+            normalize_fetch_response("tinyfish", "https://x.com", "markdown", 1000, body, 10, 5)
+                .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert!(err.message.contains("not found"));
+
+        // Missing results[0].text → 502.
+        let body = json!({"results": []});
+        let err =
+            normalize_fetch_response("tinyfish", "https://x.com", "markdown", 1000, body, 10, 5)
+                .unwrap_err();
+        assert_eq!(err.status, 502);
     }
 
     #[test]

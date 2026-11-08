@@ -23,6 +23,10 @@ interface ProviderSpecificData {
   organization?: string;
   accountId?: string;
   proxyPoolId?: string;
+  // AWS Bedrock credential form (registry credentialForm: "aws")
+  profile?: string;
+  accessKeyId?: string;
+  sessionToken?: string;
 }
 
 interface Connection {
@@ -77,6 +81,12 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [awsData, setAwsData] = useState({
+    profile: "",
+    region: "us-east-1",
+    accessKeyId: "",
+    sessionToken: "",
+  });
   const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"success" | "failed" | null>(null);
@@ -106,6 +116,15 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (connection.provider === "cloudflare-ai" && connection.providerSpecificData) {
         setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
       }
+      if (connection.providerSpecificData) {
+        const psd = connection.providerSpecificData;
+        setAwsData({
+          profile: psd.profile || "",
+          region: psd.region || "us-east-1",
+          accessKeyId: psd.accessKeyId || "",
+          sessionToken: psd.sessionToken || "",
+        });
+      }
       setRegion(regionConfig(connection.provider, connection.providerSpecificData?.region).saved);
       setTestResult(null);
       setValidationResult(null);
@@ -115,6 +134,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const isOAuth = connection?.authType === "oauth";
   const isAzure = connection?.provider === "azure";
   const isCloudflareAi = connection?.provider === "cloudflare-ai";
+  const isAwsCredentialForm =
+    !!connection?.provider &&
+    (AI_PROVIDERS[connection.provider] as Provider | undefined)?.credentialForm === "aws";
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
@@ -129,6 +151,25 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     }
     return undefined;
   };
+
+  // AWS credential form: merge into the stored blob (it also carries
+  // proxyPoolId etc.); an emptied field is removed so the user can switch
+  // between profile and static-key modes.
+  const buildAwsSpecificData = (): ProviderSpecificData | undefined => {
+    if (!isAwsCredentialForm) return undefined;
+    const merged: ProviderSpecificData = { ...(connection?.providerSpecificData || {}) };
+    const set = (key: "profile" | "region" | "accessKeyId" | "sessionToken", value: string) => {
+      const v = value.trim();
+      if (v) merged[key] = v;
+      else delete merged[key];
+    };
+    set("profile", awsData.profile);
+    set("region", awsData.region);
+    set("accessKeyId", awsData.accessKeyId);
+    set("sessionToken", awsData.sessionToken);
+    return merged;
+  };
+  const awsProfileMode = isAwsCredentialForm && !!awsData.profile.trim();
 
   const handleTest = async () => {
     if (!connection?.provider) return;
@@ -146,7 +187,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   };
 
   const handleValidate = async () => {
-    if (!connection?.provider || !formData.apiKey) return;
+    if (!connection?.provider || (!formData.apiKey && !awsProfileMode)) return;
     setValidating(true);
     setValidationResult(null);
     try {
@@ -158,6 +199,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           apiKey: formData.apiKey,
           ...(isAzure ? { providerSpecificData: azureData } : {}),
           ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+          ...(isAwsCredentialForm ? { providerSpecificData: buildAwsSpecificData() } : {}),
           // The validator dials the region the user picked, not the default
           // (9router EditConnectionModal.js:104).
           ...(providerRegions.length > 0 ? { providerSpecificData: buildRegionSpecificData() } : {}),
@@ -237,6 +279,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (providerRegions.length > 0 && region) {
         updates.providerSpecificData = buildRegionSpecificData();
       }
+      if (isAwsCredentialForm) {
+        updates.providerSpecificData = buildAwsSpecificData();
+      }
 
       await onSave(updates);
     } finally {
@@ -296,20 +341,26 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           <>
             <div className="flex gap-2">
               <Input
-                label="API Key"
+                label={isAwsCredentialForm ? "AWS Secret Access Key" : "API Key"}
                 type="password"
                 value={formData.apiKey}
                 onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-                placeholder={connection.hasApiKey ? "•••••••• (saved — leave blank to keep)" : "Enter new API key"}
-                hint={connection.hasApiKey
-                  ? "A key is already stored. Leave blank to keep it, or type a new one to replace."
-                  : "Required."}
+                placeholder={connection.hasApiKey ? "•••••••• (saved — leave blank to keep)" : isAwsCredentialForm ? "AWS secret access key" : "Enter new API key"}
+                hint={isAwsCredentialForm
+                  ? awsProfileMode
+                    ? "Profile mode is active — the secret key is not needed. Leave blank to keep any stored key."
+                    : connection.hasApiKey
+                      ? "A key is already stored. Leave blank to keep it, or type a new one to replace."
+                      : "Required for static-key mode (profile mode does not need it)."
+                  : connection.hasApiKey
+                    ? "A key is already stored. Leave blank to keep it, or type a new one to replace."
+                    : "Required."}
                 className="flex-1"
               />
               <div className="pt-6">
                 <Button
                   onClick={connection.hasApiKey && !formData.apiKey ? handleTest : handleValidate}
-                  disabled={(!formData.apiKey && !connection.hasApiKey) || validating || saving || testing}
+                  disabled={(!formData.apiKey && !connection.hasApiKey && !awsProfileMode) || validating || saving || testing}
                   variant="secondary"
                 >
                   {validating || testing ? "Checking..." : "Check"}
@@ -365,6 +416,45 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 hint="Required for billing"
               />
             </div>
+          </div>
+        )}
+
+        {isAwsCredentialForm && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20 flex flex-col gap-3">
+            <h3 className="font-semibold text-sm">AWS Bedrock Credentials</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input
+                label="Profile"
+                value={awsData.profile}
+                onChange={(e) => setAwsData({ ...awsData, profile: e.target.value })}
+                placeholder="default"
+              />
+              <Input
+                label="Region"
+                value={awsData.region}
+                onChange={(e) => setAwsData({ ...awsData, region: e.target.value })}
+                placeholder="us-east-1"
+              />
+            </div>
+            <Input
+              label="Access Key ID"
+              value={awsData.accessKeyId}
+              onChange={(e) => setAwsData({ ...awsData, accessKeyId: e.target.value })}
+              placeholder="AKIA… / ASIA…"
+            />
+            <Input
+              label="Session Token"
+              type="password"
+              value={awsData.sessionToken}
+              onChange={(e) => setAwsData({ ...awsData, sessionToken: e.target.value })}
+              placeholder="(temporary ASIA… keys only)"
+            />
+            <p className="text-xs text-text-muted leading-relaxed">
+              SSO / profile (recommended): fill in <b>Profile</b> and <b>Region</b>, leave the secret access key empty, then run{" "}
+              <code>aws sso login --profile &lt;name&gt;</code>. Static keys: the AWS secret access key goes in the key field above,
+              the key id in <b>Access Key ID</b>, and <b>Session Token</b> for temporary (ASIA…) keys. A profile, if set, takes
+              precedence over static keys.
+            </p>
           </div>
         )}
 

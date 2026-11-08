@@ -32,12 +32,12 @@ pub struct SystemoneConfig {
     pub opencode_session: bool,
 }
 
-const OPENROUTER_HEADERS: &[(&str, &str)] = &[
+const OPENROUTER_HEADERS: &'static [(&'static str, &'static str)] = &[
     ("HTTP-Referer", "https://endpoint-proxy.local"),
     ("X-Title", "Endpoint Proxy"),
 ];
 
-const OPENCODE_ZEN_HEADERS: &[(&str, &str)] = &[
+const OPENCODE_ZEN_HEADERS: &'static [(&'static str, &'static str)] = &[
     ("x-opencode-client", "desktop"),
     ("User-Agent", "opencode/1.18.31"),
 ];

@@ -169,17 +169,23 @@ fn parse_data_uri(url: &str) -> Option<(String, String)> {
     Some((mime.to_string(), payload.to_string()))
 }
 
-/// Convert an OpenAI `image_url` part URL into a Claude image `source` object.
+/// Convert an OpenAI `image_url` part URL into a Claude image `source`.
 /// Returns None when the URL is neither a base64 data URI nor http(s).
-fn image_url_to_source(url: &str) -> Option<Value> {
+fn image_url_to_source(url: &str) -> Option<ImageSource> {
     if let Some((mime, data)) = parse_data_uri(url) {
-        Some(serde_json::json!({
-            "type": "base64",
-            "media_type": mime,
-            "data": data,
-        }))
+        Some(ImageSource {
+            source_type: "base64".to_string(),
+            media_type: Some(mime),
+            data: Some(data),
+            url: None,
+        })
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        Some(serde_json::json!({ "type": "url", "url": url }))
+        Some(ImageSource {
+            source_type: "url".to_string(),
+            media_type: None,
+            data: None,
+            url: Some(url.to_string()),
+        })
     } else {
         None
     }
@@ -220,7 +226,7 @@ fn convert_tool_result_content(content: &Value) -> Value {
                     if let Some(source) = image_url_to_source(url) {
                         parts.push(serde_json::json!({
                             "type": "image",
-                            "source": source,
+                            "source": serde_json::to_value(source).unwrap_or(Value::Null),
                         }));
                     }
                 }

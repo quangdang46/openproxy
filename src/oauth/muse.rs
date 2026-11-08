@@ -135,6 +135,12 @@ pub async fn poll_for_token(device_code: &str, interval_secs: u64) -> Result<Val
     // forever server-side.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20 * 60);
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(OAuthError {
+                error: "poll_timeout".to_string(),
+                error_description: Some("Muse device code poll timed out".to_string()),
+            });
+        }
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
         let data = poll_token_once(device_code).await?;
         let error = data.get("error").and_then(Value::as_str);
@@ -159,12 +165,6 @@ pub async fn poll_for_token(device_code: &str, interval_secs: u64) -> Result<Val
             _ => {
                 if data.get("access_token").is_some() {
                     return Ok(data);
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err(OAuthError {
-                        error: "poll_timeout".to_string(),
-                        error_description: Some("Muse device code poll timed out".to_string()),
-                    });
                 }
             }
         }

@@ -917,6 +917,46 @@ async fn test_api_key_connection(
                 Err(error) => invalid(&error),
             }
         }
+        // AWS Bedrock: SigV4-signed control-plane probe
+        // (GET bedrock.{region}.amazonaws.com/foundation-models, service
+        // `bedrock`). The generic {base}/models fallback cannot express
+        // SigV4 and would dial the literal `{region}` template host.
+        "bedrock" | "bedrock-xai" | "br" | "brx" | "aws-bedrock" | "bedrock-grok" => {
+            // Aliases resolve to the canonical id so the wire format is right
+            // even if a connection was stored under "br"/"brx".
+            let canonical = match connection.provider.as_str() {
+                "br" | "aws-bedrock" => "bedrock",
+                "brx" | "bedrock-grok" => "bedrock-xai",
+                other => other,
+            };
+            let executor = match crate::core::executor::BedrockExecutor::new(
+                state.client_pool.clone(),
+                canonical.to_string(),
+            ) {
+                Ok(e) => e,
+                Err(e) => return invalid(&e.to_string()),
+            };
+            // No-redirect client: a 3xx would replay the signed probe —
+            // including x-amz-security-token — at whatever origin it names.
+            let probe_client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => return invalid(&e.to_string()),
+            };
+            match executor.probe_credentials(connection, &probe_client).await {
+                Ok(_) => ConnectionTestResult {
+                    valid: true,
+                    error: None,
+                    refreshed: false,
+                    new_tokens: None,
+                    soft_error: None,
+                },
+                Err(e) => invalid(&e.to_string()),
+            }
+        }
         // 9router probes several API-key providers this table has no arm for
         // (alims-intl, blackbox, chutes, codebuddy-cn, grok-web, llm7, …), and
         // they used to fall into "not supported" — so their test always failed

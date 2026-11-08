@@ -589,13 +589,19 @@ mod claude {
         let Some(mut cur) = read_json_file(&file)? else {
             return Ok(vec![]);
         };
+        let mut removed = false;
         if let Some(env) = cur.get_mut("env").and_then(Value::as_object_mut) {
             for k in RESET_KEYS {
-                env.remove(*k);
+                removed |= env.remove(*k).is_some();
             }
             if env.is_empty() {
                 let _ = cur.as_object_mut().map(|o| o.remove("env"));
             }
+        }
+        // Nothing of ours was configured — like the sibling tools' resets,
+        // report no touched file rather than rewriting a no-op.
+        if !removed {
+            return Ok(vec![]);
         }
         rewrite_file(&file, &serde_json::to_string_pretty(&cur)?)?;
         Ok(vec![file])

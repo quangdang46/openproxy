@@ -1243,14 +1243,16 @@ mod tests {
     #[test]
     fn test_anthropic_thinking_delta_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
+        // Upstream claude-to-openai.js: `thinking_delta` carries `thinking`
+        // and is emitted as `reasoning_content` — never "[thinking]" markup.
         let chunk = Bytes::from(
-            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","text":"reasoning here"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reasoning here"}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
-        assert!(output.contains("[thinking]"));
-        assert!(output.contains("[/thinking]"));
+        assert!(output.contains("\"reasoning_content\":\"reasoning here\""));
+        assert!(!output.contains("[thinking]"));
         assert!(output.contains("reasoning here"));
     }
 
@@ -1576,13 +1578,17 @@ mod tests {
     fn test_anthropic_thinking_block_format() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"text\":\"Let me think about this step by step...\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think about this step by step...\"}}\n",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
-        assert!(output.contains("[thinking]"));
-        assert!(output.contains("[/thinking]"));
+        // Thinking streams via reasoning_content only — empty <think>/
+        // "[thinking]" markers must not leak into content (bead eidj.3).
+        assert!(
+            output.contains("\"reasoning_content\":\"Let me think about this step by step...\"")
+        );
+        assert!(!output.contains("[thinking]"));
         assert!(output.contains("step by step"));
     }
 

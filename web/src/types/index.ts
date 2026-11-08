@@ -145,12 +145,13 @@ export type STTFormat =
   | "assemblyai"
   | "nvidia-asr"
   | "huggingface-asr"
-  | "gemini-stt";
+  | "gemini-stt"
+  | "elevenlabs-stt";
 
 export interface STTConfig {
   baseUrl: string;
   authType: "none" | "apikey";
-  authHeader: "bearer" | "token" | "x-api-key" | "key" | "none";
+  authHeader: "bearer" | "token" | "x-api-key" | "xi-api-key" | "key" | "none";
   format: STTFormat;
   models: STTModel[];
   /** True for providers that require an async upload+poll flow (AssemblyAI). */

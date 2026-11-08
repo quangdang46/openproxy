@@ -1837,9 +1837,14 @@ mod tests {
         ));
         assert!(result.is_none());
         let reason = diag.reason.clone().unwrap_or_default();
-        assert!(
-            reason.starts_with("skipped:"),
-            "expected skipped reason, got: {reason}"
+        // Upstream order (headroom.js:422-432): the tool-output projection
+        // runs BEFORE the unsafe-input guard, so unsafe input without any
+        // function_call_output items reports "no eligible plain-text tool
+        // output" — the "skipped:" reason is only reachable when the
+        // projection does not apply at all.
+        assert_eq!(
+            reason, "no eligible plain-text tool output",
+            "expected upstream tool-output-empty reason, got: {reason}"
         );
     }
 
@@ -2838,13 +2843,18 @@ mod tests {
         assert!(proj.targets[2].is_none());
 
         // Simulate proxy compression: shorter texts for the writable targets.
+        // Clone each projected message and replace only `content` — injecting
+        // an explicit `"tool_call_id": null` would NOT match upstream JS
+        // (`undefined !== null`), since non-tool messages lack the key.
         let compressed: Vec<Value> = proj
             .messages
             .iter()
             .enumerate()
             .map(|(i, m)| {
                 if proj.targets[i].is_some() {
-                    json!({"role": m["role"], "content": "c", "tool_call_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null)})
+                    let mut c = m.clone();
+                    c["content"] = json!("c");
+                    c
                 } else {
                     m.clone()
                 }

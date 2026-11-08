@@ -84,6 +84,8 @@ const DEDICATED_EXECUTOR_PROVIDERS: &[&str] = &[
     "qoder-cn",     // QoderExecutor (CN region)
     "trae",         // TraeExecutor
     "zed",          // ZedExecutor
+    "bedrock",      // BedrockExecutor (SigV4; region-templated URL)
+    "bedrock-xai",  // BedrockExecutor (SigV4; OpenAI wire format)
     // OAuth config only: no dispatch branch and no connection may select it
     // as a provider id, so it never reaches the executor layer.
     "openai-native",

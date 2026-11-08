@@ -1541,7 +1541,8 @@ mod tests {
     /// `resetsAtMs` equivalent parses out of the message text.
     #[test]
     fn codebuddy_6004_reset_instant_parsed() {
-        let body = r#"{"code":6004,"msg":"请求过于频繁，2026-10-22 08:30:00 UTC+8 后重试"}"#;
+        let body =
+            r#"{"code":6004,"msg":"请求过于频繁，2026-10-22 08:30:00 UTC+8 后重试"}"#.as_bytes();
         let limit = parse_codebuddy_rate_limit(body).expect("6004 body must classify");
         let resets = limit.resets_at.expect("reset instant must parse");
         // 2026-10-22 08:30:00 +08:00 == 2026-10-22 00:30:00 UTC.

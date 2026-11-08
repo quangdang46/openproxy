@@ -791,7 +791,10 @@ async fn validate_deepseek_web(client: &reqwest::Client, api_key: &str) -> (bool
 /// webIdentity.js `grok-web` probe: GET grok.com/api/auth/session with the
 /// pasted credential as the Cookie header; `status == "authenticated"` is
 /// the only healthy answer.
-async fn validate_grok_web_session(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+async fn validate_grok_web_session(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> (bool, Option<String>) {
     let cookie = crate::core::utils::web_cookie::strip_cookie_input_prefix(api_key);
     if cookie.is_empty() {
         return (false, Some("Missing sso cookie".into()));
@@ -802,10 +805,7 @@ async fn validate_grok_web_session(client: &reqwest::Client, api_key: &str) -> (
         .header("Cookie", cookie)
         .header("Origin", "https://grok.com")
         .header("Referer", "https://grok.com/")
-        .header(
-            "User-Agent",
-            crate::core::executor::GROK_WEB_USER_AGENT,
-        )
+        .header("User-Agent", crate::core::executor::GROK_WEB_USER_AGENT)
         .send()
         .await
     {
@@ -899,7 +899,10 @@ async fn validate_chatgpt_web_session(
         Ok(resp) => {
             let code = resp.status().as_u16();
             if code == 401 || code == 403 {
-                return (false, Some("ChatGPT session cookie is invalid or expired".into()));
+                return (
+                    false,
+                    Some("ChatGPT session cookie is invalid or expired".into()),
+                );
             }
             if !resp.status().is_success() {
                 return (false, Some(format!("ChatGPT returned HTTP {code}")));

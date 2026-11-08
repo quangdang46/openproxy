@@ -142,6 +142,27 @@ Accepts legacy string **or** nested 9router object:
 | perplexity-web | Implemented (lives in `grok_web.rs`, dispatched) | — |
 | ollama-local | Wired as ollama | — |
 
+## Browser automation substrate (deferred — bead openproxy-4d5h.8)
+
+9router's browser stack (`browserPool.js`, `lazyRuntime.js`, `obscura.js`,
+`virtualDisplay.js`, `browserProfileCache.js`, Playwright page drivers)
+backs `gemini-web`, `muse-web`, the `chatgpt-web` Turnstile fallback, and
+Login-via-Browser headed capture (`webLogin.js`). OpenProxy has **no Rust
+equivalent** — no CDP client, no stealth engine (obscura/cloakbrowser have
+no Rust port), and a bare `chromiumoxide` port would not reach parity
+because the stealth+UI-driving layer IS the provider's value. **Decision:
+defer.** HTTP-first paths are ported without it (`chatgpt-web` sentinel /
+chatHttp / imageGenHttp; `grok-web` chat + media); Turnstile enforcement
+returns an explicit upstream-style error. Revisit only if a maintained Rust
+stealth-browser crate emerges.
+
+Related gap: `grok-web` upstream routes through wreq-js `chrome_146` TLS
+impersonation (Cloudflare Enterprise rejects Node's TLS fingerprint). Rust
+has no wreq equivalent and only an unstable RC (`wreq@6.0.0-rc.31`) exists —
+requests go out on reqwest/rustls with the full header/cookie fingerprint
+set kept in lockstep; Cloudflare challenges surface the upstream-style
+re-copy-cookie error.
+
 ## Other residual parity nits
 
 | Item | Severity | Bead |

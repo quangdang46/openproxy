@@ -154,11 +154,7 @@ async fn ping_systemone_model(
 
     let response = match timeout(
         MODEL_TEST_TIMEOUT,
-        super::media::systemone(
-            State(state.clone()),
-            ping_headers,
-            Ok(Json(body)),
-        ),
+        super::media::systemone(State(state.clone()), ping_headers, Ok(Json(body))),
     )
     .await
     {

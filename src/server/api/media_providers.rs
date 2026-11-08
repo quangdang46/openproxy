@@ -1245,9 +1245,7 @@ async fn list_providers_by_kind(
                 || (kind == "systemone"
                     && crate::core::model::catalog::provider_catalog()
                         .provider_info(&c.provider)
-                        .is_some_and(|info| {
-                            info.service_kinds.iter().any(|k| k == "systemone")
-                        }))
+                        .is_some_and(|info| info.service_kinds.iter().any(|k| k == "systemone")))
         })
         .map(provider_summary_for_kind)
         .collect();

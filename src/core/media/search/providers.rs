@@ -2123,4 +2123,77 @@ mod tests {
         assert_eq!(set.results[0].url, "https://x.com");
         assert_eq!(set.results[0].snippet, "body");
     }
+
+    // ─── tinyfish ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tinyfish_registered_and_rejects_x() {
+        assert!(lookup("tinyfish").is_some());
+        assert!(lookup("tf").is_none()); // alias lives in chat_search layer
+        let mut r = req("hi", 5);
+        r.search_type = SearchType::X;
+        assert!(TINYFISH.build_url(&r).is_err());
+    }
+
+    #[test]
+    fn tinyfish_url_params_and_paging() {
+        let mut r = req("rust async", 5);
+        r.search_type = SearchType::News;
+        r.country = Some("US".to_string());
+        r.language = Some("en".to_string());
+        r.domain_filter = vec!["example.com".to_string(), "-bad.com".to_string()];
+        let url = TINYFISH.build_url(&r).unwrap();
+        assert!(url.starts_with("https://api.search.tinyfish.ai"));
+        assert!(url.contains("query=rust+async") || url.contains("query=rust%20async"));
+        assert!(url.contains("domain_type=news"));
+        assert!(url.contains("location=US"));
+        assert!(url.contains("language=en"));
+        assert!(url.contains("include_domains=example.com"));
+        assert!(url.contains("exclude_domains=bad.com"));
+
+        // offset 20 → page=2; offset%10 + max_results must fit in one page.
+        let mut r2 = req("hi", 5);
+        r2.offset = Some(20);
+        let url2 = TINYFISH.build_url(&r2).unwrap();
+        assert!(url2.contains("page=2"));
+
+        // offset >= 110 rejected.
+        let mut r3 = req("hi", 5);
+        r3.offset = Some(110);
+        assert!(TINYFISH.build_url(&r3).is_err());
+
+        // straddling a page boundary rejected: offset 8 + max 5 > 10.
+        let mut r4 = req("hi", 5);
+        r4.offset = Some(8);
+        assert!(TINYFISH.build_url(&r4).is_err());
+
+        // web type omits domain_type.
+        let url5 = TINYFISH.build_url(&req("hi", 5)).unwrap();
+        assert!(!url5.contains("domain_type"));
+    }
+
+    #[test]
+    fn tinyfish_normalize_slices_page_and_maps_fields() {
+        let body = json!({
+            "total_results": 42,
+            "results": (0..12)
+                .map(|i| json!({
+                    "title": format!("T{i}"),
+                    "url": format!("https://x.com/{i}"),
+                    "snippet": format!("s{i}"),
+                    "date": "2026-01-01",
+                    "authors": ["a", "b"],
+                    "publisher": "pub",
+                }))
+                .collect::<Vec<_>>()
+        });
+        // offset 11 → page offset 1 within the page, max 5.
+        let mut r = req("hi", 5);
+        r.offset = Some(11);
+        let set = TINYFISH.normalize(&body, &r);
+        assert_eq!(set.results.len(), 5);
+        assert_eq!(set.results[0].title, "T2");
+        assert_eq!(set.results[0].url, "https://x.com/2");
+        assert_eq!(set.total_results, Some(42));
+    }
 }

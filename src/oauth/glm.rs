@@ -422,13 +422,21 @@ async fn resolve_coding_plan_api_key(
         .unwrap_or("zcode-api-key");
 
     let auth = || {
-        client()
-            .header("Authorization", format!("Bearer {business_token}"))
-            .header("Content-Type", "application/json")
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(value) = format!("Bearer {business_token}").parse() {
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+        headers
     };
 
     let customer_info = fetch_business_json(
-        auth().get(format!("{api_base}/api/biz/customer/getCustomerInfo")),
+        client()
+            .get(format!("{api_base}/api/biz/customer/getCustomerInfo"))
+            .headers(auth()),
         "customer info",
     )
     .await?;
@@ -443,7 +451,7 @@ async fn resolve_coding_plan_api_key(
     let list_url =
         format!("{api_base}/api/biz/v1/organization/{org_id}/projects/{project_id}/api_keys");
 
-    let keys = fetch_business_json(auth().get(&list_url), "api keys").await?;
+    let keys = fetch_business_json(client().get(&list_url).headers(auth()), "api keys").await?;
     let key_entry = keys.as_array().and_then(|arr| {
         arr.iter()
             .find(|item| item.get("name").and_then(Value::as_str) == Some(plan_key_name))
@@ -454,8 +462,9 @@ async fn resolve_coding_plan_api_key(
         Some(entry) => entry,
         None => {
             fetch_business_json(
-                auth()
+                client()
                     .post(&list_url)
+                    .headers(auth())
                     .json(&json!({ "name": plan_key_name })),
                 "api key create",
             )
@@ -477,7 +486,9 @@ async fn resolve_coding_plan_api_key(
         .to_string();
 
     let secret = fetch_business_json(
-        auth().get(format!("{list_url}/copy/{}", urlencoding::encode(&api_key))),
+        client()
+            .get(format!("{list_url}/copy/{}", urlencoding::encode(&api_key)))
+            .headers(auth()),
         "api key copy",
     )
     .await?;

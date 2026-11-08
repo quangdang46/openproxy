@@ -105,7 +105,7 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_inner(provider_key, proxy, false)
+        self.get_inner(provider_key, proxy, false, false)
     }
 
     /// A pooled client that skips TLS certificate verification. Used ONLY by

@@ -26,6 +26,7 @@ expression: result
   ],
   "thinking": {
     "budget_tokens": 24576,
+    "display": "summarized",
     "type": "enabled"
   }
 }

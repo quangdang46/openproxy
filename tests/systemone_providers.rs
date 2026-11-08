@@ -113,12 +113,18 @@ fn systemone_catalog_entries_match_upstream_registry() {
     assert!(v1m.iter().all(|m| m.kind == "systemone"));
 
     // OpenRouter TypeSafe lane (registry/openrouter.js:46)
-    let or = catalog.models_for_alias("openrouter").expect("openrouter models");
-    assert!(or.iter().any(|m| m.id == "typesafe/jev-1.13" && m.kind == "systemone"));
+    let or = catalog
+        .models_for_alias("openrouter")
+        .expect("openrouter models");
+    assert!(or
+        .iter()
+        .any(|m| m.id == "typesafe/jev-1.13" && m.kind == "systemone"));
 
     // OpenCode Zen (registry/opencode-zen.js:118-119) + free opencode
     // (registry/opencode.js:43).
-    let zen = catalog.models_for_alias("opencode-zen").expect("opencode-zen models");
+    let zen = catalog
+        .models_for_alias("opencode-zen")
+        .expect("opencode-zen models");
     for id in ["jev-1.13", "jev-1.13-free"] {
         assert!(
             zen.iter().any(|m| m.id == id && m.kind == "systemone"),
@@ -126,7 +132,9 @@ fn systemone_catalog_entries_match_upstream_registry() {
         );
     }
     let oc = catalog.models_for_alias("oc").expect("oc models");
-    assert!(oc.iter().any(|m| m.id == "jev-1.13-free" && m.kind == "systemone"));
+    assert!(oc
+        .iter()
+        .any(|m| m.id == "jev-1.13-free" && m.kind == "systemone"));
 
     // Cloudflare Workers AI clef-flash (registry/cloudflare-ai.js:30).
     let cf = catalog
@@ -148,6 +156,34 @@ fn systemone_catalog_entries_match_upstream_registry() {
             "{prefix}/rev-latest must resolve to v1m"
         );
         assert_eq!(resolve_provider_alias(prefix), "v1m");
+    }
+}
+
+/// Every catalog provider advertising a `systemone`-kind model must have a
+/// transport config — the catalog is the discovery surface, the config is
+/// the wire. A new System One provider added to the catalog without a
+/// `systemoneConfig` port fails here instead of 400ing at request time.
+#[test]
+fn every_catalog_systemone_provider_has_a_transport_config() {
+    use openproxy::core::media::systemone::systemone_config;
+    use openproxy::core::model::provider_catalog;
+
+    let catalog = provider_catalog();
+    let alias_to_id = catalog.alias_to_provider_id();
+    for entry in catalog.iter_provider_models() {
+        if !entry.models.iter().any(|m| m.kind == "systemone") {
+            continue;
+        }
+        let provider_id = alias_to_id
+            .get(&entry.alias)
+            .cloned()
+            .unwrap_or_else(|| entry.alias.clone());
+        assert!(
+            systemone_config(&provider_id).is_some(),
+            "catalog provider `{provider_id}` (alias `{}`) advertises systemone \
+             models but has no systemone_config transport",
+            entry.alias
+        );
     }
 }
 
@@ -236,8 +272,10 @@ async fn v1m_forwards_decision_body_and_returns_json() {
         .await;
 
     let mut conn = connection("v1m-1", "v1m", Some("v1m-key"));
-    conn.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/v1/systemone", upstream.uri())));
+    conn.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![conn]).await;
     let app = openproxy::build_app(state);
 
@@ -253,31 +291,28 @@ async fn v1m_sends_bearer_and_verbatim_decision_fields() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/systemone"))
-        .respond_with(
-            |req: &MockRequest| {
-                let auth = req
-                    .headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                assert_eq!(auth, "Bearer v1m-key");
-                let sent: Value = serde_json::from_slice(&req.body).unwrap();
-                assert_eq!(sent["model"], json!("rev-latest"));
-                assert_eq!(sent["state"]["customer"], json!("I was charged twice"));
-                assert_eq!(
-                    sent["questions"]["probe"]["type"],
-                    json!("noul")
-                );
-                ResponseTemplate::new(200).set_body_json(json!({ "ok": true }))
-            },
-        )
+        .respond_with(|req: &MockRequest| {
+            let auth = req
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(auth, "Bearer v1m-key");
+            let sent: Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(sent["model"], json!("rev-latest"));
+            assert_eq!(sent["state"]["customer"], json!("I was charged twice"));
+            assert_eq!(sent["questions"]["probe"]["type"], json!("noul"));
+            ResponseTemplate::new(200).set_body_json(json!({ "ok": true }))
+        })
         .expect(1)
         .mount(&upstream)
         .await;
 
     let mut conn = connection("v1m-1", "v1m", Some("v1m-key"));
-    conn.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/v1/systemone", upstream.uri())));
+    conn.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![conn]).await;
     let app = openproxy::build_app(state);
 
@@ -314,8 +349,10 @@ async fn openrouter_lane_sends_registry_headers() {
     let mut conn = connection("or-1", "openrouter", Some("or-key"));
     // openrouter's systemoneConfig has no `path`, so a saved baseUrl is a
     // full-URL override (buildSystemoneUrl).
-    conn.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/api/v1/systemone", upstream.uri())));
+    conn.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/api/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![conn]).await;
     let app = openproxy::build_app(state);
 
@@ -359,8 +396,10 @@ async fn zen_lane_sends_session_and_client_headers() {
     // credential but may carry providerSpecificData. baseUrl override is a
     // full URL for this config (no `path` in systemoneConfig).
     let mut conn = connection("zen-1", "opencode-zen", None);
-    conn.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/zen/v1/systemone", upstream.uri())));
+    conn.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/zen/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![conn]).await;
     let app = openproxy::build_app(state);
 
@@ -375,7 +414,9 @@ async fn zen_lane_sends_session_and_client_headers() {
 async fn cloudflare_expands_placeholders_and_rewrites_body_model() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/client/v4/accounts/acct-9/ai/run/@cf/cloudflare/clef-flash"))
+        .and(path(
+            "/client/v4/accounts/acct-9/ai/run/@cf/cloudflare/clef-flash",
+        ))
         .respond_with(|req: &MockRequest| {
             let sent: Value = serde_json::from_slice(&req.body).unwrap();
             assert_eq!(sent["model"], json!("clef-flash"));
@@ -386,10 +427,8 @@ async fn cloudflare_expands_placeholders_and_rewrites_body_model() {
         .await;
 
     let mut conn = connection("cf-1", "cloudflare-ai", Some("cf-token"));
-    conn.provider_specific_data.insert(
-        "accountId".into(),
-        json!("acct-9"),
-    );
+    conn.provider_specific_data
+        .insert("accountId".into(), json!("acct-9"));
     conn.provider_specific_data.insert(
         "baseUrl".into(),
         json!(format!(
@@ -488,12 +527,16 @@ async fn systemone_rotates_accounts_on_auth_errors() {
 
     let mut bad = connection("v1m-bad", "v1m", Some("bad-key"));
     bad.priority = Some(1);
-    bad.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/v1/systemone", upstream.uri())));
+    bad.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/v1/systemone", upstream.uri())),
+    );
     let mut good = connection("v1m-good", "v1m", Some("good-key"));
     good.priority = Some(2);
-    good.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/v1/systemone", upstream.uri())));
+    good.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![bad, good]).await;
     let app = openproxy::build_app(state);
 
@@ -516,8 +559,10 @@ async fn systemone_surfaces_upstream_error_message() {
         .await;
 
     let mut conn = connection("v1m-1", "v1m", Some("k"));
-    conn.provider_specific_data
-        .insert("baseUrl".into(), json!(format!("{}/v1/systemone", upstream.uri())));
+    conn.provider_specific_data.insert(
+        "baseUrl".into(),
+        json!(format!("{}/v1/systemone", upstream.uri())),
+    );
     let state = app_state_with(vec![conn]).await;
     let app = openproxy::build_app(state);
 

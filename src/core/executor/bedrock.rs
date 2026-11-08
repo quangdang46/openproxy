@@ -23,7 +23,7 @@ use base64::Engine;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
-use hyper::http::uri::InvalidUri;
+use hyper::http::{self, uri::InvalidUri};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Body as ReqwestBody;
 use serde_json::{json, Value};
@@ -90,7 +90,8 @@ pub enum BedrockWireFormat {
 
 impl BedrockWireFormat {
     fn for_provider(provider: &str) -> Self {
-        if provider == "bedrock" {
+        // Aliases resolve to the same wire format (registry ALIAS_TO_ID).
+        if matches!(provider, "bedrock" | "br" | "aws-bedrock") {
             Self::Claude
         } else {
             Self::OpenAi
@@ -880,11 +881,9 @@ impl BedrockExecutor {
         // Streaming: unwrap AWS EventStream frames into SSE in this
         // provider's wire format (named Claude events, or bare OpenAI data:
         // chunks terminated by [DONE]).
-        let (parts, resp_body) = response.into_parts();
-        let upstream_stream = resp_body.into_data_stream();
-        let sse_stream = event_stream_to_sse(upstream_stream, self.wire_format);
+        let sse_stream = event_stream_to_sse(response.bytes_stream(), self.wire_format);
         let mut http_resp = http::Response::builder()
-            .status(parts.status)
+            .status(status)
             .body(ReqwestBody::wrap_stream(sse_stream))
             .map_err(BedrockExecutorError::InvalidRequest)?;
         {
@@ -967,7 +966,8 @@ impl BedrockExecutor {
             .get("x-amzn-errortype")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(':').next())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         if error_type == "AccessDeniedException" {
             return Ok(true);
         }
@@ -979,7 +979,7 @@ impl BedrockExecutor {
             if error_type.is_empty() {
                 format!("HTTP {status}")
             } else {
-                error_type.to_string()
+                error_type
             },
             if message.is_empty() { "" } else { ": " },
             message
@@ -1244,12 +1244,13 @@ mod tests {
 
     #[test]
     fn region_validation_rejects_hostile_values() {
+        let too_long = "a".repeat(40);
         for bad in [
             "evil.com/x",
             "US-EAST-1",
             "us east 1",
             "",
-            "a".repeat(40).as_str(),
+            too_long.as_str(),
         ] {
             let c = conn_with_psd(&[("region", json!(bad))]);
             assert!(resolve_region(&c).is_err(), "{bad:?} must be rejected");

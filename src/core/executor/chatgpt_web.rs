@@ -167,22 +167,11 @@ fn solve_proof_of_work(seed: &str, difficulty: &str, user_agent: &str) -> Result
         let hash = sentinel_hash(&format!("{seed}{encoded}"));
         // JS: hash.slice(0, difficulty.length) <= difficulty (lexicographic).
         let prefix: String = hash.chars().take(difficulty.chars().count()).collect();
-        if prefix <= *difficulty {
+        if prefix.as_str() <= difficulty {
             return Ok(format!("{PROOF_PREFIX}{encoded}{PROOF_SUFFIX}"));
         }
     }
     Err("ChatGPT sentinel proof of work exhausted its iteration budget".to_string())
-}
-
-/// Error thrown when the server demands the Turnstile VM challenge —
-/// browser-only upstream; not solvable on this transport.
-#[derive(Debug)]
-struct TurnstileRequired;
-
-impl std::fmt::Display for TurnstileRequired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ChatGPT requires the Turnstile challenge")
-    }
 }
 
 /// Run prepare → requirements and return the sentinel headers for a
@@ -329,9 +318,15 @@ fn storage_state_from_cookie_header(raw: &str) -> Result<StorageState, ChatGptWe
         });
     }
 
+    // Upstream regex: `__Secure-next-auth.session-token` optionally suffixed
+    // `.N` (chunked cookies).
     let has_session = header.split(';').any(|part| {
         let name = part.split('=').next().unwrap_or("").trim();
-        name.starts_with("__Secure-next-auth.session-token")
+        name == "__Secure-next-auth.session-token"
+            || name
+                .strip_prefix("__Secure-next-auth.session-token.")
+                .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
     });
     if !has_session {
         if header.contains(';') || header.contains('=') {
@@ -494,7 +489,7 @@ fn prepare_tool_messages(body: &Value, messages: &[Value]) -> (bool, Vec<Value>)
         break;
     }
     effective.push(json!({"role": "system", "content": tool_prompt}));
-    (true, effective, Vec::new())
+    (true, effective)
 }
 
 /// Flatten OpenAI messages into one prompt turn (chatHttp.js
@@ -932,7 +927,7 @@ fn content_policy_hit(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     [
         "content policy",
-        "violat",          // violates/violation/violated
+        "violat", // violates/violation/violated
         "can't create",
         "cannot create",
         "i can't generate",
@@ -1068,7 +1063,10 @@ async fn run_image_conversation(
     if !prepare.status().is_success() {
         return Err(ChatGptWebError::Http {
             status: prepare.status().as_u16(),
-            message: format!("ChatGPT prepare failed (HTTP {})", prepare.status().as_u16()),
+            message: format!(
+                "ChatGPT prepare failed (HTTP {})",
+                prepare.status().as_u16()
+            ),
         });
     }
     let prepare_json: Value = prepare.json().await.unwrap_or(Value::Null);
@@ -1135,7 +1133,10 @@ async fn run_image_conversation(
     if !conversation.status().is_success() {
         return Err(ChatGptWebError::Http {
             status: conversation.status().as_u16(),
-            message: format!("ChatGPT conversation failed (HTTP {})", conversation.status().as_u16()),
+            message: format!(
+                "ChatGPT conversation failed (HTTP {})",
+                conversation.status().as_u16()
+            ),
         });
     }
     let bytes = conversation.bytes().await.unwrap_or_default();
@@ -1171,7 +1172,9 @@ async fn poll_conversation_images(
     tokio::time::sleep(IMG_POLL_INITIAL_WAIT).await;
     while started.elapsed() <= IMG_POLL_TIMEOUT {
         let resp = client
-            .get(format!("{base_url}/backend-api/conversation/{conversation_id}"))
+            .get(format!(
+                "{base_url}/backend-api/conversation/{conversation_id}"
+            ))
             .headers({
                 let mut h = headers.clone();
                 h.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -1210,7 +1213,8 @@ async fn poll_conversation_images(
                         sediment_ids,
                     });
                 }
-                let is_error = text.contains("\"is_error\":true") || text.contains("\"is_error\": true");
+                let is_error =
+                    text.contains("\"is_error\":true") || text.contains("\"is_error\": true");
                 if is_error && content_policy_hit(&text) {
                     return Err(ChatGptWebError::Http {
                         status: 400,
@@ -1376,15 +1380,9 @@ impl ChatGptWebExecutor {
             .pool
             .get("chatgpt-web", proxy)
             .map_err(ChatGptWebError::Request)?;
-        let access_token =
-            fetch_access_token(&client, &storage.cookie_header, &user_agent).await?;
-        let sentinel = fetch_sentinel_headers(
-            &client,
-            CHATGPT_WEB_URL,
-            &access_token,
-            &user_agent,
-        )
-        .await?;
+        let access_token = fetch_access_token(&client, &storage.cookie_header, &user_agent).await?;
+        let sentinel =
+            fetch_sentinel_headers(&client, CHATGPT_WEB_URL, &access_token, &user_agent).await?;
 
         let mut results = Vec::with_capacity(n.max(1));
         for _ in 0..n.max(1) {
@@ -1605,7 +1603,8 @@ fn build_tool_mode_response(
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "choices": [{ "index": 0, "delta": { "role": "assistant" }, "finish_reason": Value::Null }],
+        "system_fingerprint": Value::Null,
+        "choices": [{ "index": 0, "delta": { "role": "assistant" }, "finish_reason": Value::Null, "logprobs": Value::Null }],
     })
     .to_string()];
     if let Some(tc) = message.get("tool_calls").and_then(Value::as_array) {
@@ -1617,7 +1616,8 @@ fn build_tool_mode_response(
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "choices": [{ "index": 0, "delta": { "tool_calls": [entry] }, "finish_reason": Value::Null }],
+                "system_fingerprint": Value::Null,
+                "choices": [{ "index": 0, "delta": { "tool_calls": [entry] }, "finish_reason": Value::Null, "logprobs": Value::Null }],
             })
             .to_string());
         }
@@ -1627,7 +1627,8 @@ fn build_tool_mode_response(
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model,
-                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
+                "system_fingerprint": Value::Null,
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason, "logprobs": Value::Null }],
             })
             .to_string(),
         );
@@ -1637,7 +1638,8 @@ fn build_tool_mode_response(
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [{ "index": 0, "delta": { "content": message.get("content").cloned().unwrap_or(Value::Null) }, "finish_reason": finish_reason }],
+            "system_fingerprint": Value::Null,
+            "choices": [{ "index": 0, "delta": { "content": message.get("content").cloned().unwrap_or(Value::Null) }, "finish_reason": finish_reason, "logprobs": Value::Null }],
         })
         .to_string());
     }

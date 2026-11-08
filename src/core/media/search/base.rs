@@ -815,6 +815,20 @@ mod tests {
     }
 
     #[test]
+    fn search_type_roundtrips_research_paper() {
+        // registry tinyfish.js searchTypes includes "research_paper".
+        assert_eq!(SearchType::ResearchPaper.as_str(), "research_paper");
+        assert_eq!(
+            SearchType::parse(Some("research_paper")),
+            SearchType::ResearchPaper
+        );
+        assert_eq!(SearchType::parse(Some("x")), SearchType::X);
+        // Unknown/missing types fall back to Web (upstream default).
+        assert_eq!(SearchType::parse(Some("bogus")), SearchType::Web);
+        assert_eq!(SearchType::parse(None), SearchType::Web);
+    }
+
+    #[test]
     fn make_display_url_strips_scheme_and_www() {
         assert_eq!(
             make_display_url("https://www.example.com/path?q=x"),

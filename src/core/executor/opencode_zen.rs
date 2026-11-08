@@ -150,16 +150,6 @@ fn descending_time_hex(time: u64, counter: u64) -> String {
     format!("{value:012x}")
 }
 
-/// `generateSessionId` (opencode-zen.js:50-53).
-#[allow(dead_code)]
-fn generate_session_id(timestamp_ms: i64) -> String {
-    format!(
-        "ses_{}{}",
-        descending_time_hex(timestamp_ms.max(0) as u64, 1),
-        unstable_random()
-    )
-}
-
 /// `translateSessionId` (opencode-zen.js:56-83): native `ses_` ids pass
 /// through; anything else is deterministically translated — sha256 of
 /// `opencode\0{clientTool}\0{sessionId}`, time field from the first 5
@@ -247,57 +237,65 @@ fn fingerprint_tool_present(tools: &[Value], name: &str) -> bool {
     tools.iter().any(|t| tool_name_of(t) == name)
 }
 
-/// `ensureChatFingerprintTools`: append the quartet in Chat Completions
-/// `{type:"function", function:{...}}` shape when missing.
-fn ensure_chat_fingerprint_tools(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else {
+/// Append one fingerprint tool in the given wire shape (`flat` = Responses
+/// `{type,name,...}`; otherwise Chat `{type,function:{...}}`).
+fn append_fingerprint_tool(tools: &mut Vec<Value>, name: &str, flat: bool) {
+    if fingerprint_tool_present(tools, name) {
         return;
-    };
-    if !obj.get("tools").is_some_and(Value::is_array) {
-        obj.insert("tools".to_string(), Value::Array(Vec::new()));
     }
-    let tools = obj
-        .get_mut("tools")
-        .and_then(Value::as_array_mut)
-        .expect("tools array just ensured");
-    for name in FINGERPRINT_TOOLS {
-        if fingerprint_tool_present(tools, name) {
-            continue;
-        }
-        tools.push(json!({
+    let tool = if flat {
+        json!({
+            "type": "function",
+            "name": name,
+            "description": format!("OpenCode built-in {name} tool"),
+            "parameters": { "type": "object", "properties": {} },
+        })
+    } else {
+        json!({
             "type": "function",
             "function": {
                 "name": name,
                 "description": format!("OpenCode built-in {name} tool"),
                 "parameters": { "type": "object", "properties": {} },
             }
-        }));
+        })
+    };
+    tools.push(tool);
+}
+
+fn ensure_tools_array<'a>(obj: &'a mut serde_json::Map<String, Value>) -> &'a mut Vec<Value> {
+    if !obj.get("tools").is_some_and(Value::is_array) {
+        obj.insert("tools".to_string(), Value::Array(Vec::new()));
+    }
+    obj.get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .expect("tools array just ensured")
+}
+
+/// `ensureChatFingerprintTools`: append the quartet in Chat Completions
+/// `{type:"function", function:{...}}` shape when missing.
+fn ensure_chat_fingerprint_tools(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let tools = ensure_tools_array(obj);
+    for name in FINGERPRINT_TOOLS {
+        append_fingerprint_tool(tools, name, false);
     }
 }
 
 /// `ensureResponsesFingerprintTools`: same quartet in flat Responses
-/// `{type:"function", name, ...}` shape.
+/// `{type:"function", name, ...}` shape. Test-only — production code calls
+/// `ensure_tools_array` + `append_fingerprint_tool` inline to keep the
+/// `obj` borrow alive across `normalize_responses_tools`.
+#[cfg(test)]
 fn ensure_responses_fingerprint_tools(body: &mut Value) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
-    if !obj.get("tools").is_some_and(Value::is_array) {
-        obj.insert("tools".to_string(), Value::Array(Vec::new()));
-    }
-    let tools = obj
-        .get_mut("tools")
-        .and_then(Value::as_array_mut)
-        .expect("tools array just ensured");
+    let tools = ensure_tools_array(obj);
     for name in FINGERPRINT_TOOLS {
-        if fingerprint_tool_present(tools, name) {
-            continue;
-        }
-        tools.push(json!({
-            "type": "function",
-            "name": name,
-            "description": format!("OpenCode built-in {name} tool"),
-            "parameters": { "type": "object", "properties": {} },
-        }));
+        append_fingerprint_tool(tools, name, true);
     }
 }
 
@@ -418,9 +416,9 @@ impl OpenCodeZenExecutor {
     }
 
     /// `transformRequest` responses branch — same shape as the opencode-go
-    /// lane (opencode-zen.js:296-322 ≈ opencode-go.js:158-185).
-    fn transform_responses_body(model: &str, body: &mut Value) {
-        super::strip_unsupported::strip_unsupported_params("opencode-zen", model, body);
+    /// lane (opencode-zen.js:296-322 ≈ opencode-go.js:158-185). Runs AFTER
+    /// `super.transformRequest` (param strip + reasoning inject) upstream.
+    fn transform_responses_body(body: &mut Value) {
         let Some(obj) = body.as_object_mut() else {
             return;
         };
@@ -466,9 +464,16 @@ impl OpenCodeZenExecutor {
         }
         obj.insert("stream".to_string(), Value::Bool(true));
         obj.insert("store".to_string(), Value::Bool(false));
+        // Upstream order: fingerprint quartet first (flat Responses shape),
+        // then tool normalization and item sanitation.
+        {
+            let tools = ensure_tools_array(obj);
+            for name in FINGERPRINT_TOOLS {
+                append_fingerprint_tool(tools, name, true);
+            }
+        }
         super::opencode::normalize_responses_tools(obj);
         super::opencode::sanitize_responses_items(obj);
-        ensure_responses_fingerprint_tools(body);
     }
 
     /// `prepareRequestCredentials` + `buildHeaders` session resolution:
@@ -605,6 +610,19 @@ impl OpenCodeZenExecutor {
 
         normalize_developer_role(&mut request.body);
 
+        // `super.transformRequest` (default.js:98-107) runs first upstream:
+        // unsupported-param strip, then reasoning-content injection.
+        super::strip_unsupported::strip_unsupported_params(
+            "opencode-zen",
+            &effective_model,
+            &mut request.body,
+        );
+        crate::core::utils::reasoning_content_injector::inject_reasoning_content(
+            "opencode-zen",
+            &effective_model,
+            &mut request.body,
+        );
+
         // `transformRequest` (opencode-zen.js:324-330): stream forced true
         // on every lane, then the fingerprint tools.
         if let Some(obj) = request.body.as_object_mut() {
@@ -612,7 +630,7 @@ impl OpenCodeZenExecutor {
         }
 
         if responses_lane {
-            Self::transform_responses_body(&effective_model, &mut request.body);
+            Self::transform_responses_body(&mut request.body);
         } else {
             // Chat lane fingerprint quartet. Applied only to the
             // chat-completions shape — the /messages leg carries Claude
@@ -626,12 +644,6 @@ impl OpenCodeZenExecutor {
                 ensure_chat_fingerprint_tools(&mut request.body);
             }
         }
-
-        crate::core::utils::reasoning_content_injector::inject_reasoning_content(
-            "opencode-zen",
-            &effective_model,
-            &mut request.body,
-        );
 
         let url = Self::build_url(&request.credentials, &effective_model);
         let header_map: std::collections::HashMap<String, String> = request

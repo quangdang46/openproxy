@@ -37,7 +37,7 @@ pub struct PingSchedule {
     pub slots_per_day: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PingSlot {
     /// `"YYYY-MM-DD#<index>"` in the schedule timezone — stable dedup key.
     pub key: String,
