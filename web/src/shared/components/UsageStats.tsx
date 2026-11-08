@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from "react";
 import { FREE_PROVIDERS } from "@/shared/constants/providers";
 import Badge from "./Badge";
 import Card from "./Card";
@@ -9,6 +9,11 @@ import UsageTable, { fmt, fmtTime } from "@/components/usage/UsageTable";
 import UsageChart from "@/components/usage/UsageChart";
 import ProviderTopology from "@/components/usage/ProviderTopologyWrapper";
 import React from "react";
+
+// Recharts is heavy — lazy-load the breakdown charts the same way
+// UsageChart.tsx lazy-loads UsageChartInner.
+const ProviderBarChart = lazy(() => import("@/components/usage/ProviderBarChart"));
+const TopModelsChart = lazy(() => import("@/components/usage/TopModelsChart"));
 
 // The slice of Next's router the usage page actually needs: rewriting the
 // current query string in place, without a history entry.
@@ -213,10 +218,12 @@ const TABLE_OPTIONS = [
 ];
 
 const PERIODS = [
+  { value: "today", label: "Today" },
   { value: "24h", label: "24h" },
   { value: "7d", label: "7D" },
   { value: "30d", label: "30D" },
   { value: "60d", label: "60D" },
+  { value: "all", label: "All" },
 ];
 
 // Astro has no useSearchParams, so the query string is read directly.
@@ -498,6 +505,18 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
       {/* Token / Cost chart - sync period */}
       {loading ? spinner : <UsageChart period={period} />}
+
+      {/* Provider and model breakdown charts (9router UsageStats.js:491-496) */}
+      {!loading && (stats?.byProvider || stats?.byModel) && (
+        <div className="grid min-w-0 grid-cols-1 gap-2 lg:grid-cols-2">
+          <Suspense fallback={spinner}>
+            <ProviderBarChart byProvider={stats?.byProvider} />
+          </Suspense>
+          <Suspense fallback={spinner}>
+            <TopModelsChart byModel={stats?.byModel} />
+          </Suspense>
+        </div>
+      )}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">

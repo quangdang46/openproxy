@@ -456,7 +456,7 @@ mod tests {
         for (name, flags) in entries {
             let mut msg = pb_field(AVAILABLE_MODEL_NAME_FIELD, name.as_bytes());
             for (field, value) in *flags {
-                msg.extend(pb_varint_field(field, value));
+                msg.extend(pb_varint_field(*field, *value));
             }
             out.extend(pb_field(RESPONSE_AVAILABLE_MODELS_FIELD, &msg));
         }

@@ -1346,6 +1346,7 @@ struct UsageChartBucket {
     label: String,
     tokens: u64,
     cost: f64,
+    requests: u64,
 }
 
 async fn get_usage_chart(
@@ -1360,7 +1361,7 @@ async fn get_usage_chart(
     // 9router chart/route.js:9 — an omitted period is a week of daily buckets,
     // not today's hourly ones.
     let period = params.period.as_deref().unwrap_or("7d");
-    if !matches!(period, "today" | "24h" | "7d" | "30d" | "60d") {
+    if !matches!(period, "today" | "24h" | "7d" | "30d" | "60d" | "all") {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Invalid period" })),
@@ -1393,6 +1394,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
                     label: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
+                    requests: 0,
                 }
             })
             .collect::<Vec<_>>();
@@ -1409,6 +1411,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             let index = (delta_ms / bucket_ms).clamp(0, (bucket_count - 1) as i64) as usize;
             buckets[index].tokens += usage_prompt_tokens(entry) + usage_completion_tokens(entry);
             buckets[index].cost += entry.cost.unwrap_or(0.0);
+            buckets[index].requests += 1;
         }
 
         return buckets;
@@ -1427,6 +1430,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
                     label: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
+                    requests: 0,
                 }
             })
             .collect::<Vec<_>>();
@@ -1443,9 +1447,39 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             let index = (delta_ms / bucket_ms).clamp(0, (bucket_count - 1) as i64) as usize;
             buckets[index].tokens += usage_prompt_tokens(entry) + usage_completion_tokens(entry);
             buckets[index].cost += entry.cost.unwrap_or(0.0);
+            buckets[index].requests += 1;
         }
 
         return buckets;
+    }
+
+    // 9router usageRepo.js getChartData("all"): one daily bucket per day from
+    // the earliest recorded day through today, zeros included.
+    if period == "all" {
+        let today = Utc::now().date_naive();
+        let Some(earliest_key) = usage_db.daily_summary.keys().next() else {
+            return Vec::new();
+        };
+        let Ok(earliest) = NaiveDate::parse_from_str(earliest_key, "%Y-%m-%d") else {
+            return Vec::new();
+        };
+        let day_count = (today - earliest).num_days().max(0) + 1;
+
+        return (0..day_count)
+            .map(|index| {
+                let date = earliest + ChronoDuration::days(index);
+                let date_key = date.format("%Y-%m-%d").to_string();
+                let summary = usage_db.daily_summary.get(&date_key);
+                UsageChartBucket {
+                    label: format_daily_chart_label(date),
+                    tokens: summary
+                        .map(|day| day.prompt_tokens + day.completion_tokens)
+                        .unwrap_or(0),
+                    cost: summary.map(|day| day.cost).unwrap_or(0.0),
+                    requests: summary.map(|day| day.requests).unwrap_or(0),
+                }
+            })
+            .collect();
     }
 
     let bucket_count = match period {
@@ -1468,6 +1502,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
                     .map(|day| day.prompt_tokens + day.completion_tokens)
                     .unwrap_or(0),
                 cost: summary.map(|day| day.cost).unwrap_or(0.0),
+                requests: summary.map(|day| day.requests).unwrap_or(0),
             }
         })
         .collect()
@@ -1968,10 +2003,11 @@ mod tests {
             label: "Jan 15".to_string(),
             tokens: 7500,
             cost: 1.50,
+            requests: 3,
         };
         let json = serde_json::to_string(&point).unwrap();
         assert_eq!(
-            json, r#"{"label":"Jan 15","tokens":7500,"cost":1.5}"#,
+            json, r#"{"label":"Jan 15","tokens":7500,"cost":1.5,"requests":3}"#,
             "9router's bucket key is `label`; the dashboard's dataKey depends on it"
         );
     }

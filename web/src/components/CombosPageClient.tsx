@@ -79,6 +79,19 @@ export default function CombosPage() {
   const [comboStrategiesLoaded, setComboStrategiesLoaded] = useState<boolean>(false);
   const [deleteTarget, setDeleteTarget] = useState<Combo | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
+  // Bulk selection + search (9router combos/page.js parity).
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [presetLoading, setPresetLoading] = useState<"cursor" | "claude" | null>(null);
+  const [presetConfirm, setPresetConfirm] = useState<{
+    source: "cursor" | "claude";
+    toCreate: number;
+    toSkip: number;
+    total: number;
+  } | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState<boolean>(false);
+  const [bulkDeleteLoading, setBulkDeleteLoading] = useState<boolean>(false);
   const notify = useNotificationStore();
   const { copied, copy } = useCopyToClipboard();
   const { getCaps } = useModelCaps();
@@ -101,6 +114,12 @@ export default function CombosPage() {
   useEffect(() => {
     fetchData();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drop stale selection when the combo list changes (delete / refresh).
+  useEffect(() => {
+    const alive = new Set(combos.map((c) => c.id));
+    setSelectedIds((prev) => prev.filter((id) => alive.has(id)));
+  }, [combos]);
 
   const fetchData = async () => {
     try {
@@ -216,7 +235,9 @@ export default function CombosPage() {
     try {
       const res = await fetch(`/api/combos/${deleteTarget.id}`, { method: "DELETE" });
       if (res.ok) {
+        await pruneStrategiesForNames([deleteTarget.name]);
         setCombos(combos.filter(c => c.id !== deleteTarget.id));
+        setSelectedIds((prev) => prev.filter((x) => x !== deleteTarget.id));
         notify.success(`Combo "${deleteTarget.name}" deleted`);
       } else {
         notify.error("Failed to delete combo");
@@ -264,6 +285,179 @@ export default function CombosPage() {
     }
   };
 
+  // ── Bulk selection / search (9router combos/page.js:81-122) ──
+  const selectedCombos = combos.filter((c) => selectedIds.includes(c.id));
+  const someSelected = selectedIds.length > 0;
+
+  // Case-insensitive search over the combo name and its model ids.
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredCombos = normalizedQuery
+    ? combos.filter((c) => {
+        if (String(c.name || "").toLowerCase().includes(normalizedQuery)) return true;
+        return (c.models || []).some((m: string) => String(m).toLowerCase().includes(normalizedQuery));
+      })
+    : combos;
+
+  // Select-all follows the search: with a query active it must only reach the
+  // rows on screen, otherwise bulk Delete would take out hidden combos.
+  const allSelected =
+    filteredCombos.length > 0 && filteredCombos.every((c) => selectedIds.includes(c.id));
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds(allSelected ? [] : filteredCombos.map((c) => c.id));
+  };
+
+  const clearSelection = () => setSelectedIds([]);
+
+  // ── Combo presets (9router /api/combos/presets + Cursor/Claude Default) ──
+  const handleGeneratePresets = async (source: "cursor" | "claude") => {
+    const label = source === "cursor" ? "Cursor Default" : "Claude Default";
+    setPresetLoading(source);
+    try {
+      const previewRes = await fetch(`/api/combos/presets?source=${source}`);
+      const preview = await previewRes.json();
+      if (!previewRes.ok) {
+        notify.error(preview.error || `Failed to preview ${label}`);
+        return;
+      }
+
+      const items: { name: string; exists: boolean }[] = preview.items || [];
+      const toCreate =
+        preview.toCreate ?? items.filter((i) => !i.exists).length;
+      const toSkip = preview.toSkip ?? items.filter((i) => i.exists).length;
+      const total = items.length;
+
+      if (total === 0) {
+        notify.info(`No ${label} models available to generate.`);
+        return;
+      }
+      if (toCreate === 0) {
+        notify.info(`All ${total} ${label} combos already exist. Nothing to create.`);
+        return;
+      }
+
+      setPresetConfirm({ source, toCreate, toSkip, total });
+    } catch (error) {
+      console.log(`Error previewing ${label}:`, error);
+      notify.error(`Failed to preview ${label}`);
+    } finally {
+      setPresetLoading(null);
+    }
+  };
+
+  const confirmGeneratePresets = async () => {
+    if (!presetConfirm) return;
+    const { source, toCreate, toSkip } = presetConfirm;
+    const label = source === "cursor" ? "Cursor Default" : "Claude Default";
+    try {
+      const res = await fetch("/api/combos/presets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || `Failed to generate ${label}`);
+        return;
+      }
+      notify.success(
+        `Created ${data.createdCount ?? toCreate} ${label} combo${(data.createdCount ?? toCreate) === 1 ? "" : "s"}` +
+          (toSkip > 0 ? ` (${toSkip} already existed)` : ""),
+      );
+      await fetchData();
+      setPresetConfirm(null);
+    } catch (error) {
+      console.log(`Error generating ${label}:`, error);
+      notify.error(`Failed to generate ${label}`);
+    }
+  };
+
+  // Drop per-combo strategy entries for deleted names so settings stay clean.
+  const pruneStrategiesForNames = async (names: string[]) => {
+    if (!comboStrategiesLoaded || names.length === 0) return;
+    const updated = { ...comboStrategies };
+    for (const name of names) delete updated[name];
+    try {
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comboStrategies: updated }),
+      });
+      setComboStrategies(updated);
+    } catch (error) {
+      console.log("Error pruning combo strategies:", error);
+    }
+  };
+
+  const confirmBulkDelete = async () => {
+    if (selectedCombos.length === 0) return;
+    setBulkDeleteLoading(true);
+    try {
+      const ids = selectedCombos.map((c) => c.id);
+      const names = selectedCombos.map((c) => c.name);
+      const results = await Promise.all(
+        ids.map((id) => fetch(`/api/combos/${id}`, { method: "DELETE" })),
+      );
+      const failed = results.filter((r) => !r.ok).length;
+      await pruneStrategiesForNames(names);
+      setCombos((prev) => prev.filter((c) => !ids.includes(c.id)));
+      clearSelection();
+      setBulkDeleteOpen(false);
+      if (failed > 0) {
+        notify.error(`Deleted with ${failed} failure${failed === 1 ? "" : "s"}.`);
+      } else {
+        notify.success(`Deleted ${ids.length} combo${ids.length === 1 ? "" : "s"}`);
+      }
+    } catch (error) {
+      console.log("Error bulk deleting combos:", error);
+      notify.error("Failed to delete selected combos");
+    } finally {
+      setBulkDeleteLoading(false);
+    }
+  };
+
+  const handleBulkSetStrategy = async (strategy: string) => {
+    if (selectedCombos.length === 0 || !strategy) return;
+    if (!comboStrategiesLoaded) {
+      console.warn("Refusing to write comboStrategies: settings were never loaded");
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const updated = { ...comboStrategies };
+      for (const combo of selectedCombos) {
+        if (strategy === "fallback") {
+          delete updated[combo.name];
+        } else {
+          updated[combo.name] = {
+            ...normalizeStrategy(updated[combo.name]),
+            fallbackStrategy: strategy,
+          };
+        }
+      }
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comboStrategies: updated }),
+      });
+      setComboStrategies(updated);
+      notify.success(
+        `Strategy updated for ${selectedCombos.length} combo${selectedCombos.length === 1 ? "" : "s"}`,
+      );
+    } catch (error) {
+      console.log("Error bulk updating combo strategy:", error);
+      notify.error("Failed to update strategy for selected combos");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-col gap-6">
@@ -298,9 +492,58 @@ export default function CombosPage() {
             </li>
           </ul>
         </div>
-        <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
-          Create Combo
-        </Button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:items-stretch">
+          <div className="relative w-full sm:w-64">
+            <span className="material-symbols-outlined pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-text-muted">
+              search
+            </span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search combos…"
+              aria-label="Search combos"
+              className="w-full rounded-[10px] border border-transparent bg-surface-2 py-2 pl-10 pr-9 text-sm text-text-main transition-all duration-150 ease-out placeholder-text-muted/70 focus:border-brand-500/40 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-text-muted transition-colors hover:text-text-main"
+              >
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            )}
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
+              Create Combo
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="edit_note"
+              loading={presetLoading === "cursor"}
+              disabled={!!presetLoading}
+              onClick={() => handleGeneratePresets("cursor")}
+              className="w-full sm:w-auto whitespace-nowrap"
+            >
+              Cursor Default
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="smart_toy"
+              loading={presetLoading === "claude"}
+              disabled={!!presetLoading}
+              onClick={() => handleGeneratePresets("claude")}
+              className="w-full sm:w-auto whitespace-nowrap"
+            >
+              Claude Default
+            </Button>
+          </div>
+        </div>
       </div>
 
       {/* Combos List */}
@@ -318,22 +561,106 @@ export default function CombosPage() {
           </div>
         </Card>
       ) : (
-        <div className="flex flex-col gap-4">
-          {combos.map((combo) => (
-            <ComboCard
-              key={combo.id}
-              combo={combo}
-              activeProviders={activeProviders}
-              copied={copied}
-              onCopy={copy}
-              onEdit={() => setEditingCombo(combo)}
-              onDelete={() => handleDelete(combo)}
-              onReorder={(from, to) => handleReorderModels(combo, from, to)}
-              strategy={normalizeStrategy(comboStrategies[combo.name])}
-              onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
-              getCaps={getCaps}
-            />
-          ))}
+        <div className="flex flex-col gap-3">
+          {/* Selection toolbar */}
+          <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-black/5 bg-black/[0.015] px-3 py-2 dark:border-white/5 dark:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between">
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-text-muted hover:text-primary select-none">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                ref={(el) => {
+                  if (el) el.indeterminate = someSelected && !allSelected;
+                }}
+                onChange={toggleSelectAll}
+                className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary"
+              />
+              <span>
+                {someSelected
+                  ? `${selectedIds.length} selected`
+                  : `Select all (${filteredCombos.length})`}
+              </span>
+            </label>
+
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {normalizedQuery && (
+                <span className="text-xs text-text-muted">
+                  {filteredCombos.length} of {combos.length} shown
+                </span>
+              )}
+              {someSelected && (
+                <>
+                  <div className="w-full min-w-[160px] sm:w-[200px]">
+                    <Select
+                      options={STRATEGY_OPTIONS}
+                      value=""
+                      placeholder="Set strategy…"
+                      disabled={bulkBusy}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v) handleBulkSetStrategy(v);
+                      }}
+                      selectClassName="py-1.5 text-xs"
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    icon="delete"
+                    disabled={bulkBusy}
+                    loading={bulkBusy}
+                    onClick={() => setBulkDeleteOpen(true)}
+                    className="whitespace-nowrap"
+                  >
+                    Delete ({selectedIds.length})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={clearSelection}
+                    disabled={bulkBusy}
+                  >
+                    Clear
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {filteredCombos.length === 0 ? (
+            <Card>
+              <div className="text-center py-10">
+                <p className="text-text-main font-medium mb-1">
+                  No combos match &ldquo;{searchQuery.trim()}&rdquo;
+                </p>
+                <p className="text-sm text-text-muted mb-4">
+                  Try a shorter query, or clear the search to see all {combos.length} combos.
+                </p>
+                <Button variant="secondary" onClick={() => setSearchQuery("")}>
+                  Clear search
+                </Button>
+              </div>
+            </Card>
+          ) : (
+            <div className="flex flex-col gap-4">
+              {filteredCombos.map((combo) => (
+                <ComboCard
+                  key={combo.id}
+                  combo={combo}
+                  activeProviders={activeProviders}
+                  copied={copied}
+                  onCopy={copy}
+                  onEdit={() => setEditingCombo(combo)}
+                  onDelete={() => handleDelete(combo)}
+                  onReorder={(from, to) => handleReorderModels(combo, from, to)}
+                  strategy={normalizeStrategy(comboStrategies[combo.name])}
+                  onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
+                  getCaps={getCaps}
+                  selected={selectedIds.includes(combo.id)}
+                  onToggleSelect={() => toggleSelect(combo.id)}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -378,6 +705,42 @@ export default function CombosPage() {
         variant="danger"
         loading={deleting}
       />
+
+      {/* Bulk delete selected combos */}
+      <ConfirmModal
+        isOpen={bulkDeleteOpen}
+        onClose={() => !bulkDeleteLoading && setBulkDeleteOpen(false)}
+        onConfirm={confirmBulkDelete}
+        title="Delete Selected Combos"
+        message={
+          <>
+            Delete {selectedCombos.length} selected combo{selectedCombos.length === 1 ? "" : "s"}? This cannot be undone.
+          </>
+        }
+        confirmText="Delete"
+        variant="danger"
+        loading={bulkDeleteLoading}
+      />
+
+      {/* Generate Cursor/Claude default presets */}
+      <ConfirmModal
+        isOpen={!!presetConfirm}
+        onClose={() => setPresetConfirm(null)}
+        onConfirm={confirmGeneratePresets}
+        title={presetConfirm ? `Generate ${presetConfirm.source === "cursor" ? "Cursor Default" : "Claude Default"}` : "Confirm"}
+        message={
+          presetConfirm ? (
+            <>
+              Create {presetConfirm.toCreate} combo{presetConfirm.toCreate === 1 ? "" : "s"} named like{" "}
+              {presetConfirm.source === "cursor" ? "Cursor" : "Claude"} model IDs (seeded with{" "}
+              <code>cu/…</code> or <code>cc/…</code>). {presetConfirm.toSkip} already exist
+              and will be skipped. You can edit any combo afterward to add fallbacks.
+            </>
+          ) : null
+        }
+        confirmText="Generate"
+        variant="primary"
+      />
     </div>
   );
 }
@@ -393,6 +756,8 @@ interface ComboCardProps {
   strategy: ComboStrategyConfig;
   onSetStrategy: (patch: Partial<ComboStrategyConfig>) => void;
   getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }
 
 function ComboCard({
@@ -406,6 +771,8 @@ function ComboCard({
   strategy,
   onSetStrategy,
   getCaps,
+  selected = false,
+  onToggleSelect,
 }: ComboCardProps) {
   const [health, setHealth] = useState<ComboHealthEntry[]>([]);
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
@@ -441,9 +808,21 @@ function ComboCard({
   const quarantined = health;
 
   return (
-    <Card padding="sm" className="group">
+    <Card padding="sm" className={`group ${selected ? "ring-1 ring-primary/40 bg-primary/[0.03]" : ""}`}>
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3 sm:items-center">
+          {onToggleSelect && (
+            <label className="flex shrink-0 items-center pt-1 sm:pt-0 cursor-pointer" title="Select combo">
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={onToggleSelect}
+                onClick={(e) => e.stopPropagation()}
+                className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                aria-label={`Select ${combo.name}`}
+              />
+            </label>
+          )}
           <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
             <span className="material-symbols-outlined text-primary text-[18px]">layers</span>
           </div>

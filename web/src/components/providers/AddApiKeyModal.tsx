@@ -84,7 +84,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     : `prod|sk-aaa...\nstaging|sk-bbb...\nsk-ccc...`;
   const [mode, setMode] = useState<"single" | "bulk">("single");
   const [bulkText, setBulkText] = useState<string>("");
-  const [bulkResult, setBulkResult] = useState<{ success: number; failed: number } | null>(null);
+  const [bulkResult, setBulkResult] = useState<{ success: number; failed: number; error?: string } | null>(null);
 
   const handleBulkSubmit = async (): Promise<void> => {
     if (!provider) return;
@@ -99,6 +99,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     setBulkResult(null);
     let success = 0;
     let failed = 0;
+    let firstError: string | undefined;
     // POST directly: onSave from the parent closes the modal on success which
     // would interrupt the loop. The parent should refresh on onClose.
     for (const entry of plan) {
@@ -130,14 +131,25 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             ...(entry.providerSpecificData ? { providerSpecificData: entry.providerSpecificData } : {}),
           }),
         });
-        if (res.ok) success++;
-        else failed++;
+        if (res.ok) {
+          success++;
+        } else {
+          failed++;
+          // Surface the server's reason (e.g. a 409 PROVIDER_NAME_CONFLICT)
+          // once, so a refused overwrite is not just a silent "failed".
+          if (!firstError) {
+            const data = await res.json().catch(() => ({}));
+            firstError =
+              (data as { error?: string }).error ||
+              `Failed to add ${entry.name} (${res.status})`;
+          }
+        }
       } catch {
         failed++;
       }
     }
     setSaving(false);
-    setBulkResult({ success, failed });
+    setBulkResult({ success, failed, error: firstError });
     if (success > 0 && onBulkDone) onBulkDone();
   };
 
@@ -275,6 +287,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
                 ✓ {bulkResult.success} added
                 {bulkResult.failed > 0 ? `, ✗ ${bulkResult.failed} failed` : ""}
               </div>
+            )}
+            {bulkResult?.error && (
+              <p className="text-xs text-red-500 break-words">{bulkResult.error}</p>
             )}
             <div className="flex gap-2">
               <Button onClick={() => void handleBulkSubmit()} fullWidth disabled={saving || !bulkText.trim()}>

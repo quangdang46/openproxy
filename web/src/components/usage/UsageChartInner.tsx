@@ -20,6 +20,7 @@ interface UsageChartInnerProps {
 interface ChartDataPoint {
   label: string;
   tokens?: number;
+  requests?: number;
   cost?: number;
 }
 
@@ -29,12 +30,27 @@ const fmtTokens = (n: number) => {
   return String(n || 0);
 };
 
+const fmtRequests = (n: number) => String(n || 0);
+
 const fmtCost = (n: number) => `$${(n || 0).toFixed(4)}`;
+
+type ViewMode = "tokens" | "requests" | "cost";
+
+// Mirrors 9router UsageChart.js VIEW_CONFIG — each mode picks its own bucket
+// field, color, and formatter.
+const VIEW_CONFIG: Record<
+  ViewMode,
+  { dataKey: "tokens" | "requests" | "cost"; color: string; formatter: (n: number) => string }
+> = {
+  tokens: { dataKey: "tokens", color: "#6366f1", formatter: fmtTokens },
+  requests: { dataKey: "requests", color: "#14b8a6", formatter: fmtRequests },
+  cost: { dataKey: "cost", color: "#f59e0b", formatter: fmtCost },
+};
 
 export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps) {
   const [data, setData] = useState<ChartDataPoint[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [viewMode, setViewMode] = useState<"tokens" | "cost">("tokens");
+  const [viewMode, setViewMode] = useState<ViewMode>("tokens");
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -57,9 +73,10 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
     fetchData();
   }, [fetchData]);
 
+  const cfg = VIEW_CONFIG[viewMode];
   // A period can legitimately return buckets that are all zero; drawing an empty
   // axis there reads as a broken chart, so show the empty state instead.
-  const hasData = data.some((d) => (d.tokens ?? 0) > 0 || (d.cost ?? 0) > 0);
+  const hasData = data.some((d) => (d[cfg.dataKey] ?? 0) > 0);
 
   if (loading) {
     return (
@@ -95,6 +112,14 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
             Tokens
           </button>
           <button
+            onClick={() => setViewMode("requests")}
+            className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+              viewMode === "requests" ? "bg-primary text-white" : "bg-bg-subtle text-text-muted hover:text-text"
+            }`}
+          >
+            Requests
+          </button>
+          <button
             onClick={() => setViewMode("cost")}
             className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
               viewMode === "cost" ? "bg-primary text-white" : "bg-bg-subtle text-text-muted hover:text-text"
@@ -116,17 +141,17 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
           <YAxis
             tick={{ fill: "#888", fontSize: 12 }}
             stroke="#888"
-            tickFormatter={viewMode === "tokens" ? fmtTokens : fmtCost}
+            tickFormatter={cfg.formatter}
           />
           <Tooltip
-            formatter={(value: number) => (viewMode === "tokens" ? fmtTokens(value) : fmtCost(value))}
+            formatter={(value: number) => [cfg.formatter(value), viewMode === "tokens" ? "Tokens" : viewMode === "requests" ? "Requests" : "Cost"]}
           />
           <Legend />
           <Area
             type="monotone"
-            dataKey={viewMode === "tokens" ? "tokens" : "cost"}
-            stroke="#f97815"
-            fill="#f97815"
+            dataKey={cfg.dataKey}
+            stroke={cfg.color}
+            fill={cfg.color}
             fillOpacity={0.3}
           />
         </AreaChart>

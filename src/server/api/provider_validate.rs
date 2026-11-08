@@ -267,7 +267,7 @@ async fn validate_provider(
         "nscale" => validate_bearer(&client, "https://inference.api.nscale.com/v1/models", &api_key).await,
         "baseten" => validate_bearer(&client, "https://inference.baseten.co/v1/models", &api_key).await,
         "publicai" => validate_bearer(&client, "https://api.publicai.co/v1/models", &api_key).await,
-        "nous" | "nous-research" => validate_nous(client, &api_key).await,
+        "nous" | "nous-research" => validate_nous(&client, &api_key).await,
         "glhf" => validate_bearer(&client, "https://glhf.chat/api/openai/v1/models", &api_key).await,
         "uncloseai" => (true, None),
         "enally" => {

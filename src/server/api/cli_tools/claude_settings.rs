@@ -204,14 +204,20 @@ async fn read_settings() -> AnyhowResult<Option<Value>> {
 }
 
 async fn write_claude_settings(env_values: Map<String, Value>) -> AnyhowResult<()> {
-    let settings_path = claude_settings_path();
+    write_claude_settings_at(&claude_settings_path(), env_values).await
+}
+
+async fn write_claude_settings_at(
+    settings_path: &Path,
+    mut env_values: Map<String, Value>,
+) -> AnyhowResult<()> {
     let claude_dir = settings_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home_dir().join(".claude"));
     fs::create_dir_all(&claude_dir).await?;
 
-    let mut current_settings = match read_json_optional(&settings_path).await? {
+    let mut current_settings = match read_json_optional(settings_path).await? {
         Some(Value::Object(fields)) => fields,
         _ => Map::new(),
     };
@@ -223,6 +229,19 @@ async fn write_claude_settings(env_values: Map<String, Value>) -> AnyhowResult<(
             _ => None,
         })
         .unwrap_or_default();
+
+    // Keep an existing token (real key or earlier config); only add when
+    // absent — Reset clears it. 9router claude-settings/route.js:154-156
+    // deletes the incoming ANTHROPIC_AUTH_TOKEN whenever the settings file
+    // already carries one, so an apply can never clobber a real key with a
+    // placeholder. JS truthiness: "", null, false and 0 do not count.
+    if merged_env
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .is_some_and(json_truthy)
+    {
+        env_values.remove("ANTHROPIC_AUTH_TOKEN");
+    }
+
     merged_env.extend(env_values);
 
     current_settings.insert("hasCompletedOnboarding".to_string(), Value::Bool(true));
@@ -298,4 +317,116 @@ fn home_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// JavaScript truthiness for the JSON values `settings.json` can hold —
+/// `""`, `null`, `false` and `0` are falsy, everything else is truthy.
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn env_map(entries: &[(&str, &str)]) -> Map<String, Value> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
+            .collect()
+    }
+
+    async fn read_env(path: &Path) -> Map<String, Value> {
+        let content = fs::read_to_string(path).await.unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        match value.get("env") {
+            Some(Value::Object(fields)) => fields.clone(),
+            _ => Map::new(),
+        }
+    }
+
+    /// 9router claude-settings/route.js:154 — apply must not clobber a token
+    /// the settings file already carries; the incoming one is dropped and the
+    /// stored key survives the merge.
+    #[tokio::test]
+    async fn apply_preserves_an_existing_auth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(
+            &path,
+            &json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "sk-real", "ANTHROPIC_BASE_URL": "http://old/v1" } }),
+        )
+        .await
+        .unwrap();
+
+        write_claude_settings_at(
+            &path,
+            env_map(&[
+                ("ANTHROPIC_AUTH_TOKEN", "sk-placeholder"),
+                ("ANTHROPIC_BASE_URL", "http://new"),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        let env = read_env(&path).await;
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+            Some("sk-real"),
+            "the stored token must win over the incoming one"
+        );
+        // Base-url "/v1" normalization runs in `save_claude_settings` before
+        // this write, so the raw value is what lands here.
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+            Some("http://new"),
+            "unrelated keys still merge"
+        );
+    }
+
+    /// With no stored token the incoming one is written — apply is also how a
+    /// fresh key gets configured.
+    #[tokio::test]
+    async fn apply_writes_a_token_when_none_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        write_claude_settings_at(&path, env_map(&[("ANTHROPIC_AUTH_TOKEN", "sk-new")]))
+            .await
+            .unwrap();
+
+        let env = read_env(&path).await;
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+            Some("sk-new")
+        );
+    }
+
+    /// A stored empty string is falsy in JS, so it does not block the
+    /// incoming token — same as upstream's `if (currentSettings.env?.X)`.
+    #[tokio::test]
+    async fn apply_replaces_a_falsy_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(&path, &json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "" } }))
+            .await
+            .unwrap();
+
+        write_claude_settings_at(&path, env_map(&[("ANTHROPIC_AUTH_TOKEN", "sk-new")]))
+            .await
+            .unwrap();
+
+        let env = read_env(&path).await;
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+            Some("sk-new")
+        );
+    }
 }

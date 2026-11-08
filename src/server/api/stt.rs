@@ -613,6 +613,7 @@ fn is_rate_limited(connection: &ProviderConnection, now: DateTime<Utc>) -> bool 
 // Per-format transcription implementations.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum DispatchResult {
     Ok(Response),
     Err { status: StatusCode, message: String },
@@ -1408,6 +1409,8 @@ async fn codex_convert_inner(
         })?;
     }
 
+    // Upstream: `-t String(MAX_AUDIO_SECONDS + 0.01)` → "120.01".
+    let max_seconds = format!("{:.2}", CODEX_STT_MAX_AUDIO_SECONDS as f64 + 0.01);
     let mut child = match tokio::process::Command::new("ffmpeg")
         .args([
             "-nostdin",
@@ -1423,12 +1426,9 @@ async fn codex_convert_inner(
             "-i",
         ])
         .arg(&input)
+        .args(["-map", "0:a:0", "-vn", "-t"])
+        .arg(&max_seconds)
         .args([
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-t",
-            &format!("{:.2}", CODEX_STT_MAX_AUDIO_SECONDS as f64 + 0.01),
             "-threads",
             "1",
             "-ac",

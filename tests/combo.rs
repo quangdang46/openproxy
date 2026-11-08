@@ -115,6 +115,7 @@ async fn combo_strategy_stops_after_first_success() {
                         message: "temporary failure".into(),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     }),
                     "b" => Ok("ok"),
                     _ => Err(ComboAttemptError {
@@ -122,6 +123,7 @@ async fn combo_strategy_stops_after_first_success() {
                         message: "should not reach".into(),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     }),
                 }
             }
@@ -186,6 +188,7 @@ async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
                     status: 401,
                     message: "no credentials".into(),
                     retry_after: Some(retry_after),
+                    upstream_headers: Vec::new(),
                     // 9router combo.js:319 reads `retryAfter` out of the
                     // member's JSON body, not off a Retry-After header.
                     upstream_body: Some(
@@ -276,6 +279,7 @@ async fn round_robin_attempts_every_member_when_all_are_busy() {
                     message: "All accounts are cooling down".into(),
                     retry_after: None,
                     upstream_body: None,
+                    upstream_headers: Vec::new(),
                 })
             }
         },

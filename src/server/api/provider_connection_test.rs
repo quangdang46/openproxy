@@ -1605,7 +1605,13 @@ async fn refresh_oauth_token(
             // Shared refresh path also re-mints the short-lived inference
             // agent key; it does not take the test proxy (same as
             // dispatch_oauth_refresh used by the chat retry path).
-            crate::oauth::token_refresh::refresh_nous_token(refresh_token).await
+            crate::oauth::token_refresh::refresh_nous_token(refresh_token)
+                .await
+                .map(|r| RefreshResult {
+                    access_token: r.access_token,
+                    refresh_token: r.refresh_token,
+                    expires_in: r.expires_in,
+                })
         }
         _ => Err("Provider refresh not supported".to_string()),
     }

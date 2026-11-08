@@ -425,8 +425,16 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
   const handleSaveApiKey = async (formData: { name: string; apiKey: string; priority: number; proxyPoolId?: string | null; testStatus: string }) => {
     try {
       const res = await fetch("/api/providers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: providerId, ...formData }) });
-      if (res.ok) { await fetch_(); setShowAddModal(false); }
-    } catch (e) { console.log("save apikey error:", e); }
+      if (res.ok) { await fetch_(); setShowAddModal(false); return; }
+      // 9router parity (#4311): a duplicate connection name is a 409
+      // PROVIDER_NAME_CONFLICT, not a silent key overwrite — surface the
+      // server's message (it names the colliding connection and the
+      // allowOverwrite opt-in) instead of failing quietly.
+      const data = await res.json().catch(() => ({}));
+      notify.error(
+        (data as { error?: string }).error || `Failed to save connection (${res.status})`,
+      );
+    } catch (e) { console.log("save apikey error:", e); notify.error("Failed to save connection"); }
   };
 
   const handleUpdateConnection = async (formData: Record<string, any>) => {

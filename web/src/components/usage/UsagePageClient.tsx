@@ -12,6 +12,7 @@ const PERIODS = [
   { value: "7d", label: "7D" },
   { value: "30d", label: "30D" },
   { value: "60d", label: "60D" },
+  { value: "all", label: "All" },
 ];
 
 // 9router's `?tab=` contract is exactly these three (page.js:31-33); a link

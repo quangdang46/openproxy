@@ -3,7 +3,7 @@
 //! 9router parity: `src/lib/oauth/providers/nous.js` +
 //! `open-sse/services/nous.js`.
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use crate::oauth::TokenResponse;
@@ -44,7 +44,7 @@ pub async fn mint_agent_key(access_token: &str) -> Result<Option<AgentKey>, Stri
         .header(
             AUTHORIZATION,
             format!("Bearer {access_token}")
-                .parse()
+                .parse::<HeaderValue>()
                 .map_err(|_| "invalid Nous access token".to_string())?,
         )
         .json(&json!({ "min_ttl_seconds": 7200 }))

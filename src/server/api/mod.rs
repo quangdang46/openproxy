@@ -372,6 +372,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/api/combos/test-model",
             post(provider_model_tests::test_combo_model),
         )
+        .route(
+            "/api/combos/presets",
+            get(list_combo_presets_api).post(create_combo_presets_api),
+        )
         .route("/api/proxy-pools", get(list_pools_api))
         .route("/api/proxy-pools", post(create_pool_api))
         .route("/api/proxy-pools/{id}", put(update_pool_api))
@@ -1125,6 +1129,12 @@ struct CreateProviderRequest {
     connection_no_proxy: Option<String>,
     proxy_pool_id: Option<Value>,
     base_url: Option<String>,
+    // 9router route.js:186 — a POST carrying `id` is an explicit edit and may
+    // always overwrite; otherwise the caller must opt in via `allowOverwrite`
+    // (or the legacy `overwrite` alias) or a name collision is a 409.
+    id: Option<String>,
+    allow_overwrite: Option<bool>,
+    overwrite: Option<bool>,
 }
 
 async fn create_provider_api(
@@ -1179,6 +1189,9 @@ async fn create_provider_api(
         )
             .into_response();
     }
+
+    let allow_overwrite =
+        req.id.is_some() || req.allow_overwrite == Some(true) || req.overwrite == Some(true);
 
     let (connection_proxy_enabled, connection_proxy_url, connection_no_proxy) =
         match normalize_create_provider_proxy(&req) {
@@ -1272,6 +1285,9 @@ async fn create_provider_api(
     // Filled by the closure when an existing row was collapsed onto, so the
     // response can describe the row the caller will actually keep using.
     let mut collapsed: Option<crate::types::ProviderConnection> = None;
+    // Set instead of mutating when a name collision is refused, so the
+    // handler can answer 409 without writing anything.
+    let mut conflict: Option<(String, String)> = None;
     let result = state
         .db
         .update(|db| {
@@ -1281,19 +1297,28 @@ async fn create_provider_api(
             // NOT deduped there — 'user manages duplicates manually' — so the
             // guard is scoped to apikey exactly as the reference scopes it.
             //
-            // Without this, adding a connection whose name already exists
-            // produced two rows with the same name, and the dashboard then
-            // showed an ambiguous list with no way to tell which one is live.
+            // 9router connectionsRepo.js:199-208 (#4311): the collapse only
+            // proceeds when the caller opted in — `allowOverwrite` from the
+            // POST body, or an explicit `id` edit. Without it the stored
+            // apiKey would be silently replaced, so the repo throws
+            // PROVIDER_NAME_CONFLICT and the route answers 409.
             if default_conn.auth_type == "apikey" {
                 if let Some(name) = default_conn.name.clone() {
-                    if let Some(existing) = db.provider_connections.iter_mut().find(|c| {
+                    if let Some(position) = db.provider_connections.iter().position(|c| {
                         c.provider == default_conn.provider
                             && c.auth_type == "apikey"
                             && c.name.as_deref() == Some(name.as_str())
                     }) {
+                        if !allow_overwrite {
+                            let existing = &db.provider_connections[position];
+                            conflict =
+                                Some((existing.id.clone(), existing.name.clone().unwrap_or(name)));
+                            return;
+                        }
                         // Merge into the existing row, keeping its id: the
                         // caller holds references to connections by id, so
                         // replacing the row would orphan them.
+                        let existing = &mut db.provider_connections[position];
                         existing.api_key = default_conn.api_key.clone();
                         existing.default_model = default_conn.default_model.clone();
                         existing.is_active = default_conn.is_active;
@@ -1313,6 +1338,24 @@ async fn create_provider_api(
             reorder_provider_connections(&mut db.provider_connections, &provider);
         })
         .await;
+
+    // 9router route.js:198-203 — the repo's PROVIDER_NAME_CONFLICT surfaces as
+    // a 409 carrying the row that would have been replaced, so a script can
+    // tell a refused overwrite from a validation failure.
+    if let Some((existing_id, existing_name)) = conflict {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "A connection named \"{existing_name}\" already exists for provider \"{provider}\". Pass allowOverwrite: true to replace it."
+                ),
+                "code": "PROVIDER_NAME_CONFLICT",
+                "existingId": existing_id,
+                "existingName": existing_name,
+            })),
+        )
+            .into_response();
+    }
 
     match result {
         Ok(_) => (
@@ -1792,6 +1835,274 @@ async fn delete_combo_api(
 
     match result {
         Ok(_) => Json(json!({ "success": true, "message": "Combo deleted" })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// GET/POST /api/combos/presets — Cursor / Claude "Default" combo presets.
+// Port of 9router `src/app/api/combos/presets/route.js` +
+// `src/lib/comboPresets.js`: each preset item is a combo named like the
+// client-native model id, seeded with the matching `cu/…` / `cc/…` route.
+
+/// 9router `VALID_COMBO_NAME_REGEX` (`/^[a-zA-Z0-9_.\-]+$/`).
+fn valid_combo_preset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ComboPresetItem {
+    name: String,
+    models: Vec<String>,
+    exists: bool,
+}
+
+/// 9router `pushItem` + `itemsFromProviderModels`: first occurrence wins,
+/// invalid/empty names and empty model lists are dropped.
+fn push_preset_item(
+    items: &mut Vec<(String, Vec<String>)>,
+    seen: &mut std::collections::HashSet<String>,
+    name: &str,
+    models: Vec<String>,
+) {
+    if !valid_combo_preset_name(name) || models.is_empty() || !seen.insert(name.to_string()) {
+        return;
+    }
+    items.push((name.to_string(), models));
+}
+
+/// Models from a static catalog alias (`cu`, `cc`) mapped to
+/// `{alias}/{id}` routes — 9router `itemsFromProviderModels`.
+fn catalog_preset_items(alias: &str) -> Vec<(String, Vec<String>)> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(models) = crate::core::model::catalog::provider_catalog().models_for_alias(alias) {
+        for model in models {
+            push_preset_item(
+                &mut items,
+                &mut seen,
+                &model.id,
+                vec![format!("{alias}/{}", model.id)],
+            );
+        }
+    }
+    items
+}
+
+/// 9router `CLAUDE_EXTRA_ALIAS_TARGETS` — Claude Code aliases not listed in
+/// `defaultModels`.
+const CLAUDE_EXTRA_ALIAS_TARGETS: [(&str, &str); 2] = [
+    ("default", "cc/claude-sonnet-5"),
+    ("opusplan", "cc/claude-opus-5"),
+];
+
+/// 9router `CLI_TOOLS.claude.defaultModels` (`alias` → `defaultValue`).
+const CLAUDE_CLI_DEFAULT_MODELS: [(&str, &str); 4] = [
+    ("fable", "cc/claude-fable-5"),
+    ("opus", "cc/claude-opus-5"),
+    ("sonnet", "cc/claude-sonnet-5"),
+    ("haiku", "cc/claude-haiku-4-5-20251001"),
+];
+
+/// 9router `CLI_TOOLS.claude.modelAliases` order.
+const CLAUDE_MODEL_ALIASES: [&str; 6] = ["default", "sonnet", "opus", "fable", "haiku", "opusplan"];
+
+/// 9router `buildClaudePresetItems`: `cc` registry + Claude Code aliases.
+fn build_claude_preset_items() -> Vec<(String, Vec<String>)> {
+    let mut items = catalog_preset_items("cc");
+    let mut seen: std::collections::HashSet<String> =
+        items.iter().map(|(name, _)| name.clone()).collect();
+
+    for (alias, target) in CLAUDE_CLI_DEFAULT_MODELS {
+        push_preset_item(&mut items, &mut seen, alias, vec![target.to_string()]);
+    }
+    for alias in CLAUDE_MODEL_ALIASES {
+        if seen.contains(alias) {
+            continue;
+        }
+        if let Some((_, target)) = CLAUDE_EXTRA_ALIAS_TARGETS
+            .iter()
+            .find(|(name, _)| *name == alias)
+        {
+            push_preset_item(&mut items, &mut seen, alias, vec![target.to_string()]);
+        }
+    }
+    items
+}
+
+/// 9router `buildCursorPresetItems`: prefer the live Cursor catalog from the
+/// first active cursor connection; otherwise the static `cu` registry.
+async fn build_cursor_preset_items(state: &AppState) -> Vec<(String, Vec<String>)> {
+    let snapshot = state.db.snapshot();
+    let connection = snapshot
+        .provider_connections
+        .iter()
+        .find(|c| c.provider == "cursor" && c.is_active())
+        .cloned();
+
+    if let Some(connection) = connection {
+        if let Ok(client) = state.client_pool.get_hyper_direct("cursor") {
+            if let Some(models) = crate::core::executor::resolve_cursor_models_for_connection(
+                &client,
+                &connection,
+                false,
+            )
+            .await
+            {
+                if !models.is_empty() {
+                    let mut items = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    for model in models {
+                        push_preset_item(
+                            &mut items,
+                            &mut seen,
+                            &model.id,
+                            vec![format!("cu/{}", model.id)],
+                        );
+                    }
+                    return items;
+                }
+            }
+        }
+    }
+    catalog_preset_items("cu")
+}
+
+/// Resolve preset items for a source, flagging names that already exist as
+/// combos — 9router `resolvePresetItems` / `buildPresetItems`.
+async fn resolve_combo_preset_items(state: &AppState, source: &str) -> Vec<ComboPresetItem> {
+    let raw = match source {
+        "cursor" => build_cursor_preset_items(state).await,
+        "claude" => build_claude_preset_items(),
+        _ => Vec::new(),
+    };
+    let snapshot = state.db.snapshot();
+    let existing: std::collections::HashSet<&str> = snapshot
+        .combos
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    raw.into_iter()
+        .map(|(name, models)| ComboPresetItem {
+            exists: existing.contains(name.as_str()),
+            name,
+            models,
+        })
+        .collect()
+}
+
+fn parse_combo_preset_source(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("cursor") => Some("cursor"),
+        Some("claude") => Some("claude"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ComboPresetsQuery {
+    source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComboPresetsBody {
+    source: Option<String>,
+}
+
+// GET /api/combos/presets?source=cursor|claude — preview items
+async fn list_combo_presets_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ComboPresetsQuery>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let Some(source) = parse_combo_preset_source(query.source.as_deref()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "source must be 'cursor' or 'claude'" })),
+        )
+            .into_response();
+    };
+
+    let items = resolve_combo_preset_items(&state, source).await;
+    let to_create = items.iter().filter(|i| !i.exists).count();
+    let to_skip = items.iter().filter(|i| i.exists).count();
+    Json(json!({
+        "source": source,
+        "items": items,
+        "toCreate": to_create,
+        "toSkip": to_skip,
+    }))
+    .into_response()
+}
+
+// POST /api/combos/presets — create missing combos for a source
+async fn create_combo_presets_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ComboPresetsBody>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let Some(source) = parse_combo_preset_source(body.source.as_deref()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "source must be 'cursor' or 'claude'" })),
+        )
+            .into_response();
+    };
+
+    let items = resolve_combo_preset_items(&state, source).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+
+    for item in items {
+        if item.exists {
+            skipped.push(item.name);
+            continue;
+        }
+        created.push(crate::types::Combo {
+            id: Uuid::new_v4().to_string(),
+            name: item.name,
+            models: item.models,
+            disabled_models: Vec::new(),
+            kind: None,
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            extra: std::collections::BTreeMap::new(),
+        });
+    }
+
+    let created_count = created.len();
+    let skipped_count = skipped.len();
+    let result = state
+        .db
+        .update(|db| {
+            db.combos.extend(created.clone());
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({
+            "source": source,
+            "created": created,
+            "skipped": skipped,
+            "createdCount": created_count,
+            "skippedCount": skipped_count,
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -3678,6 +3989,96 @@ mod tests {
             MODAL.contains("addedModelValues.includes(combo.name)"),
             "an already-added combo must render a distinct chip state"
         );
+    }
+
+    // --- POST /api/providers name-conflict guard (#4311) -------------------
+
+    fn create_provider_body(extra: serde_json::Value) -> CreateProviderRequest {
+        let mut body = serde_json::json!({
+            "provider": "openai",
+            "name": "Key 1",
+            "apiKey": "sk-test",
+        });
+        if let (Some(target), Some(source)) = (body.as_object_mut(), extra.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::from_value(body).expect("valid create-provider body")
+    }
+
+    async fn post_provider(state: &AppState, body: CreateProviderRequest) -> Response {
+        create_provider_api(State(state.clone()), HeaderMap::new(), Json(body)).await
+    }
+
+    /// 9router connectionsRepo.js:199-208 + route.js:186-200 — reusing a
+    /// connection name used to silently replace the stored apiKey. Now the
+    /// second POST is a 409 PROVIDER_NAME_CONFLICT unless the caller passes
+    /// allowOverwrite (or overwrite, or an explicit id edit).
+    #[tokio::test]
+    async fn duplicate_connection_name_is_a_409_without_allow_overwrite() {
+        let state = settings_state().await;
+
+        let first = post_provider(&state, create_provider_body(serde_json::json!({}))).await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = post_provider(
+            &state,
+            create_provider_body(serde_json::json!({ "apiKey": "sk-other" })),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "PROVIDER_NAME_CONFLICT");
+        assert!(body["existingId"].is_string());
+        assert!(body["error"].as_str().unwrap().contains("Key 1"));
+
+        // The refused write must not have touched the stored key.
+        let snapshot = state.db.snapshot();
+        let stored = snapshot
+            .provider_connections
+            .iter()
+            .find(|c| c.name.as_deref() == Some("Key 1"))
+            .expect("the first connection must still exist");
+        assert_eq!(stored.api_key.as_deref(), Some("sk-test"));
+
+        // Opting in collapses onto the existing row and replaces the key.
+        let third = post_provider(
+            &state,
+            create_provider_body(serde_json::json!({
+                "apiKey": "sk-new",
+                "allowOverwrite": true,
+            })),
+        )
+        .await;
+        assert_eq!(third.status(), StatusCode::CREATED);
+        let snapshot = state.db.snapshot();
+        let connections: Vec<_> = snapshot
+            .provider_connections
+            .iter()
+            .filter(|c| c.name.as_deref() == Some("Key 1"))
+            .collect();
+        assert_eq!(connections.len(), 1, "overwrite must merge, not duplicate");
+        assert_eq!(connections[0].api_key.as_deref(), Some("sk-new"));
+    }
+
+    /// `overwrite: true` is the legacy alias 9router also honours.
+    #[tokio::test]
+    async fn duplicate_connection_name_overwrite_alias_is_accepted() {
+        let state = settings_state().await;
+
+        let first = post_provider(&state, create_provider_body(serde_json::json!({}))).await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = post_provider(
+            &state,
+            create_provider_body(serde_json::json!({ "overwrite": true })),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::CREATED);
     }
 }
 

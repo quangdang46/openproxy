@@ -1020,7 +1020,7 @@ async fn execute_media_provider(
             let creds = snapshot
                 .provider_connections
                 .iter()
-                .find(|c| c.provider == provider && c.is_active())
+                .find(|c| c.provider == provider.as_str() && c.is_active())
                 .cloned()
                 .unwrap_or_else(|| crate::types::ProviderConnection {
                     id: "ollama-local".to_string(),

@@ -3066,7 +3066,7 @@ mod tests {
         let sse = String::from_utf8_lossy(&joined);
 
         let done_pos = sse.find("response.reasoning_summary_text.done");
-        let msg_pos = sse.find("\"type\": \"message\"");
+        let msg_pos = sse.find("\"type\":\"message\"");
         assert!(
             done_pos.is_some(),
             "reasoning must close when text begins: {sse}"
