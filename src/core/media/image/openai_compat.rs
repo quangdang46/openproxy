@@ -67,6 +67,27 @@ pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = OpenAiCompatAdapter {
     body_fields: &[],
 };
 
+/// SenseNova image adapter. 9router parity:
+/// `open-sse/providers/registry/sensenova.js` imageConfig.baseUrl =
+/// `https://token.sensenova.cn/v1/images/generations` with bodyFields
+/// ["model","prompt","n","size","output_format","response_format",
+/// "watermark","prompt_extend"].
+pub static SENSENOVA: OpenAiCompatAdapter = OpenAiCompatAdapter {
+    provider_id: "sensenova",
+    endpoint: "https://token.sensenova.cn/v1/images/generations",
+    include_referer: false,
+    body_fields: &[
+        "model",
+        "prompt",
+        "n",
+        "size",
+        "output_format",
+        "response_format",
+        "watermark",
+        "prompt_extend",
+    ],
+};
+
 #[async_trait]
 impl ImageAdapter for OpenAiCompatAdapter {
     fn build_url(&self, _: &ImageRequest<'_>) -> Result<String, String> {
@@ -118,7 +139,7 @@ impl ImageAdapter for OpenAiCompatAdapter {
             "n": n,
             "size": size,
         });
-        for key in ["quality", "style", "response_format"] {
+        for key in ["quality", "style", "response_format", "output_format"] {
             if let Some(v) = request.body.get(key) {
                 if let Some(obj) = full.as_object_mut() {
                     obj.insert(key.to_string(), v.clone());
@@ -129,11 +150,18 @@ impl ImageAdapter for OpenAiCompatAdapter {
         // bodyFields whitelist (9router imageProviders/openai.js:23-29):
         // when non-empty, forward only the listed keys (JS checks
         // `full[f] !== undefined`, so e.g. `size` is dropped for xAI).
+        // Whitelist extras absent from `full` (9router pulls
+        // watermark/prompt_extend straight from the request body when the
+        // provider's bodyFields list them).
         if !self.body_fields.is_empty() {
             let mut filtered = serde_json::Map::new();
             for f in self.body_fields {
-                if let Some(v) = full.get(*f) {
-                    filtered.insert((*f).to_string(), v.clone());
+                let v = full
+                    .get(*f)
+                    .cloned()
+                    .or_else(|| request.body.get(*f).cloned());
+                if let Some(v) = v {
+                    filtered.insert((*f).to_string(), v);
                 }
             }
             return Ok(Value::Object(filtered));
@@ -265,5 +293,60 @@ mod tests {
             headers.get("X-Title").and_then(|v| v.to_str().ok()),
             Some("Endpoint Proxy")
         );
+    }
+
+    fn sensenova_request() -> ImageRequest<'static> {
+        let body = json!({
+            "model": "sensenova-u1.5-lite",
+            "prompt": "A cat",
+            "n": 1,
+            "size": "1024x1024",
+            "output_format": "png",
+            "response_format": "url",
+            "watermark": false,
+            "prompt_extend": true,
+            "quality": "high"
+        });
+        ImageRequest {
+            body: Box::leak(Box::new(body)),
+            model: "sensenova-u1.5-lite",
+            credentials: Box::leak(Box::new(ProviderConnection::default())),
+        }
+    }
+
+    #[tokio::test]
+    async fn sensenova_body_fields_whitelist() {
+        // Bead openproxy-4d5h.40 / 9router registry/sensenova.js imageConfig:
+        // bodyFields = [model,prompt,n,size,output_format,response_format,
+        // watermark,prompt_extend] — quality is NOT forwarded.
+        let req = sensenova_request();
+        let body = SENSENOVA.build_body(&req).await.unwrap();
+        let obj = body.as_object().unwrap();
+        for key in [
+            "model",
+            "prompt",
+            "n",
+            "size",
+            "output_format",
+            "response_format",
+            "watermark",
+            "prompt_extend",
+        ] {
+            assert!(obj.contains_key(key), "{key} must be forwarded");
+        }
+        assert!(!obj.contains_key("quality"), "quality must be dropped");
+        assert!(!obj.contains_key("style"), "style must be dropped");
+    }
+
+    #[test]
+    fn sensenova_image_adapter_registered() {
+        let adapter = super::super::get_image_adapter("sensenova").expect("sensenova adapter");
+        let _ = adapter;
+        assert_eq!(
+            SENSENOVA.endpoint,
+            "https://token.sensenova.cn/v1/images/generations"
+        );
+        assert_eq!(SENSENOVA.provider_id, "sensenova");
+        assert!(!SENSENOVA.include_referer);
     }
 }

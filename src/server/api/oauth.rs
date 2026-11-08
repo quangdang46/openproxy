@@ -2560,10 +2560,7 @@ async fn zed_auto_import_route() -> Response {
 /// POST /api/oauth/zed/import — validate + save a Zed session, typically from
 /// IDE auto-import (9router zed/import/route.js). Body:
 /// `{accessToken, userId, systemId?}`.
-async fn zed_import(
-    State(state): State<AppState>,
-    request: axum::extract::Request,
-) -> Response {
+async fn zed_import(State(state): State<AppState>, request: axum::extract::Request) -> Response {
     use crate::oauth::zed_auth;
 
     let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
@@ -2628,16 +2625,11 @@ async fn zed_import(
     {
         Ok(info) => info,
         Err(error) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": error })),
-            )
-                .into_response();
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": error }))).into_response();
         }
     };
 
-    let organization_id =
-        zed_auth::resolve_zed_organization_id(&credentials_psd, Some(&user_info));
+    let organization_id = zed_auth::resolve_zed_organization_id(&credentials_psd, Some(&user_info));
     let email = user_info
         .get("email")
         .and_then(Value::as_str)
@@ -3638,7 +3630,10 @@ async fn codex_start_proxy_compat(
                 let registered = {
                     let mut inner = state.zed_proxy.inner.lock().await;
                     ZedProxyState::register_session_locked(
-                        &mut inner, &state_value, &verifier, None,
+                        &mut inner,
+                        &state_value,
+                        &verifier,
+                        None,
                     )
                 };
                 return Json(json!({
@@ -3991,11 +3986,8 @@ async fn authorize_oauth_compat(
         // native_app_port is derived from the callback URL's port so the
         // keypair is bound to the port the proxy actually listens on.
         "zed" => {
-            let native_app_port = url::Url::parse(&redirect_uri)
-                .ok()
-                .and_then(|u| u.port());
-            let auth =
-                crate::oauth::zed_auth::create_native_auth_data(native_app_port, None);
+            let native_app_port = url::Url::parse(&redirect_uri).ok().and_then(|u| u.port());
+            let auth = crate::oauth::zed_auth::create_native_auth_data(native_app_port, None);
             Json(json!({
                 "authUrl": auth.auth_url,
                 "state": state,
@@ -4916,14 +4908,10 @@ async fn exchange_zed_compat(
     // postExchange: best-effort users/me for email + organization id. A failed
     // probe must not fail the exchange — upstream wraps it in try/catch.
     let client = reqwest::Client::new();
-    let user_info = zed_auth::fetch_authenticated_user(
-        &client,
-        &user_id,
-        &access_token,
-        Some(&system_id),
-    )
-    .await
-    .ok();
+    let user_info =
+        zed_auth::fetch_authenticated_user(&client, &user_id, &access_token, Some(&system_id))
+            .await
+            .ok();
 
     let mut psd = std::collections::BTreeMap::from([
         ("authMethod".to_string(), Value::String("oauth".into())),
@@ -7573,21 +7561,15 @@ async fn handle_zed_proxy_connection(
     let mut email: Option<String> = None;
     let mut organization_id: Option<String> = None;
     let mut system_id = session_system_id.clone();
-    if let Ok(data) = zed_auth::fetch_authenticated_user(
-        &client,
-        &user_id,
-        &access_token,
-        system_id.as_deref(),
-    )
-    .await
+    if let Ok(data) =
+        zed_auth::fetch_authenticated_user(&client, &user_id, &access_token, system_id.as_deref())
+            .await
     {
         email = data.get("email").and_then(Value::as_str).map(String::from);
         // Same resolver the executor's fallback uses, so a connection
         // created here and one resolved later cannot disagree.
-        organization_id = zed_auth::resolve_zed_organization_id(
-            &std::collections::BTreeMap::new(),
-            Some(&data),
-        );
+        organization_id =
+            zed_auth::resolve_zed_organization_id(&std::collections::BTreeMap::new(), Some(&data));
         // users/me system_id is only a fallback — the login attempt's id
         // (register-session) is authoritative.
         if system_id.is_none() {

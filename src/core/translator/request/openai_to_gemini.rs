@@ -633,11 +633,21 @@ fn convert_prefix_items(obj: &mut Value) {
 }
 
 /// Gemini requires `items` on every `type:"array"` schema — fill a permissive placeholder.
-/// Mirrors `ensureArrayItems` in `open-sse/translator/formats/gemini.js:336-342`.
+/// Also infers `items.type` when the items schema lacks one. Mirrors `ensureArrayItems`
+/// in `open-sse/translator/formats/gemini.js`.
 fn ensure_array_items(obj: &mut Value) {
     if let Value::Object(map) = obj {
-        if map.get("type").and_then(Value::as_str) == Some("array") && !map.contains_key("items") {
-            map.insert("items".to_string(), json!({"type": "string"}));
+        if map.get("type").and_then(Value::as_str) == Some("array") {
+            let needs_default = match map.get("items") {
+                Some(Value::Object(items)) => items.is_empty(),
+                Some(_) => true,
+                None => true,
+            };
+            if needs_default {
+                map.insert("items".to_string(), json!({"type": "string"}));
+            } else {
+                ensure_items_type(map);
+            }
         }
         let keys: Vec<String> = map.keys().cloned().collect();
         for key in keys {
@@ -649,6 +659,95 @@ fn ensure_array_items(obj: &mut Value) {
         for item in arr.iter_mut() {
             ensure_array_items(item);
         }
+    }
+}
+
+/// JS truthiness for schema keyword values (`null`/`false`/`0`/`""` are falsy;
+/// arrays and objects — even empty — are truthy).
+fn js_truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// Upstream assigns `obj.items.type = <inferred>` — it mutates the `type` field
+/// in place, preserving sibling fields (`description`, `items`, …) on `items`.
+/// Mirrors the `else if (!obj.items.type)` branch of `ensureArrayItems` /
+/// `enforceTypeConstraints` in `open-sse/translator/formats/gemini.js`.
+fn ensure_items_type(map: &mut serde_json::Map<String, Value>) {
+    let inferred = {
+        let Some(Value::Object(items)) = map.get("items") else {
+            return;
+        };
+        if has_truthy_type_from(items) {
+            return;
+        }
+        if items.get("properties").map(js_truthy).unwrap_or(false) {
+            "object"
+        } else if items.get("items").map(js_truthy).unwrap_or(false) {
+            "array"
+        } else {
+            "string"
+        }
+    };
+    if let Some(Value::Object(items)) = map.get_mut("items") {
+        items.insert("type".to_string(), json!(inferred));
+    }
+}
+
+/// `items` is itself a schema object — same truthy-`type` check.
+fn has_truthy_type_from(items: &serde_json::Map<String, Value>) -> bool {
+    items.get("type").map(js_truthy).unwrap_or(false)
+}
+
+/// Phase 6: Enforce Gemini protobuf type predicates — `items` only on `type:"array"`,
+/// `properties`/`required` only on `type:"object"`. Post-order recursion mirrors
+/// `enforceTypeConstraints` in `open-sse/translator/formats/gemini.js`.
+fn enforce_type_constraints(obj: &mut Value) {
+    match obj {
+        Value::Object(map) => {
+            // Recurse into children first (post-order), like upstream.
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if let Some(val) = map.get_mut(&key) {
+                    enforce_type_constraints(val);
+                }
+            }
+
+            let ty = map.get("type").and_then(Value::as_str).map(str::to_string);
+
+            if ty.as_deref() == Some("array") {
+                map.remove("properties");
+                map.remove("required");
+                let needs_default = match map.get("items") {
+                    Some(Value::Object(items)) => items.is_empty(),
+                    Some(_) => true,
+                    None => true,
+                };
+                if needs_default {
+                    map.insert("items".to_string(), json!({"type": "string"}));
+                } else {
+                    ensure_items_type(map);
+                }
+            } else {
+                // Non-array schemas MUST NOT carry items.
+                map.remove("items");
+                if ty.as_deref() != Some("object") {
+                    map.remove("properties");
+                    map.remove("required");
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                enforce_type_constraints(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -681,6 +780,10 @@ pub fn clean_json_schema_for_antigravity(schema: &mut Value) {
 
     // Phase 5: Add placeholder for empty object schemas (Antigravity requirement)
     add_placeholders(schema);
+
+    // Phase 6: Enforce Gemini protobuf type predicates
+    // (items only on array, properties/required only on object)
+    enforce_type_constraints(schema);
 }
 
 /// Clean JSON Schema for Gemini/Antigravity compatibility (legacy function, now delegates to clean_json_schema_for_antigravity).
@@ -1732,6 +1835,88 @@ mod tests {
         assert!(!serde_json::to_string(result_obj)
             .unwrap()
             .contains("\"$ref\""));
+    }
+
+    // ---- .19: Phase 6 enforceTypeConstraints ----
+
+    #[test]
+    fn test_phase6_strips_items_from_non_array() {
+        let mut schema = json!({
+            "type": "string",
+            "items": {"type": "number"},
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"]
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+        assert!(schema.get("items").is_none());
+        assert!(schema.get("properties").is_none());
+        assert!(schema.get("required").is_none());
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn test_phase6_strips_properties_from_array() {
+        let mut schema = json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"]
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+        assert!(schema.get("properties").is_none());
+        assert!(schema.get("required").is_none());
+        assert_eq!(schema["items"], json!({"type": "string"}));
+    }
+
+    #[test]
+    fn test_phase6_array_items_inferred_when_type_missing() {
+        // items without `type` but with properties → object
+        let mut schema = json!({
+            "type": "array",
+            "items": {"properties": {"a": {"type": "string"}}}
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+        assert_eq!(schema["items"]["type"], "object");
+
+        // items without type/properties/items → string
+        let mut schema2 = json!({
+            "type": "array",
+            "items": {"description": "anything"}
+        });
+        clean_json_schema_for_antigravity(&mut schema2);
+        assert_eq!(schema2["items"]["type"], "string");
+
+        // nested arrays infer items → array
+        let mut schema3 = json!({
+            "type": "array",
+            "items": {"items": {"type": "integer"}}
+        });
+        clean_json_schema_for_antigravity(&mut schema3);
+        assert_eq!(schema3["items"]["type"], "array");
+    }
+
+    #[test]
+    fn test_phase6_recursive_in_nested_schemas() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "bad_string": {
+                    "type": "string",
+                    "items": {"type": "number"},
+                    "required": ["z"]
+                },
+                "list": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"n": {"type": "number"}}}
+                }
+            }
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+        let props = &schema["properties"];
+        assert!(props["bad_string"].get("items").is_none());
+        assert!(props["bad_string"].get("required").is_none());
+        assert_eq!(props["list"]["items"]["type"], "object");
+        assert_eq!(props["list"]["items"]["properties"]["n"]["type"], "number");
     }
 
     #[test]

@@ -270,7 +270,6 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
                     monthly_budget_usd: None,
                     extra: std::collections::BTreeMap::new(),
                     access: Default::default(),
-
                 });
                 diff.created.push(item.name.clone());
             }

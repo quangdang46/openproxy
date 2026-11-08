@@ -412,19 +412,17 @@ pub fn openai_to_kiro_request(
     // current-time only goes into current_content_prefix (current turn only).
     let mut system_prompt_parts: Vec<String> = Vec::new();
 
-    // Check for -agentic suffix
-    let is_agentic = model.ends_with("-agentic");
-    if is_agentic {
+    // Resolve 9router-synthetic suffixes (-agentic/-thinking) AND normalize
+    // the upstream id — dated snapshots and dotted/dashed Claude spellings
+    // fold onto Kiro's canonical set (bead openproxy-4d5h.46, port of
+    // resolveKiroModel upstream).
+    let resolved_model = crate::core::config::kiro_constants::resolve_kiro_model(model);
+    if resolved_model.agentic {
         system_prompt_parts.push(
             "[Agentic mode enabled: Use chunked file writes for large operations.]".to_string(),
         );
     }
-
-    let upstream_model = if is_agentic {
-        model.trim_end_matches("-agentic")
-    } else {
-        model
-    };
+    let upstream_model = resolved_model.upstream.as_str();
 
     // Resolve the Kiro thinking budget (9router resolveKiroThinkingBudget) and
     // push the legacy `<thinking_mode>`/`<max_thinking_length>` prefix when a

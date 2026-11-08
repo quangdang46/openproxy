@@ -5,7 +5,9 @@
 //! Behavioural ports of `isThinkingEnabled`, `resolveKiroModel`, and
 //! `buildThinkingSystemPrefix`.
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 pub const KIRO_AGENTIC_SUFFIX: &str = "-agentic";
 pub const KIRO_THINKING_SUFFIX: &str = "-thinking";
@@ -95,7 +97,125 @@ pub fn strip_thinking_suffix(model: &str) -> &str {
     model.strip_suffix(KIRO_THINKING_SUFFIX).unwrap_or(model)
 }
 
+/// Strip a trailing Anthropic snapshot date (`-YYYYMMDD`) — port of the
+/// `ANTHROPIC_SNAPSHOT_SUFFIX` regex in upstream `normalizeKiroUpstreamModelId`.
+fn strip_anthropic_snapshot_suffix(id: &str) -> &str {
+    let bytes = id.as_bytes();
+    let n = bytes.len();
+    // "-" + exactly 8 ASCII digits at end of string.
+    if n >= 9 && bytes[n - 9] == b'-' && bytes[n - 8..].iter().all(|b| b.is_ascii_digit()) {
+        &id[..n - 9]
+    } else {
+        id
+    }
+}
+
+/// Port of `normalizeKiroUpstreamModelId` (`open-sse/config/kiroConstants.js`,
+/// bead openproxy-4d5h.46): Kiro's upstream only knows a small canonical set
+/// of model ids, so dated snapshots (`claude-sonnet-4-5-20250929`),
+/// dotted/dashed Claude spellings and third-party aliases all fold onto it.
+///
+/// Returns the canonical upstream id. Unknown ids — and `gpt-*` ids that are
+/// not the 5.6 family — are returned UNCHANGED (original case preserved),
+/// exactly like the JS `return model` fallthroughs.
+pub fn normalize_kiro_upstream_model_id(model: &str) -> String {
+    if model.is_empty() {
+        return model.to_string();
+    }
+    // JS: model.toLowerCase().replace(/-\d{8}$/, "")
+    let lowered = model.to_lowercase();
+    let id = strip_anthropic_snapshot_suffix(&lowered);
+
+    if id.contains("sonnet") {
+        if id.contains("5.5") || id.contains("5-5") {
+            return "claude-sonnet-5.5".to_string();
+        }
+        if id.contains("4.6") || id.contains("4-6") {
+            return "claude-sonnet-4.6".to_string();
+        }
+        if id.contains("sonnet-5") || id.contains("sonnet.5") {
+            return "claude-sonnet-5".to_string();
+        }
+        if id.contains("4.5") || id.contains("4-5") {
+            return "claude-sonnet-4.5".to_string();
+        }
+        if id.contains("sonnet-4") || id.contains("sonnet.4") {
+            return "claude-sonnet-4".to_string();
+        }
+        // Legacy ids like claude-3-5-sonnet-20241022 land here.
+        return "claude-sonnet-4.5".to_string();
+    }
+    if id.contains("fable") {
+        return "claude-fable-5".to_string();
+    }
+    if id.contains("opus") {
+        if id.contains("5.5") || id.contains("5-5") {
+            return "claude-opus-5.5".to_string();
+        }
+        if id.contains("opus-5") || id.contains("opus.5") || id.contains("opus 5") {
+            return "claude-opus-5".to_string();
+        }
+        if id.contains("4.8") || id.contains("4-8") {
+            return "claude-opus-4.8".to_string();
+        }
+        if id.contains("4.7") || id.contains("4-7") {
+            return "claude-opus-4.7".to_string();
+        }
+        if id.contains("4.5") || id.contains("4-5") {
+            return "claude-opus-4.5".to_string();
+        }
+        return "claude-opus-4.6".to_string();
+    }
+    if id.contains("haiku") {
+        return if id.contains("5.5") || id.contains("5-5") {
+            "claude-haiku-5.5"
+        } else {
+            "claude-haiku-4.5"
+        }
+        .to_string();
+    }
+    if id == "auto" {
+        return "auto".to_string();
+    }
+    if id.contains("deepseek") {
+        return "deepseek-3.2".to_string();
+    }
+    if id.contains("glm") {
+        return "glm-5".to_string();
+    }
+    if id.contains("minimax") {
+        return if id.contains("2.5") || id.contains("2-5") {
+            "minimax-m2.5"
+        } else {
+            "minimax-m2.1"
+        }
+        .to_string();
+    }
+    if id.contains("qwen") {
+        return "qwen3-coder-next".to_string();
+    }
+    if id.contains("kimi") {
+        return "kimi-k3".to_string();
+    }
+    if id.contains("gpt") {
+        if id.contains("terra") {
+            return "gpt-5.6-terra".to_string();
+        }
+        if id.contains("luna") {
+            return "gpt-5.6-luna".to_string();
+        }
+        if id.contains("sol") || id.contains("5.6") || id.contains("5-6") {
+            return "gpt-5.6-sol".to_string();
+        }
+        // Non-5.6 GPT ids pass through untouched (JS `return model`).
+        return model.to_string();
+    }
+    model.to_string()
+}
+
 /// Resolve a 9router model id to the real upstream id + behavioural flags.
+/// `upstream` is normalized via [`normalize_kiro_upstream_model_id`] so
+/// dated snapshots and dotted/dashed spellings reach Kiro canonically.
 pub fn resolve_kiro_model(model: &str) -> ResolvedKiroModel {
     let mut upstream = model.to_string();
     let mut agentic = false;
@@ -109,9 +229,56 @@ pub fn resolve_kiro_model(model: &str) -> ResolvedKiroModel {
         upstream = strip_thinking_suffix(&upstream).to_string();
     }
     ResolvedKiroModel {
-        upstream,
+        upstream: normalize_kiro_upstream_model_id(&upstream),
         agentic,
         thinking,
+    }
+}
+
+/// Port of `applyKiroThinkingOverride` (`kiroConstants.js`): apply a parsed
+/// `model(level)` suffix override onto the request body BEFORE translation so
+/// [`resolve_kiro_thinking_budget`] sees it downstream.
+///
+/// - budget (`model(8192)`) → `thinking: {type:"enabled", budget_tokens}` and
+///   drops the competing effort fields.
+/// - level/auto/none → merges `output_config.effort` (`auto`/`none` pass
+///   through verbatim, like the JS `override.mode` fallthrough).
+pub fn apply_kiro_thinking_override(body: &mut Value, level: &str) {
+    use crate::core::utils::thinking_suffix::{suffix_to_intent, ThinkingIntent};
+    let Some(intent) = suffix_to_intent(level) else {
+        return;
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    match intent {
+        ThinkingIntent::Budget(budget) => {
+            obj.remove("output_config");
+            obj.remove("reasoning_effort");
+            obj.remove("reasoning");
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "enabled", "budget_tokens": budget }),
+            );
+        }
+        other => {
+            let effort = match &other {
+                ThinkingIntent::None_ => "none",
+                ThinkingIntent::Auto => "auto",
+                ThinkingIntent::Level(l) => l.as_str(),
+                ThinkingIntent::Budget(_) => unreachable!(),
+            };
+            let mut output_config = obj
+                .get("output_config")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(oc) = output_config.as_object_mut() {
+                oc.insert("effort".to_string(), Value::String(effort.to_string()));
+            } else {
+                output_config = serde_json::json!({ "effort": effort });
+            }
+            obj.insert("output_config".to_string(), output_config);
+        }
     }
 }
 
@@ -270,24 +437,52 @@ pub fn resolve_kiro_effort_path(model: &str) -> Option<&'static str> {
     None
 }
 
+/// Port of `parseClaudeVersion` (`open-sse/config/kiroConstants.js`):
+/// lowercase, `-` → `.`, then match the first `claude` token followed by a
+/// `N` or `N.M` version run. Returns `(major, minor)` — `minor` is `None`
+/// for unversioned-minor ids like `claude-sonnet-5`.
+fn parse_claude_version(model: &str) -> Option<(u32, Option<u32>)> {
+    let normalized = model.to_lowercase().replace('-', ".");
+    static CLAUDE_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:^|[/.])claude(?:[/.][a-z]+)*[/.](\d+)(?:[/.](\d+))?(?:[/.]|$)")
+            .expect("claude version regex")
+    });
+    let caps = CLAUDE_VERSION_RE.captures(&normalized)?;
+    let major = caps.get(1)?.as_str().parse::<u32>().ok()?;
+    let minor = caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+    Some((major, minor))
+}
+
+/// Port of `kiroModelLacksXhigh` (kiroConstants.js): 4.6 Claude models cap
+/// at `low|medium|high|max`; 4.7+ add `xhigh`. Unknown models stay
+/// conservative (treated as lacking `xhigh`).
+fn kiro_model_lacks_xhigh(model: &str) -> bool {
+    match parse_claude_version(model) {
+        None => true,
+        Some((major, minor)) => major == 4 && minor.is_some_and(|m| m <= 6),
+    }
+}
+
 /// Extract the native effort level a model should receive on the wire,
-/// mirroring the JS extractors in kiroConstants.js. Only known effort
-/// levels are accepted (unknown ones like `auto`/`minimal`/`ultra` yield
-/// `None`); for Claude (`output_config`) the `xhigh`/`max` levels fold
-/// down to `high`, and for GPT (`reasoning`) `max` maps to `xhigh`.
-/// Returns `None` when the body carries no usable effort value.
-pub fn extract_kiro_effort_level(body: &Value, path: &str) -> Option<String> {
+/// mirroring `extractKiroEffortLevel`/`extractKiroGptEffortLevel` in
+/// kiroConstants.js. Only known effort levels are accepted (unknown ones
+/// like `auto`/`minimal`/`ultra` yield `None`). For Claude
+/// (`output_config`) `xhigh` is model-gated — folded to `high` only on
+/// 4.6-era models — and `max` passes through as `max`; for GPT
+/// (`reasoning`) `max` maps to `xhigh`. Returns `None` when the body
+/// carries no usable effort value.
+pub fn extract_kiro_effort_level(body: &Value, path: &str, model: &str) -> Option<String> {
+    // Upstream order: output_config.effort ?? reasoning_effort ??
+    // reasoning.effort (object only).
     let effort = body
-        .get("reasoning_effort")
+        .get("output_config")
+        .and_then(|o| o.get("effort"))
         .and_then(|v| v.as_str())
+        .or_else(|| body.get("reasoning_effort").and_then(|v| v.as_str()))
         .or_else(|| {
             body.get("reasoning")
+                .filter(|r| r.is_object())
                 .and_then(|r| r.get("effort"))
-                .and_then(|v| v.as_str())
-        })
-        .or_else(|| {
-            body.get("output_config")
-                .and_then(|o| o.get("effort"))
                 .and_then(|v| v.as_str())
         })
         .map(str::to_lowercase)?;
@@ -295,7 +490,12 @@ pub fn extract_kiro_effort_level(body: &Value, path: &str) -> Option<String> {
     match path {
         "output_config" => match effort.as_str() {
             "low" | "medium" | "high" => Some(effort),
-            "xhigh" | "max" => Some("high".to_string()),
+            "xhigh" => Some(if kiro_model_lacks_xhigh(model) {
+                "high".to_string()
+            } else {
+                "xhigh".to_string()
+            }),
+            "max" => Some("max".to_string()),
             _ => None,
         },
         "reasoning" => match effort.as_str() {
@@ -314,7 +514,7 @@ pub fn extract_kiro_effort_level(body: &Value, path: &str) -> Option<String> {
 /// native).
 pub fn uses_kiro_native_gpt_effort(model: &str, body: &Value) -> bool {
     resolve_kiro_effort_path(model) == Some("reasoning")
-        && extract_kiro_effort_level(body, "reasoning").is_some()
+        && extract_kiro_effort_level(body, "reasoning", model).is_some()
 }
 
 /// Build `additionalModelRequestFields` for a Kiro request, mirroring
@@ -329,7 +529,7 @@ pub fn build_kiro_additional_model_request_fields_for_model(
     model: &str,
 ) -> Option<Value> {
     let path = resolve_kiro_effort_path(model)?;
-    let effort = extract_kiro_effort_level(body, path)?;
+    let effort = extract_kiro_effort_level(body, path, model)?;
 
     match path {
         "output_config" => Some(serde_json::json!({
@@ -749,12 +949,18 @@ mod tests {
                 "output_config": {"effort": "low"}
             }))
         );
-        // xhigh/max fold down to high for Claude.
+        // xhigh folds to high on 4.6-era models (no xhigh tier).
         let body = json!({"reasoning_effort": "xhigh"});
         let fields =
             build_kiro_additional_model_request_fields_for_model(&body, "claude-sonnet-4.6")
                 .unwrap();
         assert_eq!(fields["output_config"]["effort"], "high");
+        // max stays max on the Kiro pass-through.
+        let body = json!({"reasoning_effort": "max"});
+        let fields =
+            build_kiro_additional_model_request_fields_for_model(&body, "claude-sonnet-4.6")
+                .unwrap();
+        assert_eq!(fields["output_config"]["effort"], "max");
         // Unsupported effort → no fields.
         let body = json!({"reasoning_effort": "auto"});
         assert_eq!(
@@ -773,6 +979,39 @@ mod tests {
             build_kiro_additional_model_request_fields_for_model(&body, "claude-sonnet-4.5"),
             None
         );
+    }
+
+    #[test]
+    fn kiro_xhigh_is_model_gated() {
+        // 4.7+/Sonnet 5 / Opus 5.x advertise xhigh — it must reach the wire.
+        for model in [
+            "claude-opus-4.7",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-opus-5",
+        ] {
+            let body = json!({"reasoning_effort": "xhigh"});
+            let fields =
+                build_kiro_additional_model_request_fields_for_model(&body, model).unwrap();
+            assert_eq!(
+                fields["output_config"]["effort"], "xhigh",
+                "model={model} must keep xhigh"
+            );
+        }
+        // 4.6-era models clamp xhigh → high.
+        for model in [
+            "claude-sonnet-4.6",
+            "claude-opus-4-6",
+            "claude-sonnet-4.6-20260101",
+        ] {
+            let body = json!({"reasoning_effort": "xhigh"});
+            let fields =
+                build_kiro_additional_model_request_fields_for_model(&body, model).unwrap();
+            assert_eq!(
+                fields["output_config"]["effort"], "high",
+                "model={model} must clamp xhigh to high"
+            );
+        }
     }
 
     #[test]
@@ -806,5 +1045,131 @@ mod tests {
         // Non-GPT models never native.
         let body = json!({"reasoning_effort": "high"});
         assert!(!uses_kiro_native_gpt_effort("claude-sonnet-4.6", &body));
+    }
+
+    // ── normalizeKiroUpstreamModelId (bead openproxy-4d5h.46) ──────────
+    // Mirrors tests/unit/kiro-model-normalization.test.js upstream.
+
+    #[test]
+    fn normalize_kiro_upstream_model_id_snapshots_and_dotted() {
+        for (input, expected) in [
+            // Anthropic snapshot dates fold onto the dotted canonical id.
+            ("claude-sonnet-4-5-20250929", "claude-sonnet-4.5"),
+            ("claude-opus-4-5-20251101", "claude-opus-4.5"),
+            ("claude-haiku-4-5-20251001", "claude-haiku-4.5"),
+            // Legacy 3.5 snapshot → sonnet branch default.
+            ("claude-3-5-sonnet-20241022", "claude-sonnet-4.5"),
+            // Undated dashed spellings.
+            ("claude-sonnet-4-5", "claude-sonnet-4.5"),
+            ("claude-opus-4-5", "claude-opus-4.5"),
+            ("claude-opus-4-8", "claude-opus-4.8"),
+            // 5.x dotted/dashed.
+            ("claude-opus-5.5", "claude-opus-5.5"),
+            ("claude-opus-5-5", "claude-opus-5.5"),
+            ("claude-sonnet-5.5", "claude-sonnet-5.5"),
+            ("claude-haiku-5.5", "claude-haiku-5.5"),
+        ] {
+            assert_eq!(
+                normalize_kiro_upstream_model_id(input),
+                expected,
+                "input={input}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_kiro_upstream_model_id_canonical_and_aliases() {
+        for (input, expected) in [
+            // Already-canonical ids pass through.
+            ("claude-opus-5.5", "claude-opus-5.5"),
+            ("claude-opus-5", "claude-opus-5"),
+            ("claude-sonnet-5", "claude-sonnet-5"),
+            ("claude-sonnet-4.5", "claude-sonnet-4.5"),
+            ("claude-haiku-4.5", "claude-haiku-4.5"),
+            ("auto", "auto"),
+            ("deepseek-3.2", "deepseek-3.2"),
+            ("glm-5", "glm-5"),
+            ("qwen3-coder-next", "qwen3-coder-next"),
+            ("kimi-k3", "kimi-k3"),
+            ("minimax-m2.5", "minimax-m2.5"),
+            ("minimax-m2.1", "minimax-m2.1"),
+            ("gpt-5.6-sol", "gpt-5.6-sol"),
+            ("gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-5.6-luna", "gpt-5.6-luna"),
+            // Third-party aliases fold onto canonical ids.
+            ("MiniMax-M2.5", "minimax-m2.5"),
+            ("deepseek-v3", "deepseek-3.2"),
+            ("glm-4.6", "glm-5"),
+            ("qwen3-coder", "qwen3-coder-next"),
+            ("kimi-k2", "kimi-k3"),
+        ] {
+            assert_eq!(
+                normalize_kiro_upstream_model_id(input),
+                expected,
+                "input={input}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_kiro_upstream_model_id_unknown_passthrough() {
+        // Unknown ids and non-5.6 GPT ids are returned byte-for-byte.
+        for input in ["", "some-unknown-model", "gpt-4o", "GPT-5"] {
+            assert_eq!(normalize_kiro_upstream_model_id(input), input);
+        }
+    }
+
+    #[test]
+    fn resolve_kiro_model_normalizes_upstream() {
+        // Suffixes strip first, then the snapshot/date spelling normalizes.
+        assert_eq!(
+            resolve_kiro_model("claude-sonnet-4-5-20250929-thinking-agentic"),
+            ResolvedKiroModel {
+                upstream: "claude-sonnet-4.5".to_string(),
+                agentic: true,
+                thinking: true,
+            }
+        );
+        assert_eq!(
+            resolve_kiro_model("claude-opus-4-5-20251101"),
+            ResolvedKiroModel {
+                upstream: "claude-opus-4.5".to_string(),
+                agentic: false,
+                thinking: false,
+            }
+        );
+        assert_eq!(
+            resolve_kiro_model("MiniMax-M2.5-agentic").upstream,
+            "minimax-m2.5"
+        );
+    }
+
+    #[test]
+    fn apply_kiro_thinking_override_shapes() {
+        // Budget override → thinking block, competing effort fields dropped.
+        let mut body = json!({
+            "output_config": {"effort": "high"},
+            "reasoning_effort": "low",
+            "messages": []
+        });
+        apply_kiro_thinking_override(&mut body, "8192");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Level override → merged into output_config.effort.
+        let mut body = json!({"output_config": {"other": 1}, "messages": []});
+        apply_kiro_thinking_override(&mut body, "high");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["other"], 1);
+
+        // auto/none pass through verbatim (JS override.mode fallthrough).
+        let mut body = json!({});
+        apply_kiro_thinking_override(&mut body, "auto");
+        assert_eq!(body["output_config"]["effort"], "auto");
+        let mut body = json!({});
+        apply_kiro_thinking_override(&mut body, "none");
+        assert_eq!(body["output_config"]["effort"], "none");
     }
 }

@@ -59,9 +59,7 @@ pub struct ToolShow {
 
 impl ToolShow {
     pub fn configured(&self) -> bool {
-        self.base_url.is_some()
-            || self.api_key.is_some()
-            || !self.models.is_empty()
+        self.base_url.is_some() || self.api_key.is_some() || !self.models.is_empty()
     }
 }
 
@@ -168,7 +166,11 @@ impl ConnectTool {
                 _ => {
                     return Err(anyhow!(
                         "Unknown tool \"{raw}\". Supported: {}, all",
-                        ConnectTool::ALL.iter().map(|t| t.id()).collect::<Vec<_>>().join(", ")
+                        ConnectTool::ALL
+                            .iter()
+                            .map(|t| t.id())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ))
                 }
             };
@@ -184,14 +186,11 @@ impl ConnectTool {
         match self {
             ConnectTool::Claude => vec![home.join(".claude").join("settings.json")],
             ConnectTool::Codex => vec![home.join(".codex").join("config.toml")],
-            ConnectTool::OpenCode => vec![home
-                .join(".config")
-                .join("opencode")
-                .join("opencode.json")],
+            ConnectTool::OpenCode => {
+                vec![home.join(".config").join("opencode").join("opencode.json")]
+            }
             ConnectTool::Droid => vec![home.join(".factory").join("settings.json")],
-            ConnectTool::Crush => vec![xdg_config_home(home)
-                .join("crush")
-                .join("crush.json")],
+            ConnectTool::Crush => vec![xdg_config_home(home).join("crush").join("crush.json")],
             ConnectTool::Kilo => vec![home
                 .join(".local")
                 .join("share")
@@ -377,8 +376,7 @@ fn set_secret_mode(path: &Path) -> std::io::Result<()> {
 /// One-time backup of the user's pre-existing file, then write.
 fn write_file(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let backup = path.with_file_name(format!(
         "{}{}",
@@ -388,8 +386,7 @@ fn write_file(path: &Path, content: &str) -> Result<()> {
         BACKUP_SUFFIX
     ));
     if path.exists() && !backup.exists() {
-        std::fs::copy(path, &backup)
-            .with_context(|| format!("backup {}", path.display()))?;
+        std::fs::copy(path, &backup).with_context(|| format!("backup {}", path.display()))?;
         let _ = set_secret_mode(&backup);
     }
     std::fs::write(path, content).with_context(|| format!("write {}", path.display()))?;
@@ -412,8 +409,8 @@ fn read_toml_file(path: &Path) -> Result<Option<toml::Value>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let parsed: toml::Value = toml::from_str(&text)
-        .with_context(|| format!("Cannot parse {}", path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&text).with_context(|| format!("Cannot parse {}", path.display()))?;
     Ok(Some(parsed))
 }
 
@@ -462,11 +459,7 @@ fn toml_emit_document(root: &toml::map::Map<String, toml::Value>) -> String {
     out
 }
 
-fn emit_toml_table(
-    table: &toml::map::Map<String, toml::Value>,
-    prefix: &str,
-    out: &mut String,
-) {
+fn emit_toml_table(table: &toml::map::Map<String, toml::Value>, prefix: &str, out: &mut String) {
     // Pass 1: scalar / array entries (arrays of tables render as inline
     // `[{...}]`, which is valid TOML).
     for (k, v) in table {
@@ -499,8 +492,8 @@ fn read_yaml_file(path: &Path) -> Result<Option<Value>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let yml: serde_yml::Value = serde_yml::from_str(&text)
-        .with_context(|| format!("Cannot parse {}", path.display()))?;
+    let yml: serde_yml::Value =
+        serde_yml::from_str(&text).with_context(|| format!("Cannot parse {}", path.display()))?;
     let bytes = serde_json::to_vec(&yml).context("convert YAML to JSON")?;
     let json: Value = serde_json::from_slice(&bytes).context("normalise YAML payload")?;
     Ok(Some(json))
@@ -552,7 +545,7 @@ mod claude {
                     env.insert((*env_key).to_string(), Value::String(m.to_string()));
                 }
                 None => {
-                    env.remove(*env_key);
+                    env.remove(env_key);
                 }
             }
         }
@@ -643,14 +636,8 @@ mod codex {
         // Custom providers ignore auth.json — key travels as a static header.
         let providers = ensure_toml_table(root, "model_providers");
         let mut p = toml::map::Map::new();
-        p.insert(
-            "name".into(),
-            toml::Value::String("OpenProxy".to_string()),
-        );
-        p.insert(
-            "base_url".into(),
-            toml::Value::String(v1(&ctx.base_url)),
-        );
+        p.insert("name".into(), toml::Value::String("OpenProxy".to_string()));
+        p.insert("base_url".into(), toml::Value::String(v1(&ctx.base_url)));
         p.insert(
             "wire_api".into(),
             toml::Value::String("responses".to_string()),
@@ -660,20 +647,14 @@ mod codex {
             "Authorization".into(),
             toml::Value::String(format!("Bearer {}", ctx.api_key)),
         );
-        p.insert(
-            "http_headers".into(),
-            toml::Value::Table(headers),
-        );
+        p.insert("http_headers".into(), toml::Value::Table(headers));
         providers.insert(PROVIDER_KEY.to_string(), toml::Value::Table(p));
         // Also drop a stale `9router` provider entry if present.
         providers.remove("9router");
 
         let agents = ensure_toml_table(root, "agents");
         agents.remove("subagent");
-        agents.insert(
-            "default_subagent_model".into(),
-            toml::Value::String(model),
-        );
+        agents.insert("default_subagent_model".into(), toml::Value::String(model));
 
         let text = toml_emit_document(match &cfg {
             toml::Value::Table(t) => t,
@@ -682,9 +663,7 @@ mod codex {
         Ok(vec![(file, text)])
     }
 
-    fn provider_table<'a>(
-        cfg: &'a toml::Value,
-    ) -> Option<&'a toml::map::Map<String, toml::Value>> {
+    fn provider_table<'a>(cfg: &'a toml::Value) -> Option<&'a toml::map::Map<String, toml::Value>> {
         let providers = cfg.get("model_providers")?.as_table()?;
         PROVIDER_KEYS
             .iter()
@@ -743,11 +722,17 @@ mod codex {
             .get("model_provider")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        if provider.as_deref().is_some_and(|p| PROVIDER_KEYS.contains(&p)) {
+        if provider
+            .as_deref()
+            .is_some_and(|p| PROVIDER_KEYS.contains(&p))
+        {
             root.remove("model");
             root.remove("model_provider");
         }
-        if let Some(providers) = root.get_mut("model_providers").and_then(|v| v.as_table_mut) {
+        if let Some(providers) = root
+            .get_mut("model_providers")
+            .and_then(|v| v.as_table_mut())
+        {
             for k in PROVIDER_KEYS {
                 providers.remove(*k);
             }
@@ -755,7 +740,7 @@ mod codex {
                 root.remove("model_providers");
             }
         }
-        if let Some(agents) = root.get_mut("agents").and_then(|v| v.as_table_mut) {
+        if let Some(agents) = root.get_mut("agents").and_then(|v| v.as_table_mut()) {
             agents.remove("default_subagent_model");
             agents.remove("subagent");
             if agents.is_empty() {
@@ -776,9 +761,7 @@ mod opencode {
     use super::*;
 
     fn path(home: &Path) -> PathBuf {
-        home.join(".config")
-            .join("opencode")
-            .join("opencode.json")
+        home.join(".config").join("opencode").join("opencode.json")
     }
 
     /// `data.config.model` like `openproxy/<m>` / `9router/<m>` → bare id.
@@ -801,11 +784,11 @@ mod opencode {
             .entry("provider".to_string())
             .or_insert_with(|| Value::Object(Map::new()));
         let providers = obj_mut(providers);
-        let p = providers
-            .entry(PROVIDER_KEY.to_string())
-            .or_insert_with(|| json!({"npm": "@ai-sdk/openai-compatible", "options": {}, "models": {}}));
         // Drop a stale 9router entry when (re)writing under openproxy.
         providers.remove("9router");
+        let p = providers.entry(PROVIDER_KEY.to_string()).or_insert_with(
+            || json!({"npm": "@ai-sdk/openai-compatible", "options": {}, "models": {}}),
+        );
         obj_mut(p)
     }
 
@@ -947,9 +930,9 @@ mod droid {
     }
 
     fn is_ours(m: &Value) -> bool {
-        m.get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("custom:OpenProxy") || id.starts_with("custom:9Router"))
+        m.get("id").and_then(Value::as_str).is_some_and(|id| {
+            id.starts_with("custom:OpenProxy") || id.starts_with("custom:9Router")
+        })
     }
 
     /// First `customModels[]` entry whose id is ours → its `model`.
@@ -1072,9 +1055,7 @@ mod crush {
     /// `data.config.providers[<ours>].models[0].id`
     pub fn server_model(data: &Value) -> Option<String> {
         let providers = data.get("config")?.get("providers")?.as_object()?;
-        let p = PROVIDER_KEYS
-            .iter()
-            .find_map(|k| providers.get(*k))?;
+        let p = PROVIDER_KEYS.iter().find_map(|k| providers.get(*k))?;
         p.get("models")?
             .as_array()?
             .first()?
@@ -1286,10 +1267,7 @@ mod cline {
         root.insert("planModeOpenAiModelId".into(), Value::String(model));
 
         let mut secrets = read_json_or_empty(&secrets_file)?;
-        obj_mut(&mut secrets).insert(
-            "openAiApiKey".into(),
-            Value::String(ctx.api_key.clone()),
-        );
+        obj_mut(&mut secrets).insert("openAiApiKey".into(), Value::String(ctx.api_key.clone()));
 
         Ok(vec![
             (state_file, serde_json::to_string_pretty(&state)?),
@@ -1305,16 +1283,16 @@ mod cline {
                 models.insert("act".to_string(), m.to_string());
             }
         }
-        if let Some(m) = st
-            .get("planModeOpenAiModelId")
-            .and_then(Value::as_str)
-        {
+        if let Some(m) = st.get("planModeOpenAiModelId").and_then(Value::as_str) {
             if !m.is_empty() {
                 models.insert("plan".to_string(), m.to_string());
             }
         }
-        let api_key = read_json_file(&secrets_path(home))?
-            .and_then(|s| s.get("openAiApiKey").and_then(Value::as_str).map(str::to_string));
+        let api_key = read_json_file(&secrets_path(home))?.and_then(|s| {
+            s.get("openAiApiKey")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
         Ok(ToolShow {
             base_url: st
                 .get("openAiBaseUrl")
@@ -1334,27 +1312,15 @@ mod cline {
         let secrets_file = secrets_path(home);
         let mut touched = Vec::new();
         if let Some(mut state) = read_json_file(&state_file)? {
-            let is_openai = state
-                .get("actModeApiProvider")
-                .and_then(Value::as_str)
-                == Some("openai");
+            let is_openai =
+                state.get("actModeApiProvider").and_then(Value::as_str) == Some("openai");
             if is_openai {
                 if let Some(root) = state.as_object_mut() {
-                    for k in [
-                        "openAiBaseUrl",
-                        "openAiModelId",
-                        "planModeOpenAiModelId",
-                    ] {
+                    for k in ["openAiBaseUrl", "openAiModelId", "planModeOpenAiModelId"] {
                         root.remove(k);
                     }
-                    root.insert(
-                        "actModeApiProvider".into(),
-                        Value::String("cline".into()),
-                    );
-                    root.insert(
-                        "planModeApiProvider".into(),
-                        Value::String("cline".into()),
-                    );
+                    root.insert("actModeApiProvider".into(), Value::String("cline".into()));
+                    root.insert("planModeApiProvider".into(), Value::String("cline".into()));
                 }
                 rewrite_file(&state_file, &serde_json::to_string_pretty(&state)?)?;
                 touched.push(state_file.clone());
@@ -1380,9 +1346,7 @@ mod pi {
     pub fn server_model(data: &Value) -> Option<String> {
         let providers = data.get("config")?.get("providers")?.as_object()?;
         let p = PROVIDER_KEYS.iter().find_map(|k| providers.get(*k))?;
-        let models = p.get("models")?
-            .as_array()?
-            .first()?;
+        let models = p.get("models")?.as_array()?.first()?;
         match models {
             Value::String(s) => Some(s.clone()),
             other => other.get("id")?.as_str().map(str::to_string),
@@ -1406,10 +1370,7 @@ mod pi {
             .unwrap_or_default();
         p.insert("baseUrl".into(), Value::String(v1(&ctx.base_url)));
         p.insert("apiKey".into(), Value::String(ctx.api_key.clone()));
-        p.insert(
-            "api".into(),
-            Value::String("openai-completions".into()),
-        );
+        p.insert("api".into(), Value::String("openai-completions".into()));
         p.insert(
             "models".into(),
             json!([{"id": model, "name": model, "contextWindow": 128000, "maxTokens": 16384}]),
@@ -1435,10 +1396,7 @@ mod pi {
                 a.iter()
                     .filter_map(|m| match m {
                         Value::String(s) => Some(s.clone()),
-                        other => other
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
+                        other => other.get("id").and_then(Value::as_str).map(str::to_string),
                     })
                     .filter(|s| !s.is_empty())
                     .collect()
@@ -1612,12 +1570,9 @@ mod tests {
 
     #[test]
     fn resolve_tools_aliases_and_all() {
-        let tools = ConnectTool::resolve(&[
-            "claude-code".into(),
-            "oh-my-pi".into(),
-            "KiloCode".into(),
-        ])
-        .unwrap();
+        let tools =
+            ConnectTool::resolve(&["claude-code".into(), "oh-my-pi".into(), "KiloCode".into()])
+                .unwrap();
         assert_eq!(
             tools,
             vec![ConnectTool::Claude, ConnectTool::Omp, ConnectTool::Kilo]
@@ -1644,7 +1599,10 @@ mod tests {
         let v: Value = serde_json::from_str(content).unwrap();
         assert_eq!(v["hasCompletedOnboarding"], json!(true));
         let env = &v["env"];
-        assert_eq!(env["ANTHROPIC_BASE_URL"], json!("http://server.local:4623/v1"));
+        assert_eq!(
+            env["ANTHROPIC_BASE_URL"],
+            json!("http://server.local:4623/v1")
+        );
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], json!("op-test-secret"));
         assert_eq!(
             env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
@@ -1694,7 +1652,10 @@ mod tests {
         let (_, content) = &files[0];
         let v: Value = serde_json::from_str(content).unwrap();
         let p = &v["provider"]["openproxy"];
-        assert_eq!(p["options"]["baseURL"], json!("http://server.local:4623/v1"));
+        assert_eq!(
+            p["options"]["baseURL"],
+            json!("http://server.local:4623/v1")
+        );
         assert_eq!(p["options"]["apiKey"], json!("op-test-secret"));
         assert!(p["models"]["ocg/deepseek-flash"].is_object());
         assert_eq!(v["model"], json!("openproxy/ocg/deepseek-flash"));
@@ -1751,12 +1712,22 @@ mod tests {
     fn kilo_and_cline_and_droid_plans() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
-        for tool in [ConnectTool::Kilo, ConnectTool::Cline, ConnectTool::Droid, ConnectTool::Pi, ConnectTool::Crush] {
+        for tool in [
+            ConnectTool::Kilo,
+            ConnectTool::Cline,
+            ConnectTool::Droid,
+            ConnectTool::Pi,
+            ConnectTool::Crush,
+        ] {
             let files = tool.plan_apply(home, &ctx()).unwrap();
             assert!(!files.is_empty(), "{} produced no files", tool.id());
             for (path, content) in &files {
                 // Every planned payload must be non-empty valid-ish text.
-                assert!(!content.trim().is_empty(), "{} empty content", path.display());
+                assert!(
+                    !content.trim().is_empty(),
+                    "{} empty content",
+                    path.display()
+                );
             }
         }
         // Spot-check kilo auth shape.

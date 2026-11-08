@@ -729,6 +729,11 @@ mod tests {
         assert!(GithubExecutor::is_claude_model("claude-sonnet-4.5"));
         assert!(GithubExecutor::is_claude_model("claude-opus-4.6"));
         assert!(GithubExecutor::is_claude_model("claude-haiku-4.5"));
+        // Bead openproxy-4d5h.45: dotted Copilot 5.5 ids route to /v1/messages.
+        assert!(GithubExecutor::is_claude_model("claude-opus-5.5"));
+        assert!(GithubExecutor::is_claude_model("claude-sonnet-5.5"));
+        assert!(GithubExecutor::is_claude_model("claude-haiku-5.5"));
+        assert!(GithubExecutor::is_claude_model("claude-fable-5.1"));
         // Sketch: sonnet/opus alone also count (live catalog variants)
         assert!(GithubExecutor::is_claude_model("sonnet-4"));
         assert!(GithubExecutor::is_claude_model("opus-4.7"));

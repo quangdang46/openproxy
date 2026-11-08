@@ -111,8 +111,7 @@ fn is_fingerprint_definition(tool: &Value, key: &str) -> bool {
     let desc_ok = def_get(tool, "description")
         .and_then(Value::as_str)
         .is_some_and(|d| d == want_desc);
-    let params_ok = def_get(tool, "parameters")
-        .is_some_and(|p| p == &want_params);
+    let params_ok = def_get(tool, "parameters").is_some_and(|p| p == &want_params);
     desc_ok && params_ok
 }
 
@@ -151,16 +150,15 @@ fn can_normalize_in_place(tool: &Value, key: &str) -> bool {
         .as_object()
         .map(|o| o.keys().map(String::as_str).collect())
         .unwrap_or_default();
-    if props
-        .keys()
-        .any(|name| !wanted.contains(&name.as_str()))
-    {
+    if props.keys().any(|name| !wanted.contains(&name.as_str())) {
         return false;
     }
     want_params["required"]
         .as_array()
         .map(|req| {
-            req.iter().filter_map(Value::as_str).all(|name| props.contains_key(name))
+            req.iter()
+                .filter_map(Value::as_str)
+                .all(|name| props.contains_key(name))
         })
         .unwrap_or(false)
 }
@@ -177,10 +175,7 @@ fn with_fingerprint_definition(tool: &Value, key: &str) -> Value {
         Some(&mut out)
     };
     if let Some(obj) = target.and_then(Value::as_object_mut) {
-        obj.insert(
-            "description".to_string(),
-            Value::String(desc.to_string()),
-        );
+        obj.insert("description".to_string(), Value::String(desc.to_string()));
         obj.insert("parameters".to_string(), params);
     }
     out
@@ -253,9 +248,9 @@ pub fn conceal_fingerprint_tool_names(tools: &mut Vec<Value>) -> BTreeMap<String
 pub fn append_missing_fingerprint_tools(tools: &mut Vec<Value>, flat: bool) -> Vec<String> {
     let mut appended = Vec::new();
     for name in OPENCODE_FINGERPRINT_TOOLS {
-        let already = tools.iter().any(|tool| {
-            fingerprint_tool_key(&tool_name_of(tool)) == Some(*name)
-        });
+        let already = tools
+            .iter()
+            .any(|tool| fingerprint_tool_key(&tool_name_of(tool)) == Some(*name));
         if already {
             continue;
         }
@@ -286,7 +281,9 @@ pub fn append_missing_fingerprint_tools(tools: &mut Vec<Value>, flat: bool) -> V
 /// Invert a sent → original rename map (alias → original becomes
 /// original → alias).
 fn aliases_by_original(map: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    map.iter().map(|(alias, original)| (original.clone(), alias.clone())).collect()
+    map.iter()
+        .map(|(alias, original)| (original.clone(), alias.clone()))
+        .collect()
 }
 
 /// Point an explicit tool_choice at the alias of a concealed caller tool.
@@ -383,9 +380,7 @@ fn append_system_text(system: &Value, text: &str) -> Value {
         Value::Array(blocks) => {
             let mut blocks = blocks.clone();
             for i in (0..blocks.len()).rev() {
-                let is_text = blocks[i]
-                    .get("text")
-                    .is_some_and(Value::is_string);
+                let is_text = blocks[i].get("text").is_some_and(Value::is_string);
                 if is_text {
                     let existing = blocks[i]["text"].as_str().unwrap_or("");
                     let new_text = if existing.trim().is_empty() {
@@ -436,10 +431,7 @@ fn note_unavailable_tools(body: &mut Value, flat: bool, names: &[String], claude
             Some(s) if !s.trim().is_empty() => format!("{s}\n\n{note}"),
             _ => note,
         };
-        obj.insert(
-            "instructions".to_string(),
-            Value::String(new_instructions),
-        );
+        obj.insert("instructions".to_string(), Value::String(new_instructions));
         return;
     }
     // Claude-shaped bodies carry `system` instead; /messages rejects role:"system".
@@ -452,10 +444,10 @@ fn note_unavailable_tools(body: &mut Value, flat: bool, names: &[String], claude
         Some(m) => m,
         None => return,
     };
-    let first_is_system_string = messages
-        .first()
-        .is_some_and(|m| m.get("role").and_then(Value::as_str) == Some("system")
-            && m.get("content").is_some_and(Value::is_string));
+    let first_is_system_string = messages.first().is_some_and(|m| {
+        m.get("role").and_then(Value::as_str) == Some("system")
+            && m.get("content").is_some_and(Value::is_string)
+    });
     if first_is_system_string {
         let first_content = messages[0]["content"].as_str().unwrap_or("").to_string();
         let new_content = format!("{first_content}\n\n{note}");
@@ -541,10 +533,7 @@ pub fn apply_env_fingerprint(body: &mut Value, flat: bool, claude: bool) -> bool
             Some(s) if !s.trim().is_empty() => format!("{s}\n\n{prompt}"),
             _ => prompt.to_string(),
         };
-        obj.insert(
-            "instructions".to_string(),
-            Value::String(new_instructions),
-        );
+        obj.insert("instructions".to_string(), Value::String(new_instructions));
         return true;
     }
     if claude || obj.contains_key("system") {
@@ -559,9 +548,10 @@ pub fn apply_env_fingerprint(body: &mut Value, flat: bool, claude: bool) -> bool
         Some(m) => m,
         None => return false,
     };
-    if let Some(idx) = messages.iter().position(|m| {
-        m.get("role").and_then(Value::as_str) == Some("system")
-    }) {
+    if let Some(idx) = messages
+        .iter()
+        .position(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+    {
         let target = &messages[idx];
         let content = target.get("content").cloned().unwrap_or(Value::Null);
         if system_carries_env(&content) {
@@ -591,7 +581,11 @@ pub fn apply_env_fingerprint(body: &mut Value, flat: bool, claude: bool) -> bool
 /// missing, and tell the model the appended ones are off-limits.
 ///
 /// Returns the rename map: sent name → original name.
-pub fn apply_fingerprint_tools(body: &mut Value, flat: bool, claude: bool) -> BTreeMap<String, String> {
+pub fn apply_fingerprint_tools(
+    body: &mut Value,
+    flat: bool,
+    claude: bool,
+) -> BTreeMap<String, String> {
     let Some(obj) = body.as_object_mut() else {
         return BTreeMap::new();
     };
@@ -628,10 +622,12 @@ pub fn apply_fingerprint_tools(body: &mut Value, flat: bool, claude: bool) -> BT
 /// Restore caller tool spellings in supported response/event shapes.
 /// `map` is sent (alias) name → original name, as produced by
 /// [`apply_fingerprint_tools`].
+///
+/// An empty map does NOT short-circuit: the Claude `tool_use` branches
+/// still apply the `_ide` suffix-strip fallback (upstream
+/// `decloakStreamChunk`/`decloakToolNames` run even when `toolNameMap` is
+/// null — that is exactly the map-lost-on-retry case).
 pub fn restore_tool_names(payload: &Value, map: &BTreeMap<String, String>) -> Value {
-    if map.is_empty() {
-        return payload.clone();
-    }
     if let Value::Array(items) = payload {
         return Value::Array(
             items
@@ -645,15 +641,24 @@ pub fn restore_tool_names(payload: &Value, map: &BTreeMap<String, String>) -> Va
     };
     let mut out = obj.clone();
 
-    // Claude streaming content_block_start event.
+    // Claude streaming content_block_start event. On a map miss, fall back
+    // to stripping the claude-cloaking `_ide` suffix — the live equivalent
+    // of upstream `decloakStreamChunk` (claudeCloaking.js), which applies
+    // `stripCloakSuffix` when `toolNameMap` has no entry (map lost across a
+    // retry/reconnect). Fingerprint aliases end `_client`, never `_ide`,
+    // so this cannot misfire on the fingerprint path.
     if payload.get("type").and_then(Value::as_str) == Some("content_block_start") {
         if let Some(block) = payload.get("content_block") {
             if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                 if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    if let Some(orig) = map.get(name) {
+                    if let Some(orig) = map
+                        .get(name)
+                        .cloned()
+                        .or_else(|| crate::core::utils::claude_cloaking::strip_cloak_suffix(name))
+                    {
                         let mut b = block.clone();
                         if let Some(bobj) = b.as_object_mut() {
-                            bobj.insert("name".to_string(), Value::String(orig.clone()));
+                            bobj.insert("name".to_string(), Value::String(orig));
                         }
                         out.insert("content_block".to_string(), b);
                     }
@@ -662,17 +667,20 @@ pub fn restore_tool_names(payload: &Value, map: &BTreeMap<String, String>) -> Va
         }
     }
 
-    // Claude non-streaming message body.
+    // Claude non-streaming message body — same `_ide` fallback as
+    // `decloakToolNames` (upstream claudeCloaking.js).
     if let Some(content) = payload.get("content").and_then(Value::as_array) {
         let new_content: Vec<Value> = content
             .iter()
             .map(|block| {
                 if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                     if let Some(name) = block.get("name").and_then(Value::as_str) {
-                        if let Some(orig) = map.get(name) {
+                        if let Some(orig) = map.get(name).cloned().or_else(|| {
+                            crate::core::utils::claude_cloaking::strip_cloak_suffix(name)
+                        }) {
                             let mut b = block.clone();
                             if let Some(bobj) = b.as_object_mut() {
-                                bobj.insert("name".to_string(), Value::String(orig.clone()));
+                                bobj.insert("name".to_string(), Value::String(orig));
                             }
                             return b;
                         }
@@ -712,10 +720,7 @@ pub fn restore_tool_names(payload: &Value, map: &BTreeMap<String, String>) -> Va
                                 if let Some(fobj) =
                                     c.get_mut("function").and_then(Value::as_object_mut)
                                 {
-                                    fobj.insert(
-                                        "name".to_string(),
-                                        Value::String(orig.clone()),
-                                    );
+                                    fobj.insert("name".to_string(), Value::String(orig.clone()));
                                 }
                                 c
                             } else {
@@ -940,7 +945,10 @@ mod tests {
         let mut map = BTreeMap::new();
         map.insert("shell_client".to_string(), "shell".to_string());
         retarget_tool_choice(&mut body, &map);
-        assert_eq!(body["tool_choice"]["function"]["name"], json!("shell_client"));
+        assert_eq!(
+            body["tool_choice"]["function"]["name"],
+            json!("shell_client")
+        );
     }
 
     #[test]
@@ -962,7 +970,10 @@ mod tests {
         alias_history_tool_calls(&mut body, &map);
         assert_eq!(body["input"][0]["name"], json!("read_client"));
         assert_eq!(body["input"][1]["name"], json!("other"));
-        assert_eq!(body["messages"][0]["tool_calls"][0]["function"]["name"], json!("shell_client"));
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function"]["name"],
+            json!("shell_client")
+        );
     }
 
     #[test]
@@ -1025,7 +1036,10 @@ mod tests {
         assert!(names.contains(&"shell"));
         // <env> marker prepended as a system message (no prior system).
         assert_eq!(body["messages"][0]["role"], json!("system"));
-        assert!(body["messages"][0]["content"].as_str().unwrap().contains("<env>"));
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<env>"));
     }
 
     #[test]
@@ -1048,13 +1062,19 @@ mod tests {
             "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "read_client", "arguments": "{}"}}]}}]
         });
         let out = restore_tool_names(&chunk, &map);
-        assert_eq!(out["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], json!("read"));
+        assert_eq!(
+            out["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            json!("read")
+        );
 
         let msg = json!({
             "choices": [{"message": {"tool_calls": [{"function": {"name": "read_client"}}]}}]
         });
         let out = restore_tool_names(&msg, &map);
-        assert_eq!(out["choices"][0]["message"]["tool_calls"][0]["function"]["name"], json!("read"));
+        assert_eq!(
+            out["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            json!("read")
+        );
     }
 
     #[test]
@@ -1076,6 +1096,21 @@ mod tests {
         let ev = json!({"type": "response.output_item.done", "item": {"type": "function_call", "name": "shell_client"}});
         let out = restore_tool_names(&ev, &map);
         assert_eq!(out["item"]["name"], json!("shell"));
+    }
+
+    #[test]
+    fn restore_tool_names_claude_shapes_fall_back_to_ide_suffix_strip() {
+        // 9router claudeCloaking.js decloakStreamChunk/decloakToolNames:
+        // when the map has no entry, an `_ide`-suffixed tool name is still
+        // decloaked (map lost across a retry). Decoy names pass through.
+        let map = BTreeMap::new();
+        let ev = json!({"type": "content_block_start", "content_block": {"type": "tool_use", "name": "something_ide", "id": "t1"}});
+        let out = restore_tool_names(&ev, &map);
+        assert_eq!(out["content_block"]["name"], json!("something"));
+        let msg = json!({"content": [{"type": "tool_use", "name": "something_ide"}, {"type": "tool_use", "name": "WebSearch"}]});
+        let out = restore_tool_names(&msg, &map);
+        assert_eq!(out["content"][0]["name"], json!("something"));
+        assert_eq!(out["content"][1]["name"], json!("WebSearch"));
     }
 
     #[test]

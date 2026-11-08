@@ -318,6 +318,17 @@ pub enum ComboStrategyEntry {
     Config(ComboStrategyConfig),
 }
 
+/// Per-provider user header overrides (9router
+/// `api/providers/[id]/overrides`). `headers` holds ONLY the rows the user
+/// changed — the dashboard diffs against the registry's built-in headers —
+/// and they are applied last at dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHeaderOverride {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub headers: BTreeMap<String, String>,
+}
+
 /// Per-provider account-fallback strategy entry — 9router
 /// `settings.providerStrategies[providerId]`.
 ///
@@ -570,6 +581,13 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub sticky_round_robin_limit: u32,
+    /// Per-provider user header overrides, keyed by canonical provider id
+    /// (9router settingsRepo.js `providerOverrides`, written by
+    /// `/api/providers/{id}/overrides`). Only user-changed headers are
+    /// stored; they are applied LAST at dispatch, after the registry and
+    /// connection headers (base.js:131).
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub provider_overrides: BTreeMap<String, ProviderHeaderOverride>,
     /// Per-provider account-fallback overrides. Accepts legacy bare string
     /// (`"round-robin"`) or the 9router nested object the dashboard writes
     /// (`{ fallbackStrategy, stickyRoundRobinLimit, rotateStrategy, proxyPoolId }`).
@@ -677,6 +695,15 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub ponytail_level: String,
+    /// 9router `customPromptEnabled` / `customPrompt` (settingsRepo.js:62-63,
+    /// TokenSaverClient.js) — a user-authored system prompt appended to every
+    /// request via `injectSystemPrompt`, independent of the built-in savers.
+    /// This is the upstream key pair; the older `extra["systemInject"]` /
+    /// `extra["systemPrompt"]` keys are still honored as a fallback.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub custom_prompt_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub custom_prompt: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub headroom_enabled: bool,
     #[serde(
@@ -816,6 +843,7 @@ impl Default for Settings {
             tailscale_enabled: false,
             tailscale_url: String::new(),
             sticky_round_robin_limit: default_sticky_round_robin_limit(),
+            provider_overrides: BTreeMap::new(),
             provider_strategies: BTreeMap::new(),
             combo_strategy: default_combo_strategy(),
             combo_strategies: BTreeMap::new(),
@@ -840,6 +868,8 @@ impl Default for Settings {
             caveman_level: default_caveman_level(),
             ponytail_enabled: false,
             ponytail_level: default_ponytail_level(),
+            custom_prompt_enabled: false,
+            custom_prompt: String::new(),
             headroom_enabled: false,
             headroom_url: default_headroom_url(),
             headroom_timeout_ms: default_headroom_timeout_ms(),

@@ -191,10 +191,7 @@ async fn run_hermes_profiles(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32
                     .cloned()
                     .unwrap_or_default();
                 for profile in &profiles {
-                    let name = profile
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("?");
+                    let name = profile.get("name").and_then(Value::as_str).unwrap_or("?");
                     let state = if profile
                         .get("hasOpenProxy")
                         .and_then(Value::as_bool)

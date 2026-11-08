@@ -407,7 +407,6 @@ fn tool_table() -> Vec<ToolHandler> {
                     monthly_budget_usd: None,
                     extra: std::collections::BTreeMap::new(),
                     access: Default::default(),
-
                 };
                 db_update_sync(&state.db, move |db| {
                     db.api_keys.push(k);

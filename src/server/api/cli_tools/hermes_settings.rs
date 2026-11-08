@@ -40,10 +40,7 @@ pub fn routes() -> Router<AppState> {
                 .post(save_hermes_settings)
                 .delete(delete_hermes_settings),
         )
-        .route(
-            "/api/cli-tools/hermes-profiles",
-            get(get_hermes_profiles),
-        )
+        .route("/api/cli-tools/hermes-profiles", get(get_hermes_profiles))
 }
 
 // ── request shapes ───────────────────────────────────────────────────────────
@@ -101,9 +98,13 @@ async fn check_hermes_installed() -> bool {
     if command_exists("hermes").await {
         return true;
     }
-    fs::metadata(hermes_profiles::resolve_hermes_home(None).map(|h| h.config_path).unwrap_or_default())
-        .await
-        .is_ok()
+    fs::metadata(
+        hermes_profiles::resolve_hermes_home(None)
+            .map(|h| h.config_path)
+            .unwrap_or_default(),
+    )
+    .await
+    .is_ok()
 }
 
 async fn command_exists(program: &str) -> bool {
@@ -264,19 +265,14 @@ async fn save_hermes_settings(
     // selections: [{role, model}] — "default" plus any auxiliary/delegation slots.
     // Legacy callers (CLI quick setup) send a bare `model` → treat as default role.
     let selections: Vec<(String, String)> = match &body.selections {
-        Some(list)
-            if list
-                .iter()
-                .any(|s| s.role.is_some() && s.model.is_some()) =>
-        {
-            list.iter()
-                .filter_map(|s| {
-                    let role = s.role.as_deref()?;
-                    let model = s.model.as_deref()?;
-                    Some((role.to_string(), model.to_string()))
-                })
-                .collect()
-        }
+        Some(list) if list.iter().any(|s| s.role.is_some() && s.model.is_some()) => list
+            .iter()
+            .filter_map(|s| {
+                let role = s.role.as_deref()?;
+                let model = s.model.as_deref()?;
+                Some((role.to_string(), model.to_string()))
+            })
+            .collect(),
         _ => body
             .model
             .as_deref()
@@ -584,7 +580,7 @@ async fn apply_to_all_profiles(
         let home = hermes_profiles::resolve_hermes_home(Some(&name))
             .unwrap_or_else(|_| hermes_profiles::resolve_hermes_home(None).unwrap());
 
-        let outcome = async {
+        let outcome: AnyhowResult<Value> = async {
             let mut yaml = read_config_yaml(&home).await?;
             let main = hermes_yaml::parse_model_block(&yaml);
 
@@ -694,11 +690,7 @@ async fn apply_to_all_profiles(
 
 fn resolve_profile(profile: Option<&str>) -> Result<HermesHome, Response> {
     hermes_profiles::resolve_hermes_home(profile).map_err(|message| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": message })),
-        )
-            .into_response()
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
     })
 }
 

@@ -609,11 +609,17 @@ impl UnifiedExecutor {
         let body_bytes = serde_json::to_vec(&transformed_body)?;
 
         let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
-        let response = client
+        // Build then send through the TLS-fallback path: a self-signed-cert
+        // failure retries once with verification disabled (9router
+        // proxyFetch.js fetchWithTlsFallback).
+        let req = client
             .post(&url)
             .headers(headers.clone())
             .body(body_bytes)
-            .send()
+            .build()?;
+        let response = self
+            .pool
+            .send_with_tls_fallback(&self.provider, request.proxy.as_ref(), req)
             .await?;
 
         Ok(ProviderExecutionResponse {

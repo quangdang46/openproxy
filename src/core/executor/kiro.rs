@@ -56,16 +56,11 @@ fn regionalize_host(host_url: &str, region: &str) -> String {
 }
 
 fn normalize_kiro_model(model: &str) -> String {
-    if let Some(stripped) = model.strip_suffix("-thinking-agentic") {
-        return stripped.to_string();
-    }
-    if let Some(stripped) = model.strip_suffix("-thinking") {
-        return stripped.to_string();
-    }
-    if let Some(stripped) = model.strip_suffix("-agentic") {
-        return stripped.to_string();
-    }
-    model.to_string()
+    // Single normalization path (bead openproxy-4d5h.46): strips the
+    // 9router-synthetic -agentic/-thinking suffixes AND folds snapshot dates /
+    // dotted-dashed spellings onto Kiro's canonical upstream ids — the same
+    // `resolveKiroModel` upstream uses.
+    crate::core::config::kiro_constants::resolve_kiro_model(model).upstream
 }
 
 // ==================== INTEGRITY REPAIR LOOP (9router runIntegrityRecovery) ====================

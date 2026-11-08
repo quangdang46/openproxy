@@ -19,23 +19,34 @@ const DEFAULT_THINKING_CLAUDE_SIGNATURE: &str = "EpwGCkYIChgCKkCzVUuRrg7CcglSUWE
 
 // ─── helpers ─────────────────────────────────────────────────────────
 
+/// Block types that make a message count as non-empty even without text —
+/// the `CONTENTFUL_BLOCKS` set in claude.js:36-42. `container_upload` (the
+/// Files API file reference) must be listed: a user turn whose only block is
+/// one is valid Anthropic input (#4316), and dropping it forwarded
+/// `messages: []` to the provider.
+fn is_contentful_block(block: &Value) -> bool {
+    let t = block.get("type").and_then(Value::as_str).unwrap_or("");
+    if t == "text" {
+        return block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+    }
+    matches!(
+        t,
+        "tool_use" | "tool_result" | "image" | "document" | "container_upload"
+    )
+}
+
 /// Check if a message has valid (non-empty / non-trivial) content.
 fn has_valid_content(msg: &Value) -> bool {
     match msg.get("content") {
         Some(Value::String(s)) => !s.trim().is_empty(),
-        Some(Value::Array(arr)) => arr.iter().any(|block| {
-            let t = block.get("type").and_then(Value::as_str).unwrap_or("");
-            t == "text"
-                && block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-                || t == "tool_use"
-                || t == "tool_result"
-                || t == "image"
-                || t == "document"
-        }),
+        // Spec allows a bare content-block object; treat it as a one-block
+        // array (claude.js hasValidContent `isContentfulBlock(msg.content)`).
+        Some(Value::Object(_)) => msg.get("content").map(is_contentful_block).unwrap_or(false),
+        Some(Value::Array(arr)) => arr.iter().any(is_contentful_block),
         _ => false,
     }
 }
@@ -550,6 +561,45 @@ fn mark_last_cacheable_block(msg: &mut Value) -> bool {
     false
 }
 
+/// In an agent's tool loop a request ends with the results of the last
+/// assistant turn's tool calls — after that turn's breakpoint. They go at the
+/// full input price, and the next request (which appends to them) writes them
+/// into the cache. When the 4-marker budget has room, a 5m breakpoint on that
+/// final user turn caches them now, and the next request reads them.
+/// Mirrors `markFinalToolResults` in claude.js:380-389.
+fn mark_final_tool_results(body: &mut Value) -> bool {
+    let eligible = {
+        let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+            return false;
+        };
+        let Some(last) = messages.last() else {
+            return false;
+        };
+        if last.get("role").and_then(Value::as_str) != Some("user") {
+            return false;
+        }
+        let Some(content) = last.get("content").and_then(Value::as_array) else {
+            return false;
+        };
+        content
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            && !content.iter().any(|b| b.get("cache_control").is_some())
+            && count_cache_control_blocks(body) < 4
+    };
+    if !eligible {
+        return false;
+    }
+    let Some(last) = body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|m| m.last_mut())
+    else {
+        return false;
+    };
+    mark_last_cacheable_block(last)
+}
+
 /// Re-anchor cache breakpoints on a Claude passthrough body (same policy as
 /// prepareClaudeRequest): last tool + last system block at 1h, last assistant
 /// at 5m. Client markers point at pre-normalization offsets, so they are
@@ -651,6 +701,10 @@ pub fn anchor_claude_cache(body: &mut Value) {
             }
         }
     }
+
+    // ...and a tool loop's final tool results, so the next step reads them
+    // (claude.js:461).
+    mark_final_tool_results(body);
 }
 
 // ─── trailing user turn / prefill ───────────────────────────────────
@@ -739,20 +793,76 @@ pub fn prepare_claude_request(
         obj.remove("output_config");
     }
 
-    // ── clamp max_tokens to model-aware ceiling ──
-    let ceiling: u64 = {
-        let model_lower = obj
-            .get("model")
+    // ── per-model capability rules (9router claude.js parity, bead
+    // openproxy-4d5h.45) ──
+    // Resolved once: drives the max_tokens ceiling, the thinking-off
+    // substitution and the forced-tool_choice downgrade below.
+    let model_id = obj
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let model_caps =
+        crate::core::combo::capabilities::get_capabilities_for_model(provider, &model_id);
+
+    // Models whose API rejects thinking "disabled" (Sonnet 5.5 takes
+    // "between_tools" in its place). Runs on every Claude-bound body, so
+    // OpenAI clients, native passthrough and provider-level "off" overrides
+    // are all covered.
+    if let Some(off_type) = model_caps.thinking_off_type {
+        let is_disabled = obj
+            .get("thinking")
+            .and_then(|t| t.get("type"))
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if model_lower.contains("opus") {
-            128_000 // Opus: 128k max output (9router capabilities.js parity)
-        } else if model_lower.contains("sonnet") {
-            128_000
-        } else {
-            DEFAULT_MAX_TOKENS as u64 // 64_000 (haiku, unknown, non-Claude)
+            == Some("disabled");
+        if is_disabled {
+            if let Some(t) = obj.get_mut("thinking").and_then(Value::as_object_mut) {
+                t.insert("type".to_string(), json!(off_type));
+            }
+            // between_tools only accepts effort up to high.
+            let effort = obj
+                .get("output_config")
+                .and_then(|o| o.get("effort"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if matches!(effort.as_deref(), Some("xhigh") | Some("max")) {
+                if let Some(o) = obj.get_mut("output_config").and_then(Value::as_object_mut) {
+                    o.insert("effort".to_string(), json!("high"));
+                }
+            }
         }
+    }
+    // Opus/Sonnet 5.5 reject forced tool_choice (any/tool) with a 400 —
+    // downgrade to auto, preserving disable_parallel_tool_use.
+    if !model_caps.forced_tool_choice {
+        let forced = obj
+            .get("tool_choice")
+            .and_then(|t| t.get("type"))
+            .and_then(Value::as_str)
+            .map(|t| t == "any" || t == "tool")
+            .unwrap_or(false);
+        if forced {
+            let disable_parallel = obj
+                .get("tool_choice")
+                .and_then(|t| t.get("disable_parallel_tool_use"))
+                .cloned();
+            let mut auto = serde_json::Map::new();
+            auto.insert("type".to_string(), json!("auto"));
+            if let Some(d) = disable_parallel {
+                auto.insert("disable_parallel_tool_use".to_string(), d);
+            }
+            obj.insert("tool_choice".to_string(), Value::Object(auto));
+        }
+    }
+
+    // ── clamp max_tokens to model-aware ceiling ──
+    // 9router claude.js: `modelCaps.maxOutput || DEFAULT_MAX_TOKENS` — the
+    // capabilities matrix (1M-context Claude rows publish 128000) replaces
+    // the old opus/sonnet name heuristic so dotted 5.x ids clamp correctly.
+    let ceiling: u64 = if model_caps.max_output > 0 {
+        model_caps.max_output
+    } else {
+        DEFAULT_MAX_TOKENS as u64
     };
     if let Some(max_tokens) = obj.get("max_tokens").and_then(Value::as_u64) {
         if max_tokens > ceiling {
@@ -1020,6 +1130,10 @@ pub fn prepare_claude_request(
             obj.remove("tool_choice");
         }
     }
+
+    // A tool loop's final tool results: cached now, so the next step reads
+    // them (claude.js:736 `markFinalToolResults`, 4-marker budget inside).
+    mark_final_tool_results(body);
 
     // ── 4. Cloaking for OAuth tokens ──
     if let Some(api_key) = api_key {
@@ -1423,10 +1537,11 @@ mod tests {
 
     #[test]
     fn select_anthropic_beta_gates_heavy_flags() {
-        let base = crate::core::executor::select_anthropic_beta("claude-haiku-4-5");
+        let no_thinking = json!({});
+        let base = crate::core::executor::select_anthropic_beta("claude-haiku-4-5", &no_thinking);
         assert!(base.contains("claude-code-20250219"));
         assert!(!base.contains("advanced-tool-use-2025-11-20"));
-        let heavy = crate::core::executor::select_anthropic_beta("claude-sonnet-4-6");
+        let heavy = crate::core::executor::select_anthropic_beta("claude-sonnet-4-6", &no_thinking);
         assert!(heavy.contains("advanced-tool-use-2025-11-20"));
         assert!(heavy.contains("effort-2025-11-24"));
     }
@@ -1466,6 +1581,52 @@ mod tests {
         assert_eq!(body["max_tokens"], 128000);
         // budget shrunk to max_tokens - 1024
         assert_eq!(body["thinking"]["budget_tokens"], 126976);
+    }
+
+    #[test]
+    fn sonnet_5_5_disabled_thinking_becomes_between_tools() {
+        // Bead openproxy-4d5h.45 / upstream claude.js:515 — Sonnet 5.5
+        // rejects thinking.type "disabled"; substitute "between_tools" and
+        // clamp effort above high.
+        let mut body = json!({
+            "model": "claude-sonnet-5.5",
+            "max_tokens": 32000,
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "xhigh"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        prepare_claude_request(&mut body, "github", None, None, None);
+        assert_eq!(body["thinking"]["type"], "between_tools");
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn opus_5_5_forced_tool_choice_downgrades_to_auto() {
+        // Bead openproxy-4d5h.45 — Opus/Sonnet 5.5 400 on forced tool use.
+        for model in ["claude-opus-5.5", "claude-sonnet-5-5"] {
+            let mut body = json!({
+                "model": model,
+                "max_tokens": 32000,
+                "tool_choice": {"type": "any", "disable_parallel_tool_use": true},
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            prepare_claude_request(&mut body, "github", None, None, None);
+            assert_eq!(body["tool_choice"]["type"], "auto", "{model}");
+            assert_eq!(
+                body["tool_choice"]["disable_parallel_tool_use"],
+                json!(true),
+                "{model}"
+            );
+        }
+        // Models without the flag keep forced tool choice untouched.
+        let mut body = json!({
+            "model": "claude-sonnet-4.5",
+            "max_tokens": 32000,
+            "tool_choice": {"type": "any"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        prepare_claude_request(&mut body, "github", None, None, None);
+        assert_eq!(body["tool_choice"]["type"], "any");
     }
 
     #[test]
@@ -2074,5 +2235,123 @@ mod no_global_identity_tests {
             session_id_of(&turn2),
             "a growing conversation must keep one session id"
         );
+    }
+
+    // ─── container_upload user turn (bead .21) ─────────────────────
+
+    #[test]
+    fn user_turn_with_only_container_upload_survives() {
+        // claude.js hasValidContent CONTENTFUL_BLOCKS (#4316): a user turn
+        // whose only block is a container_upload file reference is valid
+        // input and must not be dropped as empty.
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                {"role": "user", "content": [
+                    {"type": "container_upload", "file_id": "file_123"}
+                ]}
+            ]
+        });
+        prepare_claude_request(&mut body, "claude", None, None, None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "container_upload turn must be kept: {msgs:?}"
+        );
+        assert_eq!(msgs[2]["content"][0]["type"], "container_upload");
+    }
+
+    #[test]
+    fn whitespace_only_user_turn_still_dropped() {
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                {"role": "user", "content": [{"type": "text", "text": "   "}]}
+            ]
+        });
+        prepare_claude_request(&mut body, "claude", None, None, None);
+        // The emptied user turn is dropped; ensureTrailingUserTurn then
+        // restores a placeholder because the body would otherwise end on
+        // the assistant turn.
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs.iter().all(|m| {
+                m["content"]
+                    .as_array()
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(true)
+            }),
+            "no message may keep an empty content array: {msgs:?}"
+        );
+        assert_eq!(msgs.last().unwrap()["role"], "user");
+    }
+
+    // ─── final tool results breakpoint (bead .22) ───────────────────
+
+    fn tool_loop_body() -> Value {
+        json!({
+            "system": [{"type": "text", "text": "sys"}],
+            "tools": [{"name": "f", "description": "d", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "go"}]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "f", "input": {}},
+                    {"type": "text", "text": "calling"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "done"}
+                ]}
+            ]
+        })
+    }
+
+    #[test]
+    fn anchor_claude_cache_marks_final_tool_results() {
+        // claude.js markFinalToolResults: a trailing user turn of tool_result
+        // blocks gets a 5m breakpoint when the 4-marker budget allows.
+        let mut body = tool_loop_body();
+        anchor_claude_cache(&mut body);
+        let last = &body["messages"][2]["content"][0];
+        assert_eq!(last["type"], "tool_result");
+        assert_eq!(
+            last["cache_control"]["type"], "ephemeral",
+            "final tool results must carry the 5m breakpoint: {last}"
+        );
+        assert!(count_cache_control_blocks(&body) <= 4);
+    }
+
+    #[test]
+    fn prepare_claude_request_marks_final_tool_results() {
+        let mut body = tool_loop_body();
+        prepare_claude_request(&mut body, "claude", None, None, None);
+        let msgs = body["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        assert_eq!(last["role"], "user");
+        let marked = last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["cache_control"]["type"] == "ephemeral");
+        assert!(marked, "final tool results must be cached: {last}");
+        assert!(count_cache_control_blocks(&body) <= 4);
+    }
+
+    #[test]
+    fn final_tool_results_respects_marker_budget() {
+        // Already at the 4-marker cap → no fifth breakpoint on the tail.
+        let mut body = tool_loop_body();
+        body["messages"][2]["content"][0]["cache_control"] = json!({"type": "ephemeral"});
+        // Push the count to the cap with client markers elsewhere.
+        body["messages"][0]["content"][0]["cache_control"] = json!({"type": "ephemeral"});
+        body["messages"][1]["content"][0]["cache_control"] = json!({"type": "ephemeral"});
+        body["messages"][1]["content"][1]["cache_control"] = json!({"type": "ephemeral"});
+        // 4 markers already (system+tool anchors make 2 more → over cap,
+        // the guard trims; the point is the tail never gains a NEW one
+        // beyond what the budget allows).
+        anchor_claude_cache(&mut body);
+        assert!(count_cache_control_blocks(&body) <= 4);
     }
 }

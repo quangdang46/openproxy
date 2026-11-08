@@ -277,6 +277,55 @@ fn build_sse_response(status: reqwest::StatusCode, body: String) -> UpstreamResp
     UpstreamResponse::Reqwest(reqwest::Response::from(response))
 }
 
+/// Port of 9router `buildCommandCodeHeaders()`
+/// (shared/commandCodeHeaders.js:53-63 + registry/commandcode.js:25-33):
+/// the official CLI 1.88.0 static identity headers plus the dynamic
+/// `x-project-slug` (slugify of the working dir) and `x-session-id`
+/// (the body's conversation-stable `threadId` — sent VERBATIM, matching
+/// upstream `sessionId || randomUUID()`; the translator already hashed the
+/// client session into UUID shape, so re-hashing here would break the
+/// header/body equality the CLI relies on).
+pub fn build_command_code_headers(
+    api_key: Option<&str>,
+    stream: bool,
+    session_id: Option<&str>,
+) -> HeaderMap {
+    use crate::core::utils::command_code_identity::{
+        command_code_project_slug, COMMAND_CODE_STATIC_HEADERS,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    for &(name, value) in COMMAND_CODE_STATIC_HEADERS {
+        // &'static str keys implement IntoHeaderName; values are all
+        // static ASCII so from_static cannot fail.
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+    if let Ok(value) = HeaderValue::from_str(command_code_project_slug()) {
+        headers.insert("x-project-slug", value);
+    }
+    let session_uuid = session_id
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if let Ok(value) = HeaderValue::from_str(&session_uuid) {
+        headers.insert("x-session-id", value);
+    }
+
+    if let Some(t) = api_key {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", t))
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+    }
+
+    if stream {
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    }
+
+    headers
+}
+
 #[derive(Clone)]
 pub struct CommandCodeExecutor {
     pool: Arc<ClientPool>,
@@ -359,32 +408,25 @@ impl CommandCodeExecutor {
         COMMANDCODE_URL.to_string()
     }
 
-    fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            "x-session-id",
-            HeaderValue::from_str(&Uuid::new_v4().to_string())
-                .unwrap_or_else(|_| HeaderValue::from_static("")),
-        );
-
+    /// Port of 9router `buildCommandCodeHeaders()`
+    /// (shared/commandCodeHeaders.js:53-63 + registry/commandcode.js:25-33):
+    /// the official CLI 1.88.0 static identity headers plus the dynamic
+    /// `x-project-slug` (slugify of the working dir) and `x-session-id`
+    /// (the body's conversation-stable `threadId` — the same value the
+    /// translator minted, so header and body never disagree; falls back to
+    /// a fresh UUID when the body carries none, matching `sessionId ||
+    /// randomUUID()`).
+    fn build_headers(
+        &self,
+        credentials: &ProviderConnection,
+        stream: bool,
+        session_id: Option<&str>,
+    ) -> HeaderMap {
         let token = credentials
             .api_key
             .as_deref()
             .or(credentials.access_token.as_deref());
-        if let Some(t) = token {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {}", t))
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-
-        if stream {
-            headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        }
-
-        headers
+        build_command_code_headers(token, stream, session_id)
     }
 
     pub async fn execute_request(
@@ -394,7 +436,14 @@ impl CommandCodeExecutor {
         // Port of JS transformRequest(): always force stream=true upstream.
         force_commandcode_stream(&mut request.body);
         let url = self.build_url();
-        let headers = self.build_headers(&request.credentials, true);
+        // 9router executors/commandcode.js:30-33 — x-session-id reuses the
+        // body's conversation-stable threadId verbatim.
+        let session_id = request
+            .body
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let headers = self.build_headers(&request.credentials, true, session_id.as_deref());
 
         let client = self.pool.get("commandcode", request.proxy.as_ref())?;
         // Retry loop for 502/503/504 (port of JS execute():42-61, x2 + backoff).
@@ -880,5 +929,74 @@ mod tests {
             }
             _ => panic!("expected Reqwest variant"),
         }
+    }
+
+    // --- openproxy-4d5h.29: official CLI 1.88.0 header parity ---
+
+    #[test]
+    fn headers_carry_cli_1_88_0_identity_set() {
+        let headers = build_command_code_headers(Some("user_abc"), true, Some("thread-1"));
+        assert_eq!(headers.get("user-agent").unwrap(), "cli");
+        assert_eq!(headers.get("x-command-code-version").unwrap(), "1.88.0");
+        assert_eq!(headers.get("x-cli-environment").unwrap(), "production");
+        assert_eq!(headers.get("x-cli-surface").unwrap(), "cli");
+        assert_eq!(headers.get("x-taste-learning").unwrap(), "false");
+        assert_eq!(headers.get("content-type").unwrap(), "application/json");
+        assert_eq!(headers.get("accept").unwrap(), "text/event-stream");
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer user_abc");
+        // Dynamic headers present and well-formed.
+        assert!(headers.get("x-project-slug").is_some());
+        assert_eq!(headers.get("x-session-id").unwrap(), "thread-1");
+    }
+
+    #[test]
+    fn session_id_is_verbatim_and_stable() {
+        // The body's threadId is sent verbatim — upstream relies on header ==
+        // body threadId (executors/commandcode.js:30-33).
+        let a = build_command_code_headers(None, true, Some("fixed-thread"));
+        let b = build_command_code_headers(None, true, Some("fixed-thread"));
+        assert_eq!(a.get("x-session-id"), b.get("x-session-id"));
+        assert_eq!(a.get("x-session-id").unwrap(), "fixed-thread");
+        // No Accept header on the non-stream path is irrelevant here (executor
+        // always forces stream), but a missing session falls back to a UUID.
+        let c = build_command_code_headers(None, true, None);
+        let session = c.get("x-session-id").unwrap().to_str().unwrap();
+        assert!(uuid::Uuid::parse_str(session).is_ok());
+    }
+
+    #[test]
+    fn translator_mints_stable_uuid_shaped_thread_id() {
+        // The translator resolves the client session (headers/body) and mints
+        // threadId = toCommandCodeSessionUuid(session) — deterministic for a
+        // stable session, UUID-shaped for the upstream.
+        let creds = json!({
+            "provider": "commandcode",
+            "rawHeaders": {"x-session-id": "conv-42"}
+        });
+        let mut body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        crate::core::translator::request::openai_to_commandcode::openai_to_commandcode_request(
+            "m",
+            &mut body,
+            true,
+            Some(&creds),
+        );
+        let thread = body.get("threadId").and_then(Value::as_str).unwrap();
+        assert_eq!(thread.len(), 36);
+        assert_eq!(&thread[14..15], "4");
+        // Same session → same threadId across calls (session-stable).
+        let mut body2 = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        crate::core::translator::request::openai_to_commandcode::openai_to_commandcode_request(
+            "m",
+            &mut body2,
+            true,
+            Some(&creds),
+        );
+        assert_eq!(body2.get("threadId").and_then(Value::as_str), Some(thread));
     }
 }

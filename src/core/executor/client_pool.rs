@@ -19,6 +19,11 @@ pub const CLIENT_POOL_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Cache-key suffix for clients built with certificate verification
+/// disabled. Kept separate from the secure key so the one-shot insecure
+/// retry never shares a connection pool with (or poisons) the normal path.
+const INSECURE_KEY_SUFFIX: &str = "|insecure-tls";
+
 /// How often the stale-connection cleaner runs.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 /// Connections unused for longer than this are removed.
@@ -96,13 +101,46 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+        self.get_inner(provider_key, proxy, false)
+    }
+
+    /// A pooled client that skips TLS certificate verification. Used ONLY by
+    /// the one-shot insecure retry in [`Self::send_with_tls_fallback`] after
+    /// a self-signed/unverifiable-cert failure — never for the primary
+    /// attempt (port of 9router `proxyFetch.js` `getDispatcher(_, true)` /
+    /// `rejectUnauthorized: false`, open-sse/utils/proxyFetch.js:233-253).
+    pub fn get_insecure(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+    ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+        self.get_inner(provider_key, proxy, true)
+    }
+
+    fn get_inner(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+        insecure: bool,
+    ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
         let timeout = self.timeout;
-        let result =
-            self.get_or_insert_with(provider_key, proxy, || build_reqwest_client(proxy, timeout));
-        if result.is_ok() {
-            self.touch(client_key(provider_key, proxy));
+        let key = client_key(provider_key, proxy);
+        let key = if insecure {
+            format!("{key}{INSECURE_KEY_SUFFIX}")
+        } else {
+            key
+        };
+        let result = self
+            .reqwest_clients
+            .entry(key.clone())
+            .or_try_insert_with(|| build_reqwest_client(proxy, timeout, insecure));
+        match result {
+            Ok(entry) => {
+                self.touch(key);
+                Ok(entry.clone())
+            }
+            Err(e) => Err(e),
         }
-        result
     }
 
     pub fn get_hyper_direct(
@@ -132,6 +170,46 @@ impl ClientPool {
         // cannot build duplicate pools and then discard the extras.
         let entry = self.reqwest_clients.entry(key).or_try_insert_with(build)?;
         Ok(entry.clone())
+    }
+
+    /// Execute `request`, retrying ONCE with certificate verification
+    /// disabled when the failure is a TLS certificate error (self-signed
+    /// chain, expired cert, bad altname, …).
+    ///
+    /// Port of 9router `fetchWithTlsFallback`
+    /// (`open-sse/utils/proxyFetch.js:254-274`, cert set at :102-115):
+    /// `STRICT_SSL=true`/`1` disables the fallback, matching upstream's
+    /// `options.strictTls === true || process.env.STRICT_SSL`. The insecure
+    /// attempt uses a SEPARATE pooled client (`danger_accept_invalid_certs`)
+    /// keyed with [`INSECURE_KEY_SUFFIX`], so only that attempt skips
+    /// verification — the primary path stays strict.
+    ///
+    /// The request must be replayable: callers build it via
+    /// `RequestBuilder::build()` and this method uses `try_clone()` for the
+    /// retry. A non-replayable body (streaming upload) skips the fallback
+    /// and sends once, matching upstream's locked-body guard.
+    pub async fn send_with_tls_fallback(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let Some(retry_request) = request.try_clone() else {
+            let client = self.get(provider_key, proxy)?;
+            return client.execute(request).await;
+        };
+
+        let secure_client = self.get(provider_key, proxy)?;
+        send_once_with_insecure_retry(
+            strict_ssl_enabled(),
+            || secure_client.execute(request),
+            || async {
+                let insecure_client = self.get_insecure(provider_key, proxy)?;
+                insecure_client.execute(retry_request).await
+            },
+            is_tls_cert_error,
+        )
+        .await
     }
 
     /// Record that a key was just accessed (for staleness tracking).
@@ -193,6 +271,7 @@ impl ClientPool {
 fn build_reqwest_client(
     proxy: Option<&ProxyTarget>,
     timeout: ClientTimeout,
+    insecure: bool,
 ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
         .pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT)
@@ -227,6 +306,16 @@ fn build_reqwest_client(
                 .no_proxy(reqwest::NoProxy::from_string(&proxy.no_proxy));
             builder = builder.proxy(proxy);
         }
+    }
+
+    if insecure {
+        // Port of `rejectUnauthorized: false` (proxyFetch.js:244-247). Both
+        // flags are needed: upstream's retry set includes
+        // ERR_TLS_CERT_ALTNAME_INVALID, which is a hostname check, not a
+        // chain-validation failure.
+        builder = builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
     }
 
     Ok(Arc::new(builder.build()?))
@@ -268,6 +357,81 @@ fn client_key(provider_key: &str, proxy: Option<&ProxyTarget>) -> String {
     }
 }
 
+/// Upstream gate: `options.strictTls === true || STRICT_SSL === "true" || "1"`
+/// (proxyFetch.js:262). Case-sensitive, matching Node's `===`.
+fn strict_ssl_enabled() -> bool {
+    matches!(
+        std::env::var("STRICT_SSL").ok().as_deref(),
+        Some("true") | Some("1")
+    )
+}
+
+/// Port of `isTlsCertError` (proxyFetch.js:112-115): the TLS_CERT_ERRORS set
+/// covers self-signed chains, unverifiable leaf signatures, missing issuers,
+/// expired certs, and bad altnames. rustls surfaces the same failures as
+/// `rustls::Error::InvalidCertificate(CertificateError::…)` somewhere in the
+/// `reqwest::Error` source chain, so classify by walking that chain.
+pub fn is_tls_cert_error(err: &reqwest::Error) -> bool {
+    tls_cert_error_in_chain(err)
+}
+
+/// Walk an error chain looking for a rustls certificate-validation failure.
+/// Generic over `dyn Error` so tests can exercise it without a live TLS
+/// handshake (a `reqwest::Error` cannot be constructed synthetically).
+pub fn tls_cert_error_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(rustls_err) = e.downcast_ref::<rustls::Error>() {
+            if is_cert_rustls_error(rustls_err) {
+                return true;
+            }
+        }
+        current = e.source();
+    }
+    false
+}
+
+/// Map rustls certificate errors onto upstream's TLS_CERT_ERRORS set:
+/// self-signed / unverifiable leaf / missing issuer → UnknownIssuer,
+/// BadSignature; expired → Expired; altname → NotValidForName. Revocation
+/// and other failures are NOT retried, matching upstream (CERT_REVOKED is
+/// absent from the set).
+fn is_cert_rustls_error(err: &rustls::Error) -> bool {
+    use rustls::CertificateError as CertErr;
+    matches!(
+        err,
+        rustls::Error::InvalidCertificate(
+            CertErr::UnknownIssuer
+                | CertErr::BadSignature
+                | CertErr::Expired
+                | CertErr::NotValidForName
+        )
+    )
+}
+
+/// The retry-once core, generic over response and error types so unit tests
+/// can drive it without constructing a `reqwest::Error`. `send_insecure` is
+/// invoked at most once and only when `is_cert_error` accepts the secure
+/// attempt's error and `strict_ssl` is off.
+async fn send_once_with_insecure_retry<R, E, FS, FI, RFut, IFut>(
+    strict_ssl: bool,
+    send_secure: FS,
+    send_insecure: FI,
+    is_cert_error: impl Fn(&E) -> bool,
+) -> Result<R, E>
+where
+    FS: FnOnce() -> RFut,
+    FI: FnOnce() -> IFut,
+    RFut: std::future::Future<Output = Result<R, E>>,
+    IFut: std::future::Future<Output = Result<R, E>>,
+{
+    match send_secure().await {
+        Ok(resp) => Ok(resp),
+        Err(err) if !strict_ssl && is_cert_error(&err) => send_insecure().await,
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(test)]
 mod stream_deadline_tests {
     use super::stream_read_timeout;
@@ -295,5 +459,194 @@ mod stream_deadline_tests {
             Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS),
             "a hard-coded literal here would silently disagree with the watchdog"
         );
+    }
+}
+
+#[cfg(test)]
+mod tls_fallback_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    /// A stand-in for `reqwest::Error`: the classifier only needs an error
+    /// chain, and `reqwest::Error` cannot be constructed in a unit test.
+    #[derive(Debug)]
+    struct TestError {
+        kind: &'static str,
+        source: Option<Box<dyn std::error::Error>>,
+    }
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "test error: {}", self.kind)
+        }
+    }
+
+    impl std::error::Error for TestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_deref()
+        }
+    }
+
+    fn cert_error(cert: rustls::CertificateError) -> TestError {
+        TestError {
+            kind: "connect",
+            source: Some(Box::new(rustls::Error::InvalidCertificate(cert))),
+        }
+    }
+
+    #[test]
+    fn self_signed_chain_error_is_classified_as_cert_error() {
+        // SELF_SIGNED_CERT_IN_CHAIN / DEPTH_ZERO_SELF_SIGNED_CERT /
+        // UNABLE_TO_VERIFY_LEAF_SIGNATURE / UNABLE_TO_GET_ISSUER_CERT* all
+        // surface as UnknownIssuer (or BadSignature for the leaf case) in
+        // rustls — there is no IncompleteChain variant in rustls 0.23.
+        for cert in [
+            rustls::CertificateError::UnknownIssuer,
+            rustls::CertificateError::BadSignature,
+            rustls::CertificateError::Expired,
+            rustls::CertificateError::NotValidForName,
+        ] {
+            let err = cert_error(cert.clone());
+            assert!(
+                tls_cert_error_in_chain(&err),
+                "{cert:?} should trigger the insecure retry"
+            );
+        }
+    }
+
+    #[test]
+    fn non_cert_tls_and_plain_errors_do_not_retry() {
+        // A revoked cert is NOT in upstream's TLS_CERT_ERRORS set.
+        let revoked = cert_error(rustls::CertificateError::Revoked);
+        assert!(!tls_cert_error_in_chain(&revoked));
+
+        // A rustls error that is not certificate validation.
+        let handshake = TestError {
+            kind: "connect",
+            source: Some(Box::new(rustls::Error::NoCertificatesPresented)),
+        };
+        assert!(!tls_cert_error_in_chain(&handshake));
+
+        // A plain IO failure with no rustls source.
+        let io_err = TestError {
+            kind: "connect",
+            source: Some(Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            ))),
+        };
+        assert!(!tls_cert_error_in_chain(&io_err));
+    }
+
+    #[tokio::test]
+    async fn cert_error_triggers_exactly_one_insecure_retry() {
+        let secure_calls = StdArc::new(AtomicUsize::new(0));
+        let insecure_calls = StdArc::new(AtomicUsize::new(0));
+        let (sc, ic) = (secure_calls.clone(), insecure_calls.clone());
+
+        let result = send_once_with_insecure_retry(
+            false,
+            move || {
+                sc.fetch_add(1, Ordering::SeqCst);
+                async move { Err::<u8, _>(cert_error(rustls::CertificateError::UnknownIssuer)) }
+            },
+            move || {
+                ic.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<u8, TestError>(42) }
+            },
+            |e: &TestError| tls_cert_error_in_chain(e),
+        )
+        .await;
+
+        assert!(matches!(result, Ok(42)));
+        assert_eq!(secure_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(insecure_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn non_cert_error_never_retries() {
+        let insecure_calls = StdArc::new(AtomicUsize::new(0));
+        let ic = insecure_calls.clone();
+
+        let result = send_once_with_insecure_retry(
+            false,
+            || async move {
+                Err::<u8, _>(TestError {
+                    kind: "dns",
+                    source: None,
+                })
+            },
+            move || {
+                ic.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<u8, TestError>(7) }
+            },
+            |e: &TestError| tls_cert_error_in_chain(e),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(insecure_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_ssl_disables_the_insecure_retry() {
+        let insecure_calls = StdArc::new(AtomicUsize::new(0));
+        let ic = insecure_calls.clone();
+
+        let result = send_once_with_insecure_retry(
+            true, // STRICT_SSL=true
+            || async move { Err::<u8, _>(cert_error(rustls::CertificateError::UnknownIssuer)) },
+            move || {
+                ic.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<u8, TestError>(9) }
+            },
+            |e: &TestError| tls_cert_error_in_chain(e),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(insecure_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn secure_success_never_touches_insecure_path() {
+        let insecure_calls = StdArc::new(AtomicUsize::new(0));
+        let ic = insecure_calls.clone();
+
+        let result = send_once_with_insecure_retry(
+            false,
+            || async move { Ok::<u8, TestError>(1) },
+            move || {
+                ic.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<u8, TestError>(2) }
+            },
+            |e: &TestError| tls_cert_error_in_chain(e),
+        )
+        .await;
+
+        assert!(matches!(result, Ok(1)));
+        assert_eq!(insecure_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn insecure_retry_failure_surfaces_the_second_error() {
+        // The retry runs once; if it also fails, that error is returned
+        // (upstream does not loop).
+        let result = send_once_with_insecure_retry(
+            false,
+            || async move { Err::<u8, _>(cert_error(rustls::CertificateError::Expired)) },
+            || async move {
+                Err::<u8, _>(TestError {
+                    kind: "insecure attempt failed",
+                    source: None,
+                })
+            },
+            |e: &TestError| tls_cert_error_in_chain(e),
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, "insecure attempt failed");
     }
 }

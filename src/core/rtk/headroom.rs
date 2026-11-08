@@ -314,10 +314,18 @@ pub async fn compress_with_headroom_diag(
         d.before = Some(capture_size_snapshot(body));
     }
 
-    let fields = body.as_object()?;
+    let _fields = body.as_object()?;
+
+    // Tool-output-only projection runs FIRST for the formats that have one
+    // (9router headroom.js:417-432): unsafe openai-responses input and the
+    // Gemini family. When it applies, ONLY the plain-text tool outputs are
+    // compressed — protocol items and structured payloads stay native.
+    if let Some(proj) = collect_tool_output_text(body, format) {
+        return compress_tool_outputs_only(body, config, model, proj, hooks, diagnostics).await;
+    }
 
     if format.eq_ignore_ascii_case("claude") {
-        return compress_claude_body(body, config, model, hooks).await;
+        return compress_claude_body(body, config, model, hooks, diagnostics).await;
     }
 
     if format.eq_ignore_ascii_case("openai-responses") {
@@ -328,8 +336,17 @@ pub async fn compress_with_headroom_diag(
         return compress_kiro_body(body, config, model, hooks, diagnostics).await;
     }
 
+    if format.eq_ignore_ascii_case("commandcode") {
+        return compress_commandcode_body(body, config, model, hooks, diagnostics).await;
+    }
+
     // OpenAI / Responses-API shape.
-    let (key, messages) = extract_openai_messages(body)?;
+    let Some((key, messages)) = extract_openai_messages(body) else {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason(format!("unsupported {} request shape", format));
+        }
+        return None;
+    };
 
     // Notify hook before compression.
     if let Some(h) = hooks {
@@ -339,7 +356,7 @@ pub async fn compress_with_headroom_diag(
     let original_size = serde_json::to_string(&messages)
         .map(|s| s.len())
         .unwrap_or(0);
-    let data = call_compress(config, &messages, model).await?;
+    let data = call_compress(config, &messages, model, diagnostics.as_deref_mut()).await?;
     let compressed_size = data
         .get("messages")
         .and_then(Value::as_array)
@@ -363,10 +380,15 @@ pub async fn compress_with_headroom_diag(
 // ---------------------------------------------------------------------------
 
 /// POST messages to the Headroom `/v1/compress` endpoint and return the parsed
-/// JSON response on success. Returns `None` on any failure.
-///
-/// Ports `callCompress()` from upstream 9router.
-async fn call_compress(config: &HeadroomConfig, messages: &[Value], model: &str) -> Option<Value> {
+/// JSON response on success. Returns `None` on any failure, recording the
+/// reason in `diagnostics` when provided (9router `callCompress` →
+/// `setDiagnostic`, headroom.js:371-396).
+async fn call_compress(
+    config: &HeadroomConfig,
+    messages: &[Value],
+    model: &str,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<Value> {
     let endpoint = build_compress_endpoint(&config.url);
 
     let mut payload = build_openai_body(messages, model);
@@ -378,7 +400,12 @@ async fn call_compress(config: &HeadroomConfig, messages: &[Value], model: &str)
 
     let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
-        Err(_) => return None,
+        Err(e) => {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason(format!("request failed: {}", describe_fetch_error(&e)));
+            }
+            return None;
+        }
     };
 
     let response = match client
@@ -389,24 +416,54 @@ async fn call_compress(config: &HeadroomConfig, messages: &[Value], model: &str)
         .await
     {
         Ok(r) => r,
-        Err(_) => return None,
+        Err(e) => {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason(format!("request failed: {}", describe_fetch_error(&e)));
+            }
+            return None;
+        }
     };
 
     if !response.status().is_success() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason(format!("proxy returned HTTP {}", response.status()));
+        }
         return None;
     }
 
     let data: Value = match response.json().await {
         Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason("proxy response missing messages[]");
+            }
+            return None;
+        }
     };
 
     // The proxy must return a messages array.
     if data.get("messages").and_then(Value::as_array).is_none() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("proxy response missing messages[]");
+        }
         return None;
     }
 
     Some(data)
+}
+
+/// Scrub credentials and query strings out of an error message before it is
+/// recorded in diagnostics — 9router `scrubSensitiveUrlText` /
+/// `describeFetchError` (headroom.js:56-63, 371-379). A proxy URL may carry a
+/// tenant token in its query, and reqwest errors can echo the full URL.
+fn describe_fetch_error(error: &reqwest::Error) -> String {
+    let msg = error.to_string();
+    let msg = regex::Regex::new(r"//[^/@\s]+@")
+        .map(|re| re.replace_all(&msg, "//").into_owned())
+        .unwrap_or(msg);
+    regex::Regex::new(r"(https?://[^\s?#]+)[?#][^\s)]*")
+        .map(|re| re.replace_all(&msg, "$1").into_owned())
+        .unwrap_or(msg)
 }
 
 /// Detect which key holds the message array in an OpenAI-shaped body.
@@ -440,8 +497,17 @@ async fn compress_claude_body(
     config: &HeadroomConfig,
     model: &str,
     hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
 ) -> Option<HeadroomStats> {
-    let raw_messages = body.get("messages").and_then(Value::as_array)?.clone();
+    let raw_messages = match body.get("messages").and_then(Value::as_array) {
+        Some(m) => m.clone(),
+        None => {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason("Claude request has no eligible text content");
+            }
+            return None;
+        }
+    };
 
     // Flatten Claude's typed content blocks to plain text messages
     // so the Headroom proxy (which expects OpenAI format) can process them.
@@ -470,7 +536,7 @@ async fn compress_claude_body(
     let original_size = serde_json::to_string(&flat_messages)
         .map(|s| s.len())
         .unwrap_or(0);
-    let data = call_compress(config, &flat_messages, model).await?;
+    let data = call_compress(config, &flat_messages, model, diagnostics.as_deref_mut()).await?;
 
     // Write compressed messages back into the Claude body.
     if let Some(compressed) = data.get("messages").and_then(Value::as_array) {
@@ -550,7 +616,7 @@ async fn compress_responses_body(
     if let Some(h) = hooks {
         h.before_compress(&messages);
     }
-    let data = call_compress(config, &messages, model).await?;
+    let data = call_compress(config, &messages, model, diagnostics.as_deref_mut()).await?;
     if let Some(d) = diagnostics.as_deref_mut() {
         d.set_reason("compressed");
     }
@@ -717,14 +783,6 @@ fn collect_kiro_item(
     }
 }
 
-/// Extract the text content from a headroom-compressed message
-/// (9router `textFromHeadroomMessage`).
-fn text_from_headroom_message(msg: &Value) -> Option<String> {
-    msg.get("content")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
-}
-
 /// Set a value at a JSON-pointer-ish path (`/a/b/0/c`) on a mutable body.
 /// Returns `false` if any path segment is missing.
 fn set_json_path(body: &mut Value, path: &str, value: Value) -> bool {
@@ -821,7 +879,7 @@ async fn compress_kiro_body(
     if let Some(h) = hooks {
         h.before_compress(&messages);
     }
-    let data = call_compress(config, &messages, model).await?;
+    let data = call_compress(config, &messages, model, diagnostics.as_deref_mut()).await?;
     let stats = parse_stats(&data);
     let compressed = data.get("messages").and_then(Value::as_array).cloned()?;
 
@@ -841,6 +899,552 @@ async fn compress_kiro_body(
     Some(stats)
 }
 
+// ---------------------------------------------------------------------------
+// Tool-output-only projection (9router collectToolOutputText, headroom.js:109-147)
+// ---------------------------------------------------------------------------
+
+/// Bound on native tool-output traversal (9router
+/// `HEADROOM_TOOL_OUTPUT_MAX_DEPTH`, rtk/constants.js:4).
+const HEADROOM_TOOL_OUTPUT_MAX_DEPTH: usize = 8;
+
+/// One step in a path from the body root to a projected text leaf.
+#[derive(Debug, Clone, PartialEq)]
+enum TargetSeg {
+    Key(String),
+    Index(usize),
+}
+
+/// A writable text leaf: path into the body plus the original text length
+/// (compressed text is only written back when it is shorter).
+#[derive(Debug, Clone)]
+struct TextTarget {
+    path: Vec<TargetSeg>,
+    text_len: usize,
+}
+
+/// Projection of native tool outputs onto flat OpenAI `role:"tool"` messages
+/// for the `/v1/compress` proxy, plus the paths to write compressed text back.
+/// 9router `{ messages, targets }` from `collectToolOutputText` /
+/// `collectCommandCodeHeadroomMessages`.
+#[derive(Debug, Default)]
+struct HeadroomProjection {
+    messages: Vec<Value>,
+    /// `None` for pseudo-messages that carry context only (e.g. CommandCode
+    /// assistant tool_calls) and are never written back — upstream pushes
+    /// `targets.push(null)` for those.
+    targets: Vec<Option<TextTarget>>,
+}
+
+impl HeadroomProjection {
+    fn push(&mut self, message: Value, target: Option<TextTarget>) {
+        self.messages.push(message);
+        self.targets.push(target);
+    }
+}
+
+/// Recursive leaf visitor shared by the tool-output and CommandCode
+/// projections. Mirrors the `visit` inside 9router `collectToolOutputText`:
+/// strings that are empty or JSON-parseable are skipped (structured payloads
+/// stay native); objects with a `type` other than `text`/`input_text` are
+/// skipped entirely; only the `result`/`output`/`content`/`text` fields are
+/// descended.
+fn visit_projection_value(
+    value: &Value,
+    path: Vec<TargetSeg>,
+    depth: usize,
+    out: &mut HeadroomProjection,
+) {
+    if depth > HEADROOM_TOOL_OUTPUT_MAX_DEPTH {
+        return;
+    }
+    match value {
+        Value::String(s) => {
+            if s.trim().is_empty() {
+                return;
+            }
+            // JSON-parseable strings are structured payloads — keep them
+            // native instead of round-tripping (upstream JSON.parse probe).
+            if serde_json::from_str::<Value>(s).is_ok() {
+                return;
+            }
+            let id = format!("headroom-tool-{}", out.messages.len());
+            out.push(
+                json!({"role": "tool", "tool_call_id": id, "content": s}),
+                Some(TextTarget {
+                    path,
+                    text_len: s.chars().count(),
+                }),
+            );
+        }
+        Value::Array(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                let mut p = path.clone();
+                p.push(TargetSeg::Index(i));
+                visit_projection_value(item, p, depth + 1, out);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(t) = map.get("type").and_then(Value::as_str) {
+                if t != "text" && t != "input_text" {
+                    return;
+                }
+            }
+            for field in ["result", "output", "content", "text"] {
+                if let Some(v) = map.get(field) {
+                    let mut p = path.clone();
+                    p.push(TargetSeg::Key(field.to_string()));
+                    visit_projection_value(v, p, depth + 1, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Project only plain tool-output leaves for compression — never the native
+/// blocks themselves (a Claude/OpenAI round-trip would drop documents, signed
+/// thinking and tool-result metadata). Returns `None` for formats without a
+/// tool-output projection. 9router `collectToolOutputText` (headroom.js:109-147).
+fn collect_tool_output_text(body: &Value, format: &str) -> Option<HeadroomProjection> {
+    let mut proj = HeadroomProjection::default();
+    let f = format.to_ascii_lowercase();
+
+    if f == "openai-responses" {
+        if !has_unsafe_responses_input(body) {
+            return None;
+        }
+        let input = body.get("input").and_then(Value::as_array)?;
+        for (i, item) in input.iter().enumerate() {
+            if item.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                continue;
+            }
+            let Some(output) = item.get("output") else {
+                continue;
+            };
+            visit_projection_value(
+                output,
+                vec![
+                    TargetSeg::Key("input".into()),
+                    TargetSeg::Index(i),
+                    TargetSeg::Key("output".into()),
+                ],
+                0,
+                &mut proj,
+            );
+        }
+    } else if matches!(
+        f.as_str(),
+        "gemini" | "gemini-cli" | "antigravity" | "vertex"
+    ) {
+        // `body.request?.contents || body.contents` — a present-but-null
+        // request.contents falls through to body.contents (JS `||`).
+        let contents = body
+            .get("request")
+            .and_then(|r| r.get("contents"))
+            .filter(|v| !v.is_null())
+            .or_else(|| body.get("contents"))?;
+        let contents = contents.as_array()?;
+        let (base, contents_ref) = if body
+            .get("request")
+            .and_then(|r| r.get("contents"))
+            .filter(|v| !v.is_null())
+            .is_some()
+        {
+            (vec![TargetSeg::Key("request".into())], contents)
+        } else {
+            (Vec::new(), contents)
+        };
+        for (ci, content) in contents_ref.iter().enumerate() {
+            let Some(parts) = content.get("parts").and_then(Value::as_array) else {
+                continue;
+            };
+            for (pi, part) in parts.iter().enumerate() {
+                let Some(fr) = part.get("functionResponse") else {
+                    continue;
+                };
+                let mut path = base.clone();
+                path.push(TargetSeg::Key("contents".into()));
+                path.push(TargetSeg::Index(ci));
+                path.push(TargetSeg::Key("parts".into()));
+                path.push(TargetSeg::Index(pi));
+                path.push(TargetSeg::Key("functionResponse".into()));
+                if let Some(response) = fr.get("response") {
+                    let mut p = path;
+                    p.push(TargetSeg::Key("response".into()));
+                    visit_projection_value(response, p, 0, &mut proj);
+                }
+            }
+        }
+    } else {
+        return None;
+    }
+    Some(proj)
+}
+
+/// Write a compressed string back at a target path. Returns false when any
+/// segment is missing (fail-open: the whole apply is abandoned upstream).
+fn set_target_path(body: &mut Value, path: &[TargetSeg], text: &str) -> bool {
+    let mut cur = body;
+    for (i, seg) in path.iter().enumerate() {
+        let is_last = i + 1 == path.len();
+        match seg {
+            TargetSeg::Key(key) => {
+                let obj = match cur.as_object_mut() {
+                    Some(o) => o,
+                    None => return false,
+                };
+                if is_last {
+                    obj.insert(key.clone(), Value::String(text.to_string()));
+                    return true;
+                }
+                match obj.get_mut(key) {
+                    Some(next) => cur = next,
+                    None => return false,
+                }
+            }
+            TargetSeg::Index(idx) => {
+                let arr = match cur.as_array_mut() {
+                    Some(a) => a,
+                    None => return false,
+                };
+                if *idx >= arr.len() {
+                    return false;
+                }
+                if is_last {
+                    arr[*idx] = Value::String(text.to_string());
+                    return true;
+                }
+                cur = &mut arr[*idx];
+            }
+        }
+    }
+    false
+}
+
+/// Verify the compressed tool-output messages match the projection (count,
+/// role, tool_call_id, string content) and write shorter non-empty texts back
+/// into the native leaves. 9router `applyToolOutputText` (headroom.js:149-168).
+fn apply_tool_output_text(
+    body: &mut Value,
+    proj: &HeadroomProjection,
+    compressed: &[Value],
+    diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> bool {
+    let mut diagnostics = diagnostics;
+    if compressed.len() != proj.messages.len() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("proxy response did not match tool-output count");
+        }
+        return false;
+    }
+    let mut updates: Vec<(Vec<TargetSeg>, String)> = Vec::new();
+    for (i, actual) in compressed.iter().enumerate() {
+        let expected = &proj.messages[i];
+        let ok = actual.get("role").and_then(Value::as_str) == Some("tool")
+            && actual.get("tool_call_id") == expected.get("tool_call_id")
+            && actual.get("content").and_then(Value::as_str).is_some();
+        if !ok {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason(
+                    "proxy response did not preserve tool-output IDs, order, roles or text",
+                );
+            }
+            return false;
+        }
+        let actual_text = actual.get("content").and_then(Value::as_str).unwrap_or("");
+        if let Some(target) = &proj.targets[i] {
+            if !actual_text.trim().is_empty() && actual_text.chars().count() < target.text_len {
+                updates.push((target.path.clone(), actual_text.to_string()));
+            }
+        }
+    }
+    for (path, text) in updates {
+        if !set_target_path(body, &path, &text) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// CommandCode projection (9router collectCommandCodeHeadroomMessages,
+// headroom.js:287-324)
+// ---------------------------------------------------------------------------
+
+/// Project a CommandCode `params.messages` body onto flat OpenAI messages for
+/// the proxy. Native `tool-call`/`tool-result` blocks stay in place; only
+/// `text` parts and tool-result `output.value` strings are writable targets.
+/// Returns `None` when `params.messages` is not an array.
+fn collect_commandcode_headroom_messages(body: &Value) -> Option<HeadroomProjection> {
+    let params = body.get("params")?;
+    let messages = params.get("messages").and_then(Value::as_array)?;
+    let mut proj = HeadroomProjection::default();
+
+    // params.system is a plain string on the CommandCode shape.
+    if let Some(system) = params.get("system").and_then(Value::as_str) {
+        proj.push(
+            json!({"role": "system", "content": system}),
+            Some(TextTarget {
+                path: vec![
+                    TargetSeg::Key("params".into()),
+                    TargetSeg::Key("system".into()),
+                ],
+                text_len: system.chars().count(),
+            }),
+        );
+    }
+
+    for (mi, message) in messages.iter().enumerate() {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let msg_base = vec![
+            TargetSeg::Key("params".into()),
+            TargetSeg::Key("messages".into()),
+            TargetSeg::Index(mi),
+            TargetSeg::Key("content".into()),
+        ];
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+
+        // Assistant tool-call metadata is context for the proxy only —
+        // upstream pushes a null target so it is never written back.
+        let tool_calls: Vec<Value> = content
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool-call"))
+            .map(|part| {
+                let input = part.get("input").cloned().unwrap_or(Value::Null);
+                let args = if input.is_null() {
+                    "{}".to_string()
+                } else {
+                    serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string())
+                };
+                json!({
+                    "id": part.get("toolCallId").cloned().unwrap_or(Value::Null),
+                    "type": "function",
+                    "function": {
+                        "name": part.get("toolName").cloned().unwrap_or(Value::Null),
+                        "arguments": args
+                    }
+                })
+            })
+            .collect();
+        if role == "assistant" && !tool_calls.is_empty() {
+            proj.push(
+                json!({"role": "assistant", "content": "", "tool_calls": tool_calls}),
+                None,
+            );
+        }
+
+        for (ci, part) in content.iter().enumerate() {
+            let ptype = part.get("type").and_then(Value::as_str).unwrap_or("");
+            if ptype == "text" {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    let mut path = msg_base.clone();
+                    path.push(TargetSeg::Index(ci));
+                    path.push(TargetSeg::Key("text".into()));
+                    proj.push(
+                        json!({"role": role, "content": text}),
+                        Some(TextTarget {
+                            path,
+                            text_len: text.chars().count(),
+                        }),
+                    );
+                }
+            } else if ptype == "tool-result"
+                && part
+                    .get("output")
+                    .and_then(|o| o.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("text")
+            {
+                if let Some(value) = part
+                    .get("output")
+                    .and_then(|o| o.get("value"))
+                    .and_then(Value::as_str)
+                {
+                    let mut path = msg_base.clone();
+                    path.push(TargetSeg::Index(ci));
+                    path.push(TargetSeg::Key("output".into()));
+                    path.push(TargetSeg::Key("value".into()));
+                    proj.push(
+                        json!({
+                            "role": "tool",
+                            "content": value,
+                            "tool_call_id": part.get("toolCallId").cloned().unwrap_or(Value::Null),
+                            "name": part.get("toolName").cloned().unwrap_or(Value::Null),
+                        }),
+                        Some(TextTarget {
+                            path,
+                            text_len: value.chars().count(),
+                        }),
+                    );
+                }
+            }
+        }
+    }
+    Some(proj)
+}
+
+/// Extract the text content from a headroom-compressed message
+/// (9router `textFromHeadroomMessage`, headroom.js:326-338): a string
+/// `content`, or an array of string / `{text}` parts joined with "\n".
+fn text_from_headroom_message(msg: &Value) -> Option<String> {
+    let content = msg.get("content")?;
+    match content {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                if let Some(s) = part.as_str() {
+                    out.push(s.to_string());
+                } else if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    out.push(t.to_string());
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(out.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Verify compressed messages against a projection (count, role,
+/// tool_call_id, non-null text) and write text back into the projected
+/// targets. 9router `applyProjectedHeadroomMessages` (headroom.js:340-368).
+fn apply_projected_headroom_messages(
+    body: &mut Value,
+    proj: &HeadroomProjection,
+    compressed: &[Value],
+    label: &str,
+    diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> bool {
+    let mut diagnostics = diagnostics;
+    if compressed.len() != proj.messages.len() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason(format!(
+                "proxy response did not match {label} message count"
+            ));
+        }
+        return false;
+    }
+    let mut updates: Vec<(Vec<TargetSeg>, String)> = Vec::new();
+    for (i, (expected, actual)) in proj.messages.iter().zip(compressed.iter()).enumerate() {
+        let role_ok = actual.get("role").and_then(Value::as_str)
+            == expected.get("role").and_then(Value::as_str);
+        let tc_ok = actual.get("tool_call_id") == expected.get("tool_call_id");
+        if !role_ok || !tc_ok {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason(format!(
+                    "proxy response did not preserve {label} message order"
+                ));
+            }
+            return false;
+        }
+        let Some(text) = text_from_headroom_message(actual) else {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason(format!("proxy response missing {label} text content"));
+            }
+            return false;
+        };
+        let _ = i;
+        if let Some(Some(target)) = proj.targets.get(i) {
+            updates.push((target.path.clone(), text));
+        }
+    }
+    for (path, text) in updates {
+        if !set_target_path(body, &path, &text) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Headroom pass for CommandCode bodies: project `params.messages` text
+/// leaves, compress, verify, write back. 9router `format === "commandcode"`.
+async fn compress_commandcode_body(
+    body: &mut Value,
+    config: &HeadroomConfig,
+    model: &str,
+    hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<HeadroomStats> {
+    let proj = match collect_commandcode_headroom_messages(body) {
+        Some(p) => p,
+        None => {
+            if let Some(d) = diagnostics.as_deref_mut() {
+                d.set_reason("CommandCode request did not project to messages[]");
+            }
+            return None;
+        }
+    };
+
+    if let Some(h) = hooks {
+        h.before_compress(&proj.messages);
+    }
+    let data = call_compress(config, &proj.messages, model, diagnostics.as_deref_mut()).await?;
+    let stats = parse_stats(&data);
+    let compressed = data.get("messages").and_then(Value::as_array).cloned()?;
+
+    if !apply_projected_headroom_messages(
+        body,
+        &proj,
+        &compressed,
+        "CommandCode",
+        diagnostics.as_deref_mut(),
+    ) {
+        return None;
+    }
+
+    if let Some(d) = diagnostics {
+        d.after = Some(capture_size_snapshot(body));
+    }
+    if let Some(h) = hooks {
+        h.after_compress(0, 0, &Ok(stats.clone()));
+    }
+    Some(stats)
+}
+
+/// Compress only the projected plain-text tool outputs and write the shorter
+/// results back into the native leaves (Responses `function_call_output`
+/// items, Gemini `functionResponse.response`). 9router headroom.js:417-432.
+async fn compress_tool_outputs_only(
+    body: &mut Value,
+    config: &HeadroomConfig,
+    model: &str,
+    proj: HeadroomProjection,
+    hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<HeadroomStats> {
+    if proj.messages.is_empty() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("no eligible plain-text tool output");
+        }
+        return None;
+    }
+
+    if let Some(h) = hooks {
+        h.before_compress(&proj.messages);
+    }
+    let data = call_compress(config, &proj.messages, model, diagnostics.as_deref_mut()).await?;
+    let stats = parse_stats(&data);
+    let compressed = data.get("messages").and_then(Value::as_array).cloned()?;
+
+    if !apply_tool_output_text(body, &proj, &compressed, diagnostics.as_deref_mut()) {
+        return None;
+    }
+
+    if let Some(d) = diagnostics {
+        d.after = Some(capture_size_snapshot(body));
+    }
+    if let Some(h) = hooks {
+        h.after_compress(0, 0, &Ok(stats.clone()));
+    }
+    Some(stats)
+}
+
 /// Replace the message array in the body under the given key.
 fn write_compressed_messages(body: &mut Value, key: &str, data: &Value) -> Option<()> {
     let compressed = data.get("messages").and_then(Value::as_array)?;
@@ -848,51 +1452,103 @@ fn write_compressed_messages(body: &mut Value, key: &str, data: &Value) -> Optio
     Some(())
 }
 
+/// The message array a headroom pass should measure, across every supported
+/// body shape (9router `messagePayload`, headroom.js:23-32):
+/// `messages`, `input`, `params.messages` (CommandCode), `request.contents`
+/// (Antigravity envelope), `contents` (Gemini/Vertex), then the Kiro
+/// `conversationState` projection.
+fn message_payload(body: &Value) -> Option<Vec<Value>> {
+    let arr = |v: Option<&Value>| v.and_then(Value::as_array).cloned();
+    if let Some(m) = arr(body.get("messages")) {
+        return Some(m);
+    }
+    if let Some(m) = arr(body.get("input")) {
+        return Some(m);
+    }
+    if let Some(m) = arr(body.pointer("/params/messages")) {
+        return Some(m);
+    }
+    if let Some(m) = arr(body.pointer("/request/contents")) {
+        return Some(m);
+    }
+    if let Some(m) = arr(body.get("contents")) {
+        return Some(m);
+    }
+    collect_kiro_headroom_messages(body).map(|(m, _)| m)
+}
+
+/// First non-null of `tools` / `params.tools` / `request.tools`, defaulting to
+/// an empty array — 9router `body?.tools || body?.params?.tools ||
+/// body?.request?.tools || []` (headroom.js:37).
+fn tool_schema_value(body: &Value) -> Value {
+    body.get("tools")
+        .filter(|v| !v.is_null())
+        .or_else(|| body.pointer("/params/tools").filter(|v| !v.is_null()))
+        .or_else(|| body.pointer("/request/tools").filter(|v| !v.is_null()))
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+}
+
+/// True when a message carries tool-call/tool-result material — the
+/// `toolHistory` filter from 9router `captureSizeSnapshot` (headroom.js:34-47):
+/// role tool/function, a non-empty `tool_calls`, a Responses
+/// `function_call_output` item, `parts[]` with functionResponse/functionCall,
+/// or `content[]` blocks of type tool_use/tool_result/tool-call/tool-result.
+fn is_tool_history_message(msg: &Value) -> bool {
+    let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+    if role == "tool" || role == "function" {
+        return true;
+    }
+    if msg
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        return true;
+    }
+    if msg.get("type").and_then(Value::as_str) == Some("function_call_output") {
+        return true;
+    }
+    if msg
+        .get("parts")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|p| p.get("functionResponse").is_some() || p.get("functionCall").is_some())
+        })
+    {
+        return true;
+    }
+    msg.get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                matches!(
+                    b.get("type").and_then(Value::as_str),
+                    Some("tool_use" | "tool_result" | "tool-call" | "tool-result")
+                )
+            })
+        })
+}
+
 /// Byte-size snapshot of a request body for the headroom size log.
 /// 9router `captureSizeSnapshot`: body bytes, message/input array bytes,
-/// tools (top-level `tools`) bytes, and tool-history bytes (messages with
-/// role tool/function, tool_calls, or content blocks of type tool_use/tool_result).
+/// tools (`tools`/`params.tools`/`request.tools`) bytes, and tool-history
+/// bytes across every supported message shape.
 pub fn capture_size_snapshot(body: &Value) -> SizeSnapshot {
     let body_bytes = json_bytes(body);
-    let message_bytes = body
-        .get("messages")
-        .or_else(|| body.get("input"))
-        .and_then(Value::as_array)
-        .map(|arr| json_bytes(&Value::Array(arr.clone())))
+    let message_bytes = message_payload(body)
+        .map(|m| json_bytes(&Value::Array(m)))
         .unwrap_or(0);
-    let tool_schema_bytes = body
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(|arr| json_bytes(&Value::Array(arr.clone())))
-        .unwrap_or(0);
-    let tool_history_bytes = body
-        .get("messages")
-        .or_else(|| body.get("input"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            let filtered: Vec<&Value> = arr
-                .iter()
-                .filter(|msg| {
-                    let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
-                    if role == "tool" || role == "function" {
-                        return true;
-                    }
-                    if msg.get("tool_calls").and_then(Value::as_array).is_some() {
-                        return true;
-                    }
-                    msg.get("content")
-                        .and_then(Value::as_array)
-                        .is_some_and(|blocks| {
-                            blocks.iter().any(|b| {
-                                matches!(
-                                    b.get("type").and_then(Value::as_str),
-                                    Some("tool_use" | "tool_result")
-                                )
-                            })
-                        })
-                })
+    let tool_schema_bytes = json_bytes(&tool_schema_value(body));
+    let tool_history_bytes = message_payload(body)
+        .map(|msgs| {
+            let filtered: Vec<Value> = msgs
+                .into_iter()
+                .filter(|msg| is_tool_history_message(msg))
                 .collect();
-            json_bytes(&Value::Array(filtered.into_iter().cloned().collect()))
+            json_bytes(&Value::Array(filtered))
         })
         .unwrap_or(0);
     SizeSnapshot {
@@ -1862,5 +2518,275 @@ mod tests {
         .await;
         assert!(result.is_none());
         assert!(before_called.load(Ordering::SeqCst));
+    }
+
+    // ---- openproxy-4d5h.22: CommandCode / tool-output / Gemini projections ----
+
+    #[test]
+    fn message_payload_covers_commandcode_and_gemini_shapes() {
+        let cc = json!({"params": {"messages": [{"role": "user", "content": []}]}});
+        assert_eq!(message_payload(&cc).unwrap().len(), 1);
+
+        let gem = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+        assert_eq!(message_payload(&gem).unwrap().len(), 1);
+
+        let ag = json!({"request": {"contents": [{"role": "user", "parts": []}]}});
+        assert_eq!(message_payload(&ag).unwrap().len(), 1);
+
+        // Snapshot picks up params.messages for message_bytes.
+        let snap = capture_size_snapshot(&cc);
+        assert!(snap.message_bytes > 0);
+        assert!(snap.tool_schema_bytes >= 2); // "[]" floor
+    }
+
+    #[test]
+    fn tool_output_projection_gemini_function_response() {
+        let body = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "user", "parts": [{
+                    "functionResponse": {
+                        "name": "read",
+                        "response": {
+                            "result": "a very long tool output that should compress",
+                            "meta": {"keep": "structured stays native"}
+                        }
+                    }
+                }]}
+            ]
+        });
+        let proj = collect_tool_output_text(&body, "gemini").expect("gemini projection");
+        assert_eq!(proj.messages.len(), 1);
+        assert_eq!(proj.messages[0]["role"], "tool");
+        assert_eq!(
+            proj.messages[0]["content"],
+            "a very long tool output that should compress"
+        );
+
+        // Simulate the proxy returning a shorter text → written back.
+        let mut body2 = body.clone();
+        let compressed = json!([{"role": "tool", "tool_call_id": proj.messages[0]["tool_call_id"], "content": "short"}]);
+        assert!(apply_tool_output_text(
+            &mut body2,
+            &proj,
+            compressed.as_array().unwrap(),
+            None
+        ));
+        assert_eq!(
+            body2["contents"][1]["parts"][0]["functionResponse"]["response"]["result"],
+            "short"
+        );
+        // Non-leaf fields are untouched.
+        assert_eq!(
+            body2["contents"][1]["parts"][0]["functionResponse"]["response"]["meta"]["keep"],
+            "structured stays native"
+        );
+    }
+
+    #[test]
+    fn tool_output_projection_skips_json_strings_and_empty() {
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{
+                "functionResponse": {"response": {
+                    "result": "{\"structured\": true}",
+                    "content": "   ",
+                    "text": "plain text output"
+                }}
+            }]}]
+        });
+        let proj = collect_tool_output_text(&body, "vertex").expect("vertex projection");
+        // Only "plain text output" is eligible — JSON and blank strings stay native.
+        assert_eq!(proj.messages.len(), 1);
+        assert_eq!(proj.messages[0]["content"], "plain text output");
+    }
+
+    #[test]
+    fn tool_output_projection_antigravity_request_envelope() {
+        let body = json!({
+            "request": {"contents": [{"role": "user", "parts": [{
+                "functionResponse": {"response": {"result": "tool text here"}}
+            }]}]}
+        });
+        let proj = collect_tool_output_text(&body, "antigravity").expect("antigravity projection");
+        assert_eq!(proj.messages.len(), 1);
+
+        let mut body2 = body.clone();
+        let compressed = json!([{"role": "tool", "tool_call_id": proj.messages[0]["tool_call_id"], "content": "compressed"}]);
+        assert!(apply_tool_output_text(
+            &mut body2,
+            &proj,
+            compressed.as_array().unwrap(),
+            None
+        ));
+        assert_eq!(
+            body2["request"]["contents"][0]["parts"][0]["functionResponse"]["response"]["result"],
+            "compressed"
+        );
+    }
+
+    #[test]
+    fn tool_output_projection_responses_unsafe_input() {
+        let body = json!({
+            "input": [
+                {"type": "message", "role": "user", "content": "hi"},
+                {"type": "function_call_output", "output": "a long plain tool result"}
+            ]
+        });
+        let proj = collect_tool_output_text(&body, "openai-responses")
+            .expect("unsafe responses projection");
+        assert_eq!(proj.messages.len(), 1);
+        assert_eq!(proj.messages[0]["content"], "a long plain tool result");
+
+        // Safe responses input → no tool-output projection.
+        let safe = json!({"input": [{"type": "message", "role": "user", "content": "hi"}]});
+        assert!(collect_tool_output_text(&safe, "openai-responses").is_none());
+        // Unrelated formats → no projection.
+        assert!(collect_tool_output_text(&body, "openai").is_none());
+        assert!(collect_tool_output_text(&body, "claude").is_none());
+    }
+
+    #[test]
+    fn tool_output_apply_rejects_mismatched_proxy_response() {
+        let body = json!({"contents": [{"role": "user", "parts": [{
+            "functionResponse": {"response": {"result": "original text"}}
+        }]}]});
+        let proj = collect_tool_output_text(&body, "gemini").unwrap();
+        let mut diag = HeadroomDiagnostics::default();
+        // Wrong count.
+        assert!(!apply_tool_output_text(
+            &mut body.clone(),
+            &proj,
+            &[],
+            Some(&mut diag)
+        ));
+        assert!(diag.reason.is_some());
+        // Wrong role.
+        let bad = json!([{"role": "user", "content": "x"}]);
+        let mut diag2 = HeadroomDiagnostics::default();
+        assert!(!apply_tool_output_text(
+            &mut body.clone(),
+            &proj,
+            bad.as_array().unwrap(),
+            Some(&mut diag2)
+        ));
+        assert!(diag2.reason.is_some());
+        // Longer text is NOT written back (only shorter non-empty).
+        let longer = json!([{"role": "tool", "tool_call_id": proj.messages[0]["tool_call_id"], "content": "this is much longer than the original text was"}]);
+        let mut body3 = body.clone();
+        assert!(apply_tool_output_text(
+            &mut body3,
+            &proj,
+            longer.as_array().unwrap(),
+            None
+        ));
+        assert_eq!(
+            body3["contents"][0]["parts"][0]["functionResponse"]["response"]["result"],
+            "original text"
+        );
+    }
+
+    #[test]
+    fn commandcode_projection_collects_and_writes_back() {
+        let body = json!({
+            "params": {
+                "system": "you are helpful",
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hello there"}]},
+                    {"role": "assistant", "content": [
+                        {"type": "text", "text": "calling tool"},
+                        {"type": "tool-call", "toolCallId": "tc1", "toolName": "read", "input": {"path": "/x"}}
+                    ]},
+                    {"role": "tool", "content": [
+                        {"type": "tool-result", "toolCallId": "tc1", "toolName": "read",
+                         "output": {"type": "text", "value": "a very long tool output text"}}
+                    ]}
+                ]
+            }
+        });
+        let proj = collect_commandcode_headroom_messages(&body).expect("commandcode projection");
+        // system + user text + assistant tool_calls pseudo + assistant text + tool output
+        assert_eq!(proj.messages.len(), 5);
+        assert_eq!(proj.messages[0]["role"], "system");
+        assert_eq!(proj.messages[2]["role"], "assistant");
+        assert_eq!(
+            proj.messages[2]["tool_calls"][0]["function"]["name"],
+            "read"
+        );
+        assert_eq!(proj.messages[4]["role"], "tool");
+        assert_eq!(proj.messages[4]["tool_call_id"], "tc1");
+        // The pseudo-message has no writable target.
+        assert!(proj.targets[2].is_none());
+
+        // Simulate proxy compression: shorter texts for the writable targets.
+        let compressed: Vec<Value> = proj
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                if proj.targets[i].is_some() {
+                    json!({"role": m["role"], "content": "c", "tool_call_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null)})
+                } else {
+                    m.clone()
+                }
+            })
+            .collect();
+        let mut body2 = body.clone();
+        assert!(apply_projected_headroom_messages(
+            &mut body2,
+            &proj,
+            &compressed,
+            "CommandCode",
+            None
+        ));
+        assert_eq!(body2["params"]["system"], "c");
+        assert_eq!(body2["params"]["messages"][0]["content"][0]["text"], "c");
+        assert_eq!(
+            body2["params"]["messages"][2]["content"][0]["output"]["value"],
+            "c"
+        );
+        // tool-call input object untouched.
+        assert_eq!(
+            body2["params"]["messages"][1]["content"][1]["input"]["path"],
+            "/x"
+        );
+    }
+
+    #[test]
+    fn commandcode_projection_none_without_params_messages() {
+        let body = json!({"params": {"system": "x"}});
+        assert!(collect_commandcode_headroom_messages(&body).is_none());
+        let body2 = json!({"messages": []});
+        assert!(collect_commandcode_headroom_messages(&body2).is_none());
+    }
+
+    #[test]
+    fn commandcode_format_dispatches_in_headroom() {
+        // Format string routing: "commandcode" must not fall through to the
+        // OpenAI messages/input extractor.
+        let body = json!({"params": {"messages": []}});
+        // No network: a dead port proves the dispatch reached call_compress
+        // (reason is a request failure, not "unsupported ... request shape").
+        let config = HeadroomConfig {
+            enabled: true,
+            url: "http://127.0.0.1:1".into(),
+            timeout_ms: 100,
+            ..HeadroomConfig::default()
+        };
+        let mut diag = HeadroomDiagnostics::default();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(compress_with_headroom_diag(
+            &mut body.clone(),
+            &config,
+            "m",
+            "commandcode",
+            None,
+            Some(&mut diag),
+        ));
+        assert!(result.is_none());
+        let reason = diag.reason.clone().unwrap_or_default();
+        assert!(
+            reason.starts_with("request failed:") || reason.contains("HTTP"),
+            "expected transport failure reason, got: {reason}"
+        );
     }
 }

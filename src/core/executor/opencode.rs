@@ -89,9 +89,15 @@ fn has_valid_opencode_version(ua: &str) -> bool {
     // <channel>/<major.minor.patch>/<client> — channel and client are
     // [a-z0-9-]+, version is three dot-separated numbers.
     let mut parts = rest.split('/');
-    let Some(channel) = parts.next() else { return false };
-    let Some(version) = parts.next() else { return false };
-    let Some(client) = parts.next() else { return false };
+    let Some(channel) = parts.next() else {
+        return false;
+    };
+    let Some(version) = parts.next() else {
+        return false;
+    };
+    let Some(client) = parts.next() else {
+        return false;
+    };
     if parts.next().is_some() {
         return false;
     }
@@ -104,12 +110,9 @@ fn has_valid_opencode_version(ua: &str) -> bool {
         return false;
     }
     let mut vparts = version.split('.');
-    let (Some(major), Some(_minor), Some(_patch), None) = (
-        vparts.next(),
-        vparts.next(),
-        vparts.next(),
-        vparts.next(),
-    ) else {
+    let (Some(major), Some(_minor), Some(_patch), None) =
+        (vparts.next(), vparts.next(), vparts.next(), vparts.next())
+    else {
         return false;
     };
     let Ok(major) = major.parse::<u32>() else {
@@ -300,7 +303,10 @@ fn translate_session_id(session_id: &str, client_tool: &str) -> String {
 fn identity_key(connection: &ProviderConnection, raw_headers: &BTreeMap<String, String>) -> String {
     let connection_id = connection.id.as_str();
     if !connection_id.is_empty() {
-        return format!("opencode:conn:{}", &connection_id[..connection_id.len().min(128)]);
+        return format!(
+            "opencode:conn:{}",
+            &connection_id[..connection_id.len().min(128)]
+        );
     }
     let auth = raw_headers
         .iter()
@@ -320,14 +326,22 @@ fn identity_key(connection: &ProviderConnection, raw_headers: &BTreeMap<String, 
 
 /// `stableSessionId` (opencode.js:157-172): one stable canonical session
 /// per downstream identity.
-fn stable_session_id(connection: &ProviderConnection, raw_headers: &BTreeMap<String, String>) -> String {
+fn stable_session_id(
+    connection: &ProviderConnection,
+    raw_headers: &BTreeMap<String, String>,
+) -> String {
     let key = identity_key(connection, raw_headers);
     if let Some(existing) = cache_get(&STABLE_SESSIONS, &key) {
         return existing;
     }
     sweep_expired(&STABLE_SESSIONS);
     let session_id = generate_session_id();
-    cache_insert(&STABLE_SESSIONS, key, session_id.clone(), MAX_STABLE_SESSIONS);
+    cache_insert(
+        &STABLE_SESSIONS,
+        key,
+        session_id.clone(),
+        MAX_STABLE_SESSIONS,
+    );
     session_id
 }
 
@@ -486,9 +500,7 @@ fn is_muse_spark_model(model_id: &str) -> bool {
     let Some(after_muse) = lower.strip_prefix("muse") else {
         return false;
     };
-    let after_sep = after_muse
-        .strip_prefix(['-', '_'])
-        .unwrap_or(after_muse);
+    let after_sep = after_muse.strip_prefix(['-', '_']).unwrap_or(after_muse);
     let Some(after_spark) = after_sep.strip_prefix("spark") else {
         return false;
     };
@@ -580,9 +592,10 @@ pub(crate) fn sanitize_responses_items(body_obj: &mut serde_json::Map<String, Va
                     obj.get("call_id").and_then(Value::as_str),
                 );
                 obj.insert("call_id".to_string(), Value::String(call_id));
-                let args = crate::core::translator::request::openai_responses::coerce_responses_arguments(
-                    obj.get("arguments").unwrap_or(&Value::Null),
-                );
+                let args =
+                    crate::core::translator::request::openai_responses::coerce_responses_arguments(
+                        obj.get("arguments").unwrap_or(&Value::Null),
+                    );
                 obj.insert("arguments".to_string(), Value::String(args));
                 true
             }
@@ -591,9 +604,10 @@ pub(crate) fn sanitize_responses_items(body_obj: &mut serde_json::Map<String, Va
                     obj.get("call_id").and_then(Value::as_str),
                 );
                 obj.insert("call_id".to_string(), Value::String(call_id));
-                let output = crate::core::translator::request::openai_responses::coerce_responses_output(
-                    obj.get("output").unwrap_or(&Value::Null),
-                );
+                let output =
+                    crate::core::translator::request::openai_responses::coerce_responses_output(
+                        obj.get("output").unwrap_or(&Value::Null),
+                    );
                 obj.insert("output".to_string(), Value::String(output));
                 true
             }
@@ -715,21 +729,29 @@ fn format_levels(format: Option<&str>) -> &'static [&'static str] {
 /// PATTERN_THINKING rows relevant to provider "opencode", in upstream
 /// order. `(provider_filter, pattern, levels)` — provider_filter None =
 /// unqualified (matches any provider).
-const OPENCODE_THINKING_PATTERNS: &[(
-    Option<&str>,
-    &str,
-    &'static [&'static str],
-)] = &[
+const OPENCODE_THINKING_PATTERNS: &[(Option<&str>, &str, &'static [&'static str])] = &[
     // OpenCode Free MiMo rides the OpenRouter-backed route and takes the
     // full OpenAI effort enum verbatim (upstream PATTERN_THINKING row
     // ahead of the unqualified *mimo*v2.6* one).
     (Some("opencode"), "*mimo*v2.6*", OPENAI_MAX_LEVELS),
-    (None, "*mimo*v2.6*", &["none", "low", "medium", "high", "xhigh"]),
-    (None, "*mimo*v2.5-pro*", &["none", "low", "medium", "high", "xhigh"]),
+    (
+        None,
+        "*mimo*v2.6*",
+        &["none", "low", "medium", "high", "xhigh"],
+    ),
+    (
+        None,
+        "*mimo*v2.5-pro*",
+        &["none", "low", "medium", "high", "xhigh"],
+    ),
     // OpenCode Zen free tier deepseek-v4.1-flash-free publishes
     // low|high|max; the upstream forwards the level verbatim.
     (None, "*deepseek-v4.1-flash-free*", &["low", "high", "max"]),
-    (None, "*deepseek-v4.*", &["none", "low", "medium", "high", "xhigh", "max"]),
+    (
+        None,
+        "*deepseek-v4.*",
+        &["none", "low", "medium", "high", "xhigh", "max"],
+    ),
 ];
 
 /// `getThinkingLevels("opencode", model)` reduced to the level set, or
@@ -956,8 +978,8 @@ impl OpenCodeExecutor {
                 // allowlist with evidence (registry quirks port).
                 if force_auto_tool_choice(&effective_model) {
                     let has_tc = body.get("tool_choice").is_some();
-                    let is_auto = body.get("tool_choice")
-                        == Some(&Value::String("auto".to_string()));
+                    let is_auto =
+                        body.get("tool_choice") == Some(&Value::String("auto".to_string()));
                     if has_tc && !is_auto {
                         if let Some(obj) = body.as_object_mut() {
                             obj.insert(
@@ -1024,8 +1046,7 @@ impl OpenCodeExecutor {
                 // Free-tier fingerprint tools are required even when an
                 // agent client already supplied tools; skipping cloaking
                 // triggers 403 FreeTierError (opencode.js:394-397).
-                tool_name_map =
-                    opencode_fingerprint::apply_fingerprint_tools(body, true, false);
+                tool_name_map = opencode_fingerprint::apply_fingerprint_tools(body, true, false);
             }
             _ => {
                 drop_adaptive_reasoning_effort(body);
@@ -1078,8 +1099,13 @@ impl OpenCodeExecutor {
         );
         headers.insert(
             "x-opencode-client",
-            HeaderValue::from_str(lower.get("x-opencode-client").copied().unwrap_or(OPENCODE_CLIENT))
-                .unwrap_or_else(|_| HeaderValue::from_static(OPENCODE_CLIENT)),
+            HeaderValue::from_str(
+                lower
+                    .get("x-opencode-client")
+                    .copied()
+                    .unwrap_or(OPENCODE_CLIENT),
+            )
+            .unwrap_or_else(|_| HeaderValue::from_static(OPENCODE_CLIENT)),
         );
         let session_hv =
             HeaderValue::from_str(session).unwrap_or_else(|_| HeaderValue::from_static("ses_"));
@@ -1098,11 +1124,7 @@ impl OpenCodeExecutor {
         );
         headers.insert(
             ACCEPT,
-            HeaderValue::from_static(if stream {
-                "text/event-stream"
-            } else {
-                "*/*"
-            }),
+            HeaderValue::from_static(if stream { "text/event-stream" } else { "*/*" }),
         );
         if lane == Lane::Messages {
             headers.insert(
@@ -1133,12 +1155,10 @@ impl OpenCodeExecutor {
             .iter()
             .map(|(k, v)| (k.to_lowercase(), v.clone()))
             .collect();
-        let client_tool = crate::core::utils::client_detector::detect_client_tool(
-            &header_map,
-            &request.body,
-        )
-        .map(|t| t.as_str().to_string())
-        .unwrap_or_else(|| "generic".to_string());
+        let client_tool =
+            crate::core::utils::client_detector::detect_client_tool(&header_map, &request.body)
+                .map(|t| t.as_str().to_string())
+                .unwrap_or_else(|| "generic".to_string());
         let session = resolve_opencode_session(
             &request.body,
             &request.credentials,
@@ -1215,7 +1235,9 @@ mod tests {
         assert!(!has_valid_opencode_version(""));
         assert!(!has_valid_opencode_version("claude-code/1.0"));
         // Anchored: trailing tokens fail like the JS regex.
-        assert!(!has_valid_opencode_version("opencode/latest/2.0.26/cli extra"));
+        assert!(!has_valid_opencode_version(
+            "opencode/latest/2.0.26/cli extra"
+        ));
     }
 
     #[test]
@@ -1295,23 +1317,25 @@ mod tests {
 
     #[test]
     fn lane_routing_matches_upstream() {
-        let ex = OpenCodeExecutor::new(
-            std::sync::Arc::new(ClientPool::new()),
-            None,
-        )
-        .expect("executor");
-        assert_eq!(ex.lane_for("muse-spark-1.3-contributor-free"), Lane::Responses);
+        let ex =
+            OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None).expect("executor");
+        assert_eq!(
+            ex.lane_for("muse-spark-1.3-contributor-free"),
+            Lane::Responses
+        );
         assert_eq!(ex.lane_for("muse-spark-9-future"), Lane::Responses);
         assert_eq!(ex.lane_for("union-alpha"), Lane::Messages);
         assert_eq!(ex.lane_for("big-pickle"), Lane::Chat);
         assert_eq!(ex.lane_for("deepseek-v4.1-flash-free"), Lane::Chat);
-        assert!(is_responses_model("oc/muse-spark-1.2-contributor-free(xhigh)"));
+        assert!(is_responses_model(
+            "oc/muse-spark-1.2-contributor-free(xhigh)"
+        ));
     }
 
     #[test]
     fn urls_use_inference_v1() {
-        let ex = OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None)
-            .expect("executor");
+        let ex =
+            OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None).expect("executor");
         assert_eq!(
             ex.build_url("muse-spark-1.3-contributor-free"),
             "https://opencode.ai/inference/v1/responses"
@@ -1328,8 +1352,8 @@ mod tests {
 
     #[test]
     fn headers_mirror_v2_cli() {
-        let ex = OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None)
-            .expect("executor");
+        let ex =
+            OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None).expect("executor");
         let conn = ProviderConnection::default();
         let headers = ex.build_headers(
             &conn,
@@ -1342,10 +1366,7 @@ mod tests {
             headers.get("user-agent").unwrap(),
             "opencode/latest/2.0.26/cli"
         );
-        assert_eq!(
-            headers.get("authorization").unwrap(),
-            "Bearer public"
-        );
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer public");
         for name in [
             "x-opencode-session",
             "x-opencode-session-id",
@@ -1371,8 +1392,8 @@ mod tests {
 
     #[test]
     fn transform_chat_lane_applies_fingerprint_and_env() {
-        let ex = OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None)
-            .expect("executor");
+        let ex =
+            OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None).expect("executor");
         let mut body = json!({
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"type":"function","function":{"name":"read","description":"mine","parameters":{"type":"object","properties":{"zzz":{"type":"string"}},"required":[]}}}]
@@ -1397,8 +1418,8 @@ mod tests {
 
     #[test]
     fn transform_responses_lane_store_false_and_sanitize() {
-        let ex = OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None)
-            .expect("executor");
+        let ex =
+            OpenCodeExecutor::new(std::sync::Arc::new(ClientPool::new()), None).expect("executor");
         let mut body = json!({
             "input": [
                 {"type": "reasoning", "encrypted_content": "abc"},
@@ -1415,7 +1436,9 @@ mod tests {
         let input = body["input"].as_array().unwrap();
         // reasoning item dropped, encrypted_content stripped.
         assert_eq!(input.len(), 2);
-        assert!(input.iter().all(|i| i.get("type") != Some(&json!("reasoning"))));
+        assert!(input
+            .iter()
+            .all(|i| i.get("type") != Some(&json!("reasoning"))));
         // call_id clamped to 64 chars.
         assert_eq!(input[0]["call_id"].as_str().unwrap().len(), 64);
         // arguments object → JSON string.
@@ -1431,10 +1454,7 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"read") && names.contains(&"shell"));
-        assert!(body["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("<env>"));
+        assert!(body["instructions"].as_str().unwrap().contains("<env>"));
     }
 
     #[test]
@@ -1469,11 +1489,11 @@ mod tests {
     fn body_session_hints_detected() {
         assert!(body_has_session_hints(&json!({"session_id": "abc"})));
         assert!(body_has_session_hints(&json!({"prompt_cache_key": "k"})));
-        assert!(body_has_session_hints(&json!({
+        assert!(!body_has_session_hints(&json!({
             "messages": [
                 {"role": "user", "content": "x".repeat(60)}
             ]
-        }) == false)); // hints need assistant text ≥50, not user
+        }))); // hints need assistant text ≥50, not user
         assert!(body_has_session_hints(&json!({
             "messages": [
                 {"role": "assistant", "content": "x".repeat(60)}

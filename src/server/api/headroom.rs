@@ -1231,7 +1231,6 @@ mod tests {
                 monthly_budget_usd: None,
                 extra: BTreeMap::new(),
                 access: Default::default(),
-
             }];
         })
         .await

@@ -181,8 +181,26 @@ pub fn openai_to_commandcode_request(
     model: &str,
     body: &mut Value,
     stream: bool,
-    _credentials: Option<&Value>,
+    credentials: Option<&Value>,
 ) -> bool {
+    // 9router v0.5.112: threadId is conversation-stable —
+    // `toCommandCodeSessionUuid(credentials?._clientSessionId)` where the
+    // client session id is resolved from rawHeaders/body by the session
+    // manager (translator/index.js:97-99, openai-to-commandcode.js:205). The
+    // executor reuses this exact value as the `x-session-id` header, so the
+    // body's threadId and the header can never disagree.
+    let headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
+    let connection_id = crate::core::utils::session_manager::credentials_connection_id(credentials);
+    let session_id = crate::core::utils::session_manager::resolve_session_identity(
+        headers.as_ref(),
+        Some(&*body),
+        connection_id.as_deref(),
+        "commandcode",
+    )
+    .session_id;
+    let thread_id =
+        crate::core::utils::command_code_identity::to_command_code_session_uuid(Some(&session_id));
+
     let (messages, system) = convert_messages(
         body.get("messages")
             .and_then(|v| v.as_array())
@@ -213,12 +231,19 @@ pub fn openai_to_commandcode_request(
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     *body = serde_json::json!({
-        "threadId": "auto-generated",
+        "threadId": thread_id,
         "memory": "",
         "config": {
-            "workingDir": ".",
+            // 9router openai-to-commandcode.js:208-209: workingDir is the
+            // proxy's own cwd (same value x-project-slug is derived from);
+            // environment is process.platform.
+            "workingDir": crate::core::utils::command_code_identity::command_code_working_dir(),
             "date": today,
-            "environment": "linux",
+            "environment": match std::env::consts::OS {
+                "macos" => "darwin",
+                "windows" => "win32",
+                other => other,
+            },
             "structure": [],
             "isGitRepo": false,
             "currentBranch": "",

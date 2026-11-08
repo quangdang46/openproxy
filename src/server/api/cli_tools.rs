@@ -501,9 +501,7 @@ fn is_valid_codex_profile_name(name: &str) -> bool {
 
 /// Upstream: non-empty after trim, <= 256 chars, no CR/LF/quote.
 fn is_valid_codex_profile_model(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 256
-        && !model.contains(['\r', '\n', '"'])
+    !model.is_empty() && model.len() <= 256 && !model.contains(['\r', '\n', '"'])
 }
 
 /// Extract the `model = "..."` line from a profile TOML file.
@@ -543,10 +541,7 @@ async fn get_codex_profiles(State(state): State<AppState>, headers: HeaderMap) -
             Ok(Some(entry)) => {
                 let file_name = entry.file_name().to_string_lossy().to_string();
                 if file_name.ends_with(".config.toml") && file_name != "config.toml" {
-                    if let Some(name) = file_name
-                        .strip_suffix(".config.toml")
-                        .map(str::to_string)
-                    {
+                    if let Some(name) = file_name.strip_suffix(".config.toml").map(str::to_string) {
                         names.push(name);
                     }
                 }
@@ -632,9 +627,8 @@ async fn save_codex_profile(
     // Upstream writes model_provider = "9router"; openproxy's provider key is
     // "openproxy" (see write_codex_settings / codex_openproxy_provider_table),
     // so the profile must point at that table in config.toml.
-    let content = format!(
-        "# codex -p {name}\nmodel = \"{model}\"\nmodel_provider = \"openproxy\"\n"
-    );
+    let content =
+        format!("# codex -p {name}\nmodel = \"{model}\"\nmodel_provider = \"openproxy\"\n");
     if let Err(error) = fs::write(&file_path, content).await {
         tracing::warn!(?error, "failed to write codex profile");
         return (

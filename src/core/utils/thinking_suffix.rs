@@ -143,6 +143,12 @@ pub enum ThinkingNative {
     MiniMax,
     /// No wire rewrite (Kiro handles thinking via system prefix / model suffix).
     Noop,
+    /// Strict OpenAI Responses wire: `reasoning:{effort,summary:"auto"}` and
+    /// NO top-level `reasoning_effort` (9router `applyFormat` case
+    /// "openai-responses", thinkingUnified.js:275-289). Used by
+    /// `transports[].thinkingFormat` on strict `/responses` legs
+    /// (opencode-go, muse) that reject Chat-shaped thinking fields.
+    OpenAiResponses,
 }
 
 /// Resolve native thinking wire format from target format + provider + model.
@@ -154,6 +160,18 @@ pub fn resolve_thinking_native(
     provider: &str,
     model: &str,
 ) -> ThinkingNative {
+    // transports[].thinkingFormat wins over the provider/model defaults
+    // (9router thinkingUnified.js:130-148 `resolveFormat`: the transport entry
+    // matching the TARGET format declares the thinking shape that endpoint
+    // accepts — strict /responses upstreams need reasoning:{effort,summary}).
+    if let Some(native) = crate::core::chat::provider_transports(provider)
+        .into_iter()
+        .find(|t| t.format == target_format)
+        .and_then(|t| t.thinking_format)
+    {
+        return native;
+    }
+
     let p = provider.to_ascii_lowercase();
     let m = model.to_ascii_lowercase();
 
@@ -232,8 +250,9 @@ pub(crate) fn is_adaptive_thinking_unsupported(model: &str) -> bool {
 }
 
 fn is_claude_adaptive_model(model: &str) -> bool {
-    // 9router MODEL_CAPABILITIES: opus/sonnet 4.6+ and sonnet-5 use claude-adaptive.
-    // Haiku is version-gated: 5+ is adaptive-only (#5183), older/unversioned budget.
+    // 9router MODEL_CAPABILITIES: opus/sonnet 4.6+, opus-5 and sonnet-5 use
+    // claude-adaptive. Haiku is version-gated: 5+ is adaptive-only (#5183),
+    // older/unversioned budget.
     let m = model.to_ascii_lowercase();
     if m.contains("haiku") {
         return !is_adaptive_thinking_unsupported(model);
@@ -244,9 +263,24 @@ fn is_claude_adaptive_model(model: &str) -> bool {
         || m.contains("opus-4-7")
         || m.contains("opus-4.8")
         || m.contains("opus-4-8")
+        || m.contains("opus-5")
         || m.contains("sonnet-4.6")
         || m.contains("sonnet-4-6")
         || m.contains("sonnet-5")
+}
+
+/// Whether a claude-adaptive model advertises the `xhigh` effort tier.
+///
+/// Ports the relevant `PATTERN_THINKING` entries in 9router
+/// `thinkingLevels.js`: `*claude*4.6*` / `*claude*4-6*` resolve to
+/// `CLAUDE_NO_XHIGH` (`["none","low","medium","high","max"]`); every other
+/// claude-adaptive model falls through to the `claude-adaptive` format
+/// default `budgetX` (`["none","low","medium","high","xhigh","max"]`).
+/// `applyFormat` clamps `xhigh` → `high` only when the advertised set
+/// lacks it.
+fn claude_adaptive_supports_xhigh(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    !(m.contains("claude") && (m.contains("4.6") || m.contains("4-6")))
 }
 
 fn is_gemini_level_model(model: &str) -> bool {
@@ -553,11 +587,88 @@ pub fn capture_thinking(body: &Value) -> Option<ThinkingIntent> {
     extract_thinking_intent(body)
 }
 
-/// Normalize an OpenAI wire level (9router `normalizeOpenAILevel` without a
-/// per-model supported-levels list: `max` / `ultra` fold to `xhigh`).
-fn normalize_openai_level(level: &str) -> &str {
+/// OpenAI wire level sets (9router `thinkingLevels.js`). The default
+/// `openai` format list has no `max`; codex-flavoured rows add it.
+const OPENAI_WIRE_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+const GPT56_MAX_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const GPT56_MAX_ULTRA_LEVELS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+/// `*codex*` pattern — codex cannot disable thinking.
+const CODEX_PATTERN_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// Upstream #5186: OpenAI documents `reasoning.effort: "max"` for GPT-5.6 and
+/// GPT-6, so an `openai-compatible-*` node serving those ids gets the codex
+/// level set instead of the `openai` format list that clamps `max`→`xhigh`.
+static OPENAI_MAX_EFFORT_MODEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|/)gpt-(?:5\.6|6)(?:[.-]|$)").expect("gpt max-effort regex")
+});
+
+/// `getThinkingLevels` reduced to the branches that can change
+/// `max`/`ultra` normalization on the OpenAI wire:
+/// - `codex` provider rows (`*gpt-6*`, `*gpt-5.6-sol|terra|luna*`, `*codex*`)
+/// - `openai-compatible-*` nodes serving `gpt-5.6`/`gpt-6` (#5186)
+fn openai_supported_levels(provider: &str, model: &str) -> &'static [&'static str] {
+    let base = strip_trailing_paren(model);
+    let m = base.to_ascii_lowercase();
+    let p = provider.to_ascii_lowercase();
+    if p == "codex" || p == "cx" {
+        if m.contains("gpt-6") {
+            return GPT56_MAX_LEVELS;
+        }
+        if m.contains("gpt-5.6-sol") || m.contains("gpt-5.6-terra") {
+            return GPT56_MAX_ULTRA_LEVELS;
+        }
+        if m.contains("gpt-5.6-luna") {
+            return GPT56_MAX_LEVELS;
+        }
+        if m.contains("codex") {
+            return CODEX_PATTERN_LEVELS;
+        }
+        return OPENAI_WIRE_LEVELS;
+    }
+    if p.starts_with("openai-compatible-") && OPENAI_MAX_EFFORT_MODEL_RE.is_match(base) {
+        return GPT56_MAX_LEVELS;
+    }
+    OPENAI_WIRE_LEVELS
+}
+
+/// Model id minus a trailing `(…)` suffix (upstream `baseId` in
+/// `getThinkingLevels`).
+fn strip_trailing_paren(model: &str) -> &str {
+    let t = model.trim_end();
+    if t.ends_with(')') {
+        if let Some(open) = t.rfind('(') {
+            let inner = &t[open + 1..t.len() - 1];
+            if !inner.trim().is_empty() && !inner.contains(['(', ')']) {
+                return t[..open].trim_end();
+            }
+        }
+    }
+    t
+}
+
+/// Normalize an OpenAI wire level (9router `normalizeOpenAILevel`):
+/// `max`/`ultra` survive only when the resolved level set supports them;
+/// `ultra` folds to `max` when `max` is supported but `ultra` is not.
+fn normalize_openai_level<'a>(level: &'a str, supported: &[&'static str]) -> &'a str {
     match level {
-        "max" | "ultra" => "xhigh",
+        "max" => {
+            if supported.contains(&"max") {
+                "max"
+            } else {
+                "xhigh"
+            }
+        }
+        "ultra" => {
+            if supported.contains(&"ultra") {
+                "ultra"
+            } else if supported.contains(&"max") {
+                "max"
+            } else {
+                "xhigh"
+            }
+        }
         other => other,
     }
 }
@@ -604,6 +715,20 @@ pub fn apply_thinking_intent(
         return;
     }
 
+    // 9router `applyFormat` canDisable gate: models whose caps carry
+    // thinkingCanDisable:false (Claude Opus 5.5, Fable 5.1, GLM-5.3, …)
+    // reject an explicit "off" — a "none" intent clamps to `minimal` effort
+    // instead of writing the disabled switch.
+    let caps = crate::core::combo::capabilities::get_capabilities_for_model(provider, model);
+    let can_disable = caps.thinking_can_disable;
+    let clamped;
+    let intent = if *intent == ThinkingIntent::None_ && !can_disable {
+        clamped = ThinkingIntent::Level("minimal".to_string());
+        &clamped
+    } else {
+        intent
+    };
+
     let none = *intent == ThinkingIntent::None_;
     // 9router `toBudget` (no range clamp — no caps matrix here): numeric
     // budgets pass through, `auto` is -1, levels map via LEVEL_TO_BUDGET.
@@ -631,7 +756,8 @@ pub fn apply_thinking_intent(
                 }
                 return;
             }
-            let effort = normalize_openai_level(level);
+            let supported = openai_supported_levels(provider, model);
+            let effort = normalize_openai_level(level, supported);
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("reasoning_effort".into(), Value::String(effort.into()));
             }
@@ -678,21 +804,30 @@ pub fn apply_thinking_intent(
                 }
                 return;
             }
-            // 9router parity (#3792): an adaptive request without an explicit
-            // effort resolves to the literal level `auto`, which Anthropic
-            // rejects with HTTP 400. Fold `auto` (and `xhigh`/`max`) down to a
-            // supported level before writing output_config.effort.
-            let effort = if level == "xhigh" || level == "max" || level == "auto" {
-                "high"
-            } else {
-                level
+            // 9router `applyFormat` claude-adaptive (thinkingUnified.js):
+            // `auto` → `high`, `minimal` → `low` (Claude effort has no
+            // "minimal" tier), and `xhigh` is model-gated — Opus/Sonnet
+            // 4.6 reject it, so it clamps to `high` only there; 4.7+ /
+            // Sonnet 5 / Opus 5.x and Haiku 5+ advertise it and get it
+            // verbatim, as does `max`.
+            let effort = match level {
+                "auto" => "high",
+                "minimal" => "low",
+                "xhigh" if !claude_adaptive_supports_xhigh(model) => "high",
+                other => other,
             };
             if let Some(obj) = body.as_object_mut() {
-                // 9router parity: output_config.effort alone does NOT turn
-                // thinking on — Anthropic requires an explicit
-                // thinking:{type:"adaptive"} on Opus/Sonnet 4.6+, and
-                // Anthropic-compatible shims default thinking off. Send both.
-                obj.insert("thinking".into(), json!({"type": "adaptive"}));
+                // 9router `applyFormat` claude-adaptive: only models that CAN
+                // disable thinking get the explicit adaptive switch —
+                // permanently adaptive models (Opus 5.5, Fable 5.1) take
+                // output_config.effort directly and `thinking` stays deleted.
+                if can_disable {
+                    // 9router parity: output_config.effort alone does NOT turn
+                    // thinking on — Anthropic requires an explicit
+                    // thinking:{type:"adaptive"} on Opus/Sonnet 4.6+, and
+                    // Anthropic-compatible shims default thinking off. Send both.
+                    obj.insert("thinking".into(), json!({"type": "adaptive"}));
+                }
                 obj.insert("output_config".into(), json!({"effort": effort}));
             }
         }
@@ -782,6 +917,35 @@ pub fn apply_thinking_intent(
             let t = if none { "disabled" } else { "adaptive" };
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("thinking".into(), json!({"type": t}));
+            }
+        }
+        ThinkingNative::OpenAiResponses => {
+            // 9router applyFormat "openai-responses" (thinkingUnified.js:275-289):
+            // effort nests under reasoning{effort,summary}; "none" omits
+            // reasoning entirely; top-level reasoning_effort is ALWAYS deleted
+            // — strict upstreams (Meta, OpenCode Go) reject it as an unknown
+            // parameter.
+            if !none {
+                let supported = openai_supported_levels(provider, model);
+                let effort = normalize_openai_level(level, supported);
+                if let Some(obj) = body.as_object_mut() {
+                    let mut reasoning = obj
+                        .get("reasoning")
+                        .filter(|r| r.is_object() && !r.is_array())
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    reasoning.insert("effort".into(), Value::String(effort.into()));
+                    if !reasoning.contains_key("summary") {
+                        reasoning.insert("summary".into(), Value::String("auto".into()));
+                    }
+                    obj.insert("reasoning".into(), Value::Object(reasoning));
+                }
+            } else if let Some(obj) = body.as_object_mut() {
+                obj.remove("reasoning");
+            }
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("reasoning_effort");
             }
         }
         ThinkingNative::Noop => {}
@@ -925,10 +1089,99 @@ mod tests {
     }
 
     #[test]
+    fn claude_adaptive_xhigh_is_model_gated() {
+        // 9router thinkingLevels.js PATTERN_THINKING: *claude*4.6* /
+        // *claude*4-6* → CLAUDE_NO_XHIGH clamps xhigh→high; 4.7+/Sonnet 5/
+        // Opus 5.x advertise xhigh and get it verbatim.
+        for model in [
+            "claude-opus-4.7",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-haiku-5.5",
+        ] {
+            let mut body = json!({"messages": []});
+            apply_thinking_level(Format::Claude, "claude", model, &mut body, "xhigh");
+            assert_eq!(body["output_config"]["effort"], "xhigh", "{model}");
+        }
+        for model in ["claude-opus-4.6", "claude-sonnet-4-6", "claude-sonnet-4.6"] {
+            let mut body = json!({"messages": []});
+            apply_thinking_level(Format::Claude, "claude", model, &mut body, "xhigh");
+            assert_eq!(body["output_config"]["effort"], "high", "{model}");
+        }
+        // max passes through verbatim on claude-adaptive.
+        let mut body = json!({"messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "claude",
+            "claude-opus-4.6",
+            &mut body,
+            "max",
+        );
+        assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
     fn openai_max_clamps_to_xhigh() {
         let mut body = json!({"messages": []});
         apply_thinking_level(Format::OpenAi, "openai", "gpt-5", &mut body, "max");
         assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn openai_compatible_gpt56_gpt6_preserve_max() {
+        // Upstream #5186: openai-compatible-* nodes serving gpt-5.6/gpt-6 keep
+        // reasoning_effort "max" instead of clamping to xhigh.
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-6-sol",
+            "gpt-6.1-terra",
+            "vendor/gpt-6-luna",
+        ] {
+            let mut body = json!({"messages": []});
+            apply_thinking_level(
+                Format::OpenAi,
+                "openai-compatible-mytier",
+                model,
+                &mut body,
+                "max",
+            );
+            assert_eq!(body["reasoning_effort"], "max", "{model}");
+        }
+        // Same node, non-GPT-5.6/6 model still clamps.
+        let mut body = json!({"messages": []});
+        apply_thinking_level(
+            Format::OpenAi,
+            "openai-compatible-mytier",
+            "gpt-5.5",
+            &mut body,
+            "max",
+        );
+        assert_eq!(body["reasoning_effort"], "xhigh");
+        // ultra folds to max on the max-capable set (no ultra in CODEX_GPT_5_6_LEVELS).
+        let mut body = json!({"messages": []});
+        apply_thinking_level(
+            Format::OpenAi,
+            "openai-compatible-mytier",
+            "gpt-6-sol",
+            &mut body,
+            "ultra",
+        );
+        assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn codex_provider_preserves_max_and_ultra() {
+        // Codex PATTERN_THINKING rows: gpt-6* → max, gpt-5.6-sol/terra → +ultra.
+        let mut body = json!({"messages": []});
+        apply_thinking_level(Format::OpenAi, "codex", "gpt-6-sol", &mut body, "max");
+        assert_eq!(body["reasoning_effort"], "max");
+        let mut body = json!({"messages": []});
+        apply_thinking_level(Format::OpenAi, "codex", "gpt-5.6-sol", &mut body, "ultra");
+        assert_eq!(body["reasoning_effort"], "ultra");
+        // gpt-5.6-luna has no ultra → folds to max.
+        let mut body = json!({"messages": []});
+        apply_thinking_level(Format::OpenAi, "codex", "gpt-5.6-luna", &mut body, "ultra");
+        assert_eq!(body["reasoning_effort"], "max");
     }
 
     #[test]
@@ -1319,5 +1572,130 @@ mod tests {
         let body = json!({"messages": []});
         assert_eq!(extract_thinking_intent(&body), None);
         assert_eq!(capture_thinking(&body), None);
+    }
+
+    // ---- openproxy-4d5h.23: transports[].thinkingFormat ----
+
+    #[test]
+    fn transport_thinking_format_resolves_for_responses_legs() {
+        // opencode-go /responses leg declares thinkingFormat openai-responses.
+        assert_eq!(
+            resolve_thinking_native(Format::OpenAiResponses, "opencode-go", "grok-4.6"),
+            ThinkingNative::OpenAiResponses
+        );
+        assert_eq!(
+            resolve_thinking_native(Format::OpenAiResponses, "ocg", "deepseek-v4-pro"),
+            ThinkingNative::OpenAiResponses
+        );
+        // muse /responses leg likewise.
+        assert_eq!(
+            resolve_thinking_native(Format::OpenAiResponses, "muse", "muse-spark-1.3"),
+            ThinkingNative::OpenAiResponses
+        );
+        // Chat legs are unaffected — no thinkingFormat declared there.
+        assert_eq!(
+            resolve_thinking_native(Format::OpenAi, "opencode-go", "glm-5.3"),
+            ThinkingNative::OpenAi
+        );
+        // Claude leg has no thinkingFormat → normal format resolution.
+        assert_eq!(
+            resolve_thinking_native(Format::Claude, "opencode-go", "deepseek-v4-pro"),
+            ThinkingNative::ClaudeBudget
+        );
+    }
+
+    #[test]
+    fn openai_responses_native_writes_nested_reasoning_and_drops_effort() {
+        let mut body = json!({
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        });
+        apply_thinking_level(
+            Format::OpenAiResponses,
+            "opencode-go",
+            "grok-4.6",
+            &mut body,
+            "high",
+        );
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn openai_responses_native_none_omits_reasoning() {
+        let mut body = json!({
+            "input": [],
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "reasoning_effort": "high"
+        });
+        apply_thinking_level(
+            Format::OpenAiResponses,
+            "muse",
+            "muse-spark-1.3",
+            &mut body,
+            "none",
+        );
+        assert!(body.get("reasoning").is_none(), "{body}");
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+    }
+
+    #[test]
+    fn claude_opus_5_5_none_clamps_to_minimal_effort() {
+        // Bead openproxy-4d5h.45 / upstream applyFormat canDisable gate:
+        // Opus 5.5 (thinkingCanDisable:false) cannot take
+        // thinking.type "disabled" — a "none" intent clamps to minimal
+        // effort (output_config.effort "low") and writes no thinking block.
+        let mut body = json!({"model": "claude-opus-5.5", "messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "github",
+            "claude-opus-5.5",
+            &mut body,
+            "none",
+        );
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(body["output_config"]["effort"], "low", "{body}");
+
+        // A level intent on the same model writes effort only — no
+        // adaptive switch (permanently adaptive upstream).
+        let mut body = json!({"model": "claude-opus-5.5", "messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "github",
+            "claude-opus-5.5",
+            &mut body,
+            "high",
+        );
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(body["output_config"]["effort"], "high", "{body}");
+    }
+
+    #[test]
+    fn claude_sonnet_5_5_adaptive_keeps_switch() {
+        // Sonnet 5.5 CAN disable thinking (between_tools substitution is a
+        // prepare-time rewrite), so the adaptive switch is still written.
+        let mut body = json!({"model": "claude-sonnet-5.5", "messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "github",
+            "claude-sonnet-5.5",
+            &mut body,
+            "high",
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive", "{body}");
+        assert_eq!(body["output_config"]["effort"], "high", "{body}");
+
+        // "none" still writes the disabled switch here (canDisable:true);
+        // prepare_claude_request rewrites it to between_tools downstream.
+        let mut body = json!({"model": "claude-sonnet-5.5", "messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "github",
+            "claude-sonnet-5.5",
+            &mut body,
+            "none",
+        );
+        assert_eq!(body["thinking"]["type"], "disabled", "{body}");
     }
 }

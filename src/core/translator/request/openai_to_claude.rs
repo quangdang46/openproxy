@@ -114,6 +114,34 @@ pub struct ClaudeThinking {
     pub budget_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Anthropic `display` (`summarized` | `omitted`) — decides whether the
+    /// thinking text comes back at all. 9router thinkingUnified.js
+    /// `openAIThinkingDisplay` / `applyFormat` (claude-budget/-adaptive arms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+/// Capture the OpenAI-shaped client's ask for thinking *text* — port of
+/// 9router `openAIThinkingDisplay` (thinkingUnified.js:116-126). Claude only
+/// returns thinking content with `thinking.display: "summarized"`, a field
+/// OpenAI has no equivalent for, so the intent cannot survive translation
+/// on its own:
+/// - Responses API: `reasoning.summary` (non-empty, non-"none") → summarized.
+///   When `reasoning` is an object its `summary` is authoritative — the
+///   function returns early and never falls through to `reasoning_effort`.
+/// - Chat Completions: any string `reasoning_effort` → summarized.
+fn openai_thinking_display(body_obj: &serde_json::Map<String, Value>) -> Option<String> {
+    if let Some(reasoning) = body_obj.get("reasoning").filter(|v| v.is_object()) {
+        return reasoning
+            .get("summary")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && *s != "none")
+            .map(|_| "summarized".to_string());
+    }
+    body_obj
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(|_| "summarized".to_string())
 }
 
 fn extract_text_content(content: &Value) -> String {
@@ -747,6 +775,11 @@ pub fn openai_to_claude_request(
                         thinking_type: "enabled".to_string(),
                         budget_tokens: Some(b),
                         max_tokens: None,
+                        // Chat Completions has no summary knob — a client that
+                        // set reasoning_effort is asking for reasoning, and
+                        // reasoning_content is how it receives it (upstream
+                        // captureThinking → display "summarized").
+                        display: openai_thinking_display(body_obj),
                     });
                 }
             }
@@ -767,10 +800,26 @@ pub fn openai_to_claude_request(
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
+        // Upstream applyThinking: `body.thinking.display` wins; the captured
+        // OpenAI intent (reasoning.summary / reasoning_effort) fills in when
+        // the client sent no display of its own. "disabled" never carries a
+        // display (upstream applyFormat none-branch drops it).
+        let display = t
+            .get("display")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                if thinking_type == "disabled" {
+                    None
+                } else {
+                    openai_thinking_display(body_obj)
+                }
+            });
         ClaudeThinking {
             thinking_type,
             budget_tokens,
             max_tokens,
+            display,
         }
     });
 
@@ -1064,6 +1113,117 @@ mod tests {
             thinking.get("budget_tokens").unwrap().as_u64().unwrap(),
             24576 // 9router LEVEL_TO_BUDGET: high = 24576
         );
+    }
+
+    #[test]
+    fn reasoning_effort_sets_thinking_display_summarized() {
+        // 9router thinkingUnified.js captureThinking → openAIThinkingDisplay:
+        // an OpenAI client that sets reasoning_effort is asking for the
+        // thinking text, which Claude only returns with display "summarized".
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high"
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(thinking.get("type").unwrap().as_str().unwrap(), "enabled");
+        assert_eq!(
+            thinking.get("display").unwrap().as_str().unwrap(),
+            "summarized"
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_sets_thinking_display_summarized() {
+        // Responses-API shape: reasoning.summary is the explicit request for
+        // reasoning text (upstream openAIThinkingDisplay first arm).
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning": {"effort": "high", "summary": "auto"}
+        }"#,
+        )
+        .unwrap();
+
+        // reasoning.effort is not read by this translator (only the flat
+        // reasoning_effort field), so pair it with a Claude thinking object
+        // to exercise the display fallback on the passthrough arm.
+        body.as_object_mut().unwrap().insert(
+            "thinking".into(),
+            serde_json::json!({"type": "enabled", "budget_tokens": 4096}),
+        );
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(
+            thinking.get("display").unwrap().as_str().unwrap(),
+            "summarized"
+        );
+    }
+
+    #[test]
+    fn client_display_wins_over_openai_intent() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "thinking": {"type": "enabled", "budget_tokens": 4096, "display": "omitted"}
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(
+            thinking.get("display").unwrap().as_str().unwrap(),
+            "omitted"
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_carries_no_display() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "thinking": {"type": "disabled"}
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(thinking.get("type").unwrap().as_str().unwrap(), "disabled");
+        assert!(thinking.get("display").is_none());
+    }
+
+    #[test]
+    fn no_reasoning_intent_leaves_display_absent() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let thinking = body.get("thinking").unwrap();
+        assert!(thinking.get("display").is_none());
     }
 
     #[test]

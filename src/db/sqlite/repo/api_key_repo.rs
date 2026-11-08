@@ -127,7 +127,10 @@ mod tests {
         db.with_transaction(|tx| create(tx, &key)).unwrap();
         let read = db.with_conn(|c| get_by_id(c, "k1")).unwrap().unwrap();
         assert!(read.access.restricted);
-        assert_eq!(read.access.allow, vec!["Main".to_string(), "cx/gpt-5".to_string()]);
+        assert_eq!(
+            read.access.allow,
+            vec!["Main".to_string(), "cx/gpt-5".to_string()]
+        );
 
         // Clearing the restriction persists as unrestricted.
         let mut cleared = read.clone();

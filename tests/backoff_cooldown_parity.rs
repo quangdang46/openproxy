@@ -39,14 +39,14 @@ const FAR_FUTURE: &str = "2099-01-01T00:00:00Z";
 fn cooldown_table_matches_the_js_rule_list() {
     for status in [401u16, 402, 403, 404] {
         assert_eq!(
-            check_fallback_error(status, "boom", 0).cooldown,
+            check_fallback_error(status, "boom", 0, None).cooldown,
             Duration::from_secs(120),
             "status {status} takes the long cooldown"
         );
     }
     for status in [400u16, 406, 418, 500, 502, 503, 504] {
         assert_eq!(
-            check_fallback_error(status, "boom", 0).cooldown,
+            check_fallback_error(status, "boom", 0, None).cooldown,
             Duration::from_secs(30),
             "status {status} has no rule and takes the transient default"
         );
@@ -80,11 +80,11 @@ fn an_unmatched_400_is_classified_as_a_plain_no_match() {
     // There is no `Permanent` variant to resolve into — the caller sees
     // `NoMatch` and applies its own 30 s default.
     assert_eq!(
-        classify_error(Some("unsupported parameter: max_tokens"), Some(400)),
+        classify_error(Some("unsupported parameter: max_tokens"), Some(400), None),
         ErrorClassification::NoMatch
     );
     assert_eq!(
-        classify_error(Some("The model `gpt-9` does not exist"), Some(404)),
+        classify_error(Some("The model `gpt-9` does not exist"), Some(404), None),
         ErrorClassification::Cooldown(Duration::from_millis(COOLDOWN_LONG_MS))
     );
 }
@@ -94,15 +94,15 @@ fn an_unmatched_400_is_classified_as_a_plain_no_match() {
 #[test]
 fn text_rules_take_priority_over_status_rules() {
     assert_eq!(
-        check_fallback_error(400, "improperly formed request", 0).cooldown,
+        check_fallback_error(400, "improperly formed request", 0, None).cooldown,
         Duration::from_millis(COOLDOWN_LONG_MS)
     );
     assert_eq!(
-        check_fallback_error(400, "request not allowed", 0).cooldown,
+        check_fallback_error(400, "request not allowed", 0, None).cooldown,
         Duration::from_millis(COOLDOWN_SHORT_MS)
     );
     // "no credentials" outranks a 429 on the same response.
-    let decision = check_fallback_error(429, "no credentials found for this account", 0);
+    let decision = check_fallback_error(429, "no credentials found for this account", 0, None);
     assert_eq!(decision.cooldown, Duration::from_millis(COOLDOWN_LONG_MS));
     assert!(decision.new_backoff_level.is_none());
 }
@@ -112,16 +112,16 @@ fn text_rules_take_priority_over_status_rules() {
 #[test]
 fn only_backoff_failures_advance_the_level() {
     assert_eq!(
-        check_fallback_error(429, "boom", 4).new_backoff_level,
+        check_fallback_error(429, "boom", 4, None).new_backoff_level,
         Some(5)
     );
     assert_eq!(
-        check_fallback_error(429, "boom", 4).cooldown,
+        check_fallback_error(429, "boom", 4, None).cooldown,
         get_quota_cooldown(5)
     );
     for status in [400u16, 401, 402, 403, 404, 500] {
         assert_eq!(
-            check_fallback_error(status, "boom", 4).new_backoff_level,
+            check_fallback_error(status, "boom", 4, None).new_backoff_level,
             None,
             "status {status} must leave the level alone"
         );
@@ -132,7 +132,7 @@ fn only_backoff_failures_advance_the_level() {
 fn every_failure_falls_back_to_the_next_member() {
     for status in [400u16, 401, 402, 403, 404, 429, 500, 503] {
         assert!(
-            check_fallback_error(status, "boom", 0).should_fallback,
+            check_fallback_error(status, "boom", 0, None).should_fallback,
             "9router always falls back, status {status} included"
         );
     }

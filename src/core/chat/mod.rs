@@ -19,17 +19,23 @@ use serde_json::Value;
 
 use crate::core::guardrails::global_guardrail_registry;
 use crate::core::model::catalog::provider_catalog;
-use crate::core::rtk::system_inject::inject_system_prompt;
 use crate::core::translator::caveman::inject_caveman;
 use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::core::translator::registry::{self, Format};
+use crate::core::utils::thinking_suffix::ThinkingNative;
 use crate::types::Settings;
 
 /// Multi-endpoint transport entry (9router `PROVIDERS[p].transports[]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransportMatch {
     pub format: Format,
     pub base_url: String,
+    /// Per-transport thinking wire format (9router `transports[].thinkingFormat`,
+    /// thinkingUnified.js:130-148). Strict `/responses` legs declare
+    /// `openai-responses` so `resolve_thinking_native` writes
+    /// `reasoning:{effort,summary}` instead of a stray top-level
+    /// `reasoning_effort` those upstreams reject.
+    pub thinking_format: Option<ThinkingNative>,
 }
 
 /// Result of planning a request before dispatch.
@@ -297,13 +303,23 @@ fn opencode_go_supported_formats(model_id: &str) -> Option<&'static [Format]> {
 /// registry models declare supportedFormats); every other provider — and
 /// undeclared opencode-go models — keeps the upstream default (true).
 fn model_supports_source_format(provider: &str, model: &str, source: Format) -> bool {
-    if !matches!(provider, "opencode-go" | "ocg") {
-        return true;
+    if matches!(provider, "opencode-go" | "ocg") {
+        return match opencode_go_supported_formats(model) {
+            Some(formats) => formats.contains(&source),
+            None => true,
+        };
     }
-    match opencode_go_supported_formats(model) {
-        Some(formats) => formats.contains(&source),
-        None => true,
+    // Muse registry models declare `supportedFormats: ["openai-responses"]`
+    // (9router registry muse.js) — the chat/completions transport must not
+    // win for them even though the provider exposes one.
+    if matches!(
+        provider,
+        "muse" | "muse-ai" | "meta-model-api" | "muse-code" | "muse-subscription"
+    ) && is_muse_spark_model(model)
+    {
+        return source == Format::OpenAiResponses;
     }
+    true
 }
 
 fn parse_strip_list(raw: &str) -> Vec<String> {
@@ -322,16 +338,19 @@ pub fn resolve_transport(provider: &str, source_format: Format) -> Option<Transp
 }
 
 /// Static multi-transport table ported from 9router registry (deepseek, kimi, glm, …).
-fn provider_transports(provider: &str) -> Vec<TransportMatch> {
+/// `pub(crate)` so `resolve_thinking_native` can honour `transports[].thinkingFormat`.
+pub(crate) fn provider_transports(provider: &str) -> Vec<TransportMatch> {
     match provider {
         "deepseek" | "ds" => vec![
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://api.deepseek.com/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.deepseek.com/anthropic/v1/messages".into(),
+                thinking_format: None,
             },
         ],
         "kimi" => vec![
@@ -339,31 +358,37 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 format: Format::OpenAi,
                 // Coding plan OpenAI leg (9r registry); moonshot.cn is web-search only.
                 base_url: "https://api.kimi.com/coding/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 // beta baked in: runtime_transport already_endpoint would otherwise drop urlSuffix.
                 base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
+                thinking_format: None,
             },
             // Kimi Code natively serves the OpenAI Responses API
             // (9r kimi.js transports[2]; Codex wire_api = "responses").
             TransportMatch {
                 format: Format::OpenAiResponses,
                 base_url: "https://api.kimi.com/coding/v1/responses".into(),
+                thinking_format: None,
             },
         ],
         "kimi-coding" => vec![
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://api.kimi.com/coding/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::OpenAiResponses,
                 base_url: "https://api.kimi.com/coding/v1/responses".into(),
+                thinking_format: None,
             },
         ],
         "glm" => vec![
@@ -371,10 +396,12 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 format: Format::OpenAi,
                 // GLM Coding plan (api.z.ai); open.bigmodel.cn is glm-cn.
                 base_url: "https://api.z.ai/api/coding/paas/v4/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.z.ai/api/anthropic/v1/messages?beta=true".into(),
+                thinking_format: None,
             },
         ],
         "minimax" => vec![
@@ -382,30 +409,36 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 format: Format::OpenAi,
                 // Modern OpenAI chat; chatcompletion_v2 is legacy/search-only in 9r.
                 base_url: "https://api.minimax.io/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.minimax.io/anthropic/v1/messages?beta=true".into(),
+                thinking_format: None,
             },
         ],
         "minimax-cn" => vec![
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://api.minimaxi.com/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.minimaxi.com/anthropic/v1/messages?beta=true".into(),
+                thinking_format: None,
             },
         ],
         "xiaomi-mimo" | "mimo" => vec![
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://api.xiaomimimo.com/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.xiaomimimo.com/anthropic/v1/messages".into(),
+                thinking_format: None,
             },
         ],
         // Region-specific bases are applied in DefaultExecutor; here we only
@@ -415,10 +448,12 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages".into(),
+                thinking_format: None,
             },
         ],
         // Alibaba Token Plan — Singapore-only, OpenAI-compatible only.
@@ -427,6 +462,7 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions".into(),
+                thinking_format: None,
             },
         ],
         // opencode-go 3-leg transports (9router registry opencode-go.js
@@ -437,14 +473,36 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://opencode.ai/zen/go/v1/chat/completions".into(),
+                thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://opencode.ai/zen/go/v1/messages".into(),
+                thinking_format: None,
             },
+            // /responses rejects the Chat-shaped thinking fields
+            // (reasoning_effort, thinking:{type}) — upstream declares
+            // `thinkingFormat: "openai-responses"` on this leg
+            // (9router registry opencode-go.js transports[2]).
             TransportMatch {
                 format: Format::OpenAiResponses,
                 base_url: "https://opencode.ai/zen/go/v1/responses".into(),
+                thinking_format: Some(ThinkingNative::OpenAiResponses),
+            },
+        ],
+        // Muse (Meta Model API) dual transport (9router registry muse.js):
+        // chat/completions + strict /responses whose thinkingFormat is
+        // "openai-responses" (rejects top-level reasoning_effort).
+        "muse" | "muse-ai" | "meta-model-api" | "muse-code" | "muse-subscription" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://api.meta.ai/v1/chat/completions".into(),
+                thinking_format: None,
+            },
+            TransportMatch {
+                format: Format::OpenAiResponses,
+                base_url: "https://api.meta.ai/v1/responses".into(),
+                thinking_format: Some(ThinkingNative::OpenAiResponses),
             },
         ],
         _ => Vec::new(),
@@ -526,47 +584,13 @@ pub fn apply_preprocessing(
             PonytailLevel::parse_or_default(&settings.ponytail_level),
         );
     }
-    // System prompt injection at RTK layer.
-    // Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
-    // `extra` map.
-    modified |= apply_chat_system_prompt_injection(body, settings);
+    // Custom system prompt injection — delegated to the shared RTK-layer
+    // dispatch so this path and `apply_request_preprocessing` behave
+    // identically (Kiro / Claude / Gemini-request / OpenAI shape switch,
+    // `customPromptEnabled`/`customPrompt` keys with the legacy
+    // `extra["systemInject"]`/`extra["systemPrompt"]` fallback).
+    modified |= crate::core::rtk::apply_system_prompt_injection(body, settings);
     modified
-}
-
-/// Check the RTK-layer system injection settings and apply if enabled.
-/// Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
-/// `extra` map.
-fn apply_chat_system_prompt_injection(body: &mut Value, settings: &Settings) -> bool {
-    let system_inject = settings
-        .extra
-        .get("systemInject")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !system_inject {
-        return false;
-    }
-    let prompt = settings
-        .extra
-        .get("systemPrompt")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_string());
-    match prompt {
-        Some(p) => {
-            // Dispatch by body shape (9router injectSystemPrompt format switch).
-            let format = if body.get("system").is_some() {
-                "claude"
-            } else if body.get("systemInstruction").is_some()
-                || body.get("system_instruction").is_some()
-            {
-                "gemini"
-            } else {
-                "openai"
-            };
-            inject_system_prompt(body, format, &p)
-        }
-        None => false,
-    }
 }
 
 #[cfg(test)]
@@ -966,6 +990,55 @@ mod tests {
         // opencode/oc are single-endpoint — no transports.
         assert!(resolve_transport("opencode", Format::OpenAi).is_none());
         assert!(resolve_transport("oc", Format::Claude).is_none());
+    }
+
+    #[test]
+    fn responses_legs_declare_thinking_format() {
+        // openproxy-4d5h.23: upstream transports[].thinkingFormat.
+        let t = resolve_transport("opencode-go", Format::OpenAiResponses).unwrap();
+        assert_eq!(t.thinking_format, Some(ThinkingNative::OpenAiResponses));
+        let t = resolve_transport("ocg", Format::OpenAiResponses).unwrap();
+        assert_eq!(t.thinking_format, Some(ThinkingNative::OpenAiResponses));
+        // Chat/claude legs declare none.
+        assert_eq!(
+            resolve_transport("opencode-go", Format::OpenAi)
+                .unwrap()
+                .thinking_format,
+            None
+        );
+        // muse dual transport (9router registry muse.js).
+        let t = resolve_transport("muse", Format::OpenAiResponses).unwrap();
+        assert_eq!(t.base_url, "https://api.meta.ai/v1/responses");
+        assert_eq!(t.thinking_format, Some(ThinkingNative::OpenAiResponses));
+        let t = resolve_transport("muse", Format::OpenAi).unwrap();
+        assert_eq!(t.base_url, "https://api.meta.ai/v1/chat/completions");
+        assert_eq!(t.thinking_format, None);
+    }
+
+    #[test]
+    fn muse_spark_models_skip_chat_transport() {
+        // Muse Spark models are responses-only: an OpenAI-wire client must NOT
+        // match the chat/completions transport (upstream supportedFormats guard).
+        let body = json!({
+            "model": "muse-spark-1.3",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let plan = RequestPlan::new(None, &body, "muse", "muse-spark-1.3");
+        assert!(plan.transport_base_url.is_none());
+        assert_eq!(plan.target_format, Format::OpenAiResponses);
+
+        // A Responses-wire client DOES match the responses transport.
+        let body = json!({
+            "model": "muse-spark-1.3",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+        let plan = RequestPlan::new(Some("/v1/responses"), &body, "muse", "muse-spark-1.3");
+        assert_eq!(plan.source_format, Format::OpenAiResponses);
+        assert_eq!(plan.target_format, Format::OpenAiResponses);
+        assert_eq!(
+            plan.transport_base_url.as_deref(),
+            Some("https://api.meta.ai/v1/responses")
+        );
     }
 
     #[test]

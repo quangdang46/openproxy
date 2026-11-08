@@ -13,6 +13,9 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::core::combo::capabilities::{
+    aggregate_combo_capabilities, capabilities_json, combo_seat_limits, get_capabilities_for_model,
+};
 use crate::core::model::catalog::provider_catalog;
 use crate::core::model::resolve_provider_alias;
 use crate::server::state::AppState;
@@ -21,6 +24,24 @@ use crate::types::{AppDb, ModelAliasTarget, ProviderConnection};
 use super::provider_models::INTERNAL_MODELS_FETCH_HEADER;
 
 const LLM_KIND: &str = "llm";
+
+/// Provider ids whose 9router registry entry is `category: "free"` with
+/// top-level `noAuth: true` — the set `/v1/models` synthesizes a
+/// `{id:"noauth"}` connection for (route.js:370-379). See the call site for
+/// why the broader noAuth registry entries are excluded.
+const NO_AUTH_FREE_PROVIDERS: &[&str] = &["opencode", "mimo-free", "devin-cli"];
+
+/// The `/v1/models` counterpart of chat's `virtual_no_auth_connection`
+/// (chat.rs): upstream's pseudo-connection carries only
+/// `{id:"noauth", provider, isActive:true}` — no credentials, no
+/// providerSpecificData — so the static catalog is what gets listed.
+fn no_auth_models_connection(provider: &str) -> ProviderConnection {
+    let mut connection = ProviderConnection::default();
+    connection.id = "noauth".to_string();
+    connection.provider = provider.to_string();
+    connection.is_active = Some(true);
+    connection
+}
 
 /// Router path a model of this kind is served on
 /// (9router `KIND_ENDPOINT`, models/info/route.js:5-14). Unknown kinds report
@@ -69,10 +90,7 @@ fn skip_dynamic_fetch(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value == "1")
 }
 
-pub async fn list_default_models(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_default_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let skip = skip_dynamic_fetch(&headers);
     list_models_for_kinds(state, headers, &[LLM_KIND], skip).await
 }
@@ -228,6 +246,15 @@ async fn build_models_list(
 
     let mut models = Vec::new();
 
+    // Lookup map so aggregate_combo_capabilities / combo_seat_limits can
+    // recursively resolve nested combos (bare-name seats) — upstream
+    // `comboByName` (models/route.js:386-388).
+    let combo_lookup: HashMap<String, Vec<String>> = snapshot
+        .combos
+        .iter()
+        .map(|combo| (combo.name.clone(), combo.models.clone()))
+        .collect();
+
     for combo in &snapshot.combos {
         // A combo switched off with `openproxy combo disable` is no longer
         // dispatchable (get_combo_models_from_data requires is_active), so
@@ -246,14 +273,26 @@ async fn build_models_list(
             _ => None,
         };
 
-        models.push(model_card(
+        let mut card = model_card(
             combo.name.clone(),
             "combo".to_string(),
             created,
-            kind,
+            kind.clone(),
             None,
             None,
-        ));
+        );
+        // Non-web combos publish the aggregated capability envelope plus the
+        // token limits every seat can promise — upstream models/route.js:399-410.
+        // Web combos have no model seats, so they get neither.
+        if kind.is_none() {
+            if let Some(caps) = aggregate_combo_capabilities(&combo.models, Some(&combo_lookup)) {
+                card.capabilities = Some(capabilities_json(&caps));
+            }
+            let (context_window, max_output) = combo_seat_limits(&combo.models, &combo_lookup);
+            card.context_length = context_window.and_then(|v| u32::try_from(v).ok());
+            card.max_completion_tokens = max_output.and_then(|v| u32::try_from(v).ok());
+        }
+        models.push(card);
     }
 
     if active_connections.is_empty() {
@@ -275,14 +314,16 @@ async fn build_models_list(
                     continue;
                 }
 
-                models.push(model_card(
+                let mut card = model_card(
                     format!("{}/{}", provider_entry.alias, model.id),
                     provider_entry.alias.clone(),
                     created,
                     None,
                     model.context_window,
                     None,
-                ));
+                );
+                apply_model_capabilities(&mut card, provider_id, &model.id, model.kind == LLM_KIND);
+                models.push(card);
             }
         }
 
@@ -296,18 +337,42 @@ async fn build_models_list(
                     continue;
                 }
 
-                models.push(model_card(
+                let mut card = model_card(
                     format!("{provider_alias}/{model_id}"),
                     provider_alias.to_string(),
                     created,
                     None,
                     None,
                     None,
-                ));
+                );
+                apply_model_capabilities(&mut card, provider_alias, model_id, true);
+                models.push(card);
             }
         }
     } else {
-        for connection in active_connection_by_provider {
+        // 9router route.js:370-379 injects `{id:"noauth", provider, isActive:true}`
+        // pseudo-connections for FREE_PROVIDERS entries carrying `noAuth`, so
+        // keyless free providers still advertise their catalog when no stored
+        // connection exists. Upstream's effective set is the registry entries
+        // with `category: "free"` AND top-level `noAuth: true`
+        // (open-sse/providers/registry/{opencode,mimo-free,devin-cli}.js) —
+        // the freeTier/apikey noAuth providers (edge-tts, coqui, mmf, …) are
+        // NOT in FREE_PROVIDERS and get no pseudo-connection upstream.
+        let no_auth_connections: Vec<ProviderConnection> = NO_AUTH_FREE_PROVIDERS
+            .iter()
+            .filter(|provider_id| {
+                !active_connections
+                    .iter()
+                    .any(|connection| connection.provider == **provider_id)
+            })
+            .map(|provider_id| no_auth_models_connection(provider_id))
+            .collect();
+
+        for connection in active_connection_by_provider
+            .iter()
+            .copied()
+            .chain(no_auth_connections.iter())
+        {
             let provider_id = connection.provider.as_str();
             if !provider_matches_kinds(catalog, provider_id, kind_filter) {
                 continue;
@@ -419,14 +484,16 @@ async fn build_models_list(
                 let ctx_len = catalog
                     .find_model(provider_id, &model_id)
                     .and_then(|m| m.context_window);
-                models.push(model_card(
+                let mut card = model_card(
                     format!("{output_alias}/{model_id}"),
                     output_alias.clone(),
                     created,
                     None,
                     ctx_len,
                     None,
-                ));
+                );
+                apply_model_capabilities(&mut card, provider_id, &model_id, kind == LLM_KIND);
+                models.push(card);
             }
 
             if let Some(provider_info) = catalog.provider_info(provider_id) {
@@ -499,14 +566,16 @@ async fn build_models_list(
             if provider_alias.is_empty() {
                 continue;
             }
-            models.push(model_card(
+            let mut card = model_card(
                 format!("{provider_alias}/{model_id}"),
                 provider_alias.to_string(),
                 created,
                 None,
                 None,
                 None,
-            ));
+            );
+            apply_model_capabilities(&mut card, provider_alias, model_id, true);
+            models.push(card);
         }
     }
 
@@ -679,6 +748,28 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
+/// Capability metadata + token limits for one provider/custom model card —
+/// upstream models/route.js per-provider path: `capabilities` carries the
+/// resolved table entry and `context_length` / `max_completion_tokens` are
+/// published under the snake_case names OpenAI/OpenRouter clients match on.
+/// `provider` may be an alias; it is resolved alias → provider id exactly
+/// like `comboSeatCapabilities`. Limits are only emitted for LLM-kind cards
+/// (upstream `kind === LLM_KIND || allowAsLlm` gate).
+fn apply_model_capabilities(card: &mut ModelCard, provider: &str, model_id: &str, is_llm: bool) {
+    let caps = get_capabilities_for_model(&resolve_provider_alias(provider), model_id);
+    card.capabilities = Some(capabilities_json(&caps));
+    if is_llm {
+        // Upstream publishes caps.contextWindow / caps.maxOutput verbatim —
+        // the capability table (hand rows + synced catalog overlay + provider
+        // overrides) is authoritative here, so it wins over the static
+        // catalog context_window when both exist.
+        card.context_length = u32::try_from(caps.context_window)
+            .ok()
+            .or(card.context_length);
+        card.max_completion_tokens = u32::try_from(caps.max_output).ok();
+    }
+}
+
 fn model_card(
     id: String,
     owned_by: String,
@@ -697,6 +788,7 @@ fn model_card(
         root,
         parent: None,
         kind,
+        capabilities: None,
         context_length,
         max_completion_tokens,
     }
@@ -758,6 +850,11 @@ struct ModelCard {
     parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+    /// Resolved capability envelope (9router `capabilities.js` shape —
+    /// vision/pdf/audioInput/…/contextWindow/maxOutput), emitted on combo
+    /// and LLM model cards (upstream models/route.js `entry.capabilities`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Value>,
     /// Maximum context window size in tokens (9router v0.5.55 parity).
     #[serde(skip_serializing_if = "Option::is_none")]
     context_length: Option<u32>,
@@ -1417,5 +1514,62 @@ mod tests {
             body["dimensions"], 768,
             "9router declares dimensions: 768 on gemini embedding-001"
         );
+    }
+
+    /// 9router models/route.js:399-410 — a combo card carries the aggregated
+    /// `capabilities` envelope plus the `context_length` /
+    /// `max_completion_tokens` every seat can promise (min across seats).
+    #[tokio::test]
+    async fn combo_card_publishes_aggregated_capabilities_and_limits() {
+        let snapshot = AppDb {
+            combos: vec![crate::types::Combo {
+                id: "combo-1".into(),
+                name: "mycombo".into(),
+                models: vec![
+                    "openai/gpt-4o".to_string(),             // 128k ctx / 16k out, vision
+                    "anthropic/claude-opus-4.8".to_string(), // 1M ctx / 128k out
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND], false).await;
+        let card = models
+            .iter()
+            .find(|m| m.id == "mycombo")
+            .expect("combo should be listed");
+
+        let caps = card.capabilities.as_ref().expect("capabilities present");
+        assert_eq!(caps["contextWindow"], json!(128_000)); // min across seats
+        assert_eq!(caps["maxOutput"], json!(128_000)); // max across seats
+        assert_eq!(caps["vision"], json!(true)); // union
+        assert_eq!(card.context_length, Some(128_000));
+        assert_eq!(card.max_completion_tokens, Some(16_384)); // min out
+    }
+
+    /// GPT-5.4+ publish the real 1.05M window on /v1/models — the capability
+    /// table is authoritative for `context_length` (89ffac5 pattern rows).
+    #[tokio::test]
+    async fn gpt_5_4_model_card_publishes_1m_context() {
+        let models =
+            build_models_list(&test_state().await, &AppDb::default(), &[LLM_KIND], false).await;
+        let card = models
+            .iter()
+            .find(|m| m.id == "openai/gpt-5.4")
+            .expect("openai/gpt-5.4 should be in the static catalog");
+
+        assert_eq!(card.context_length, Some(1_050_000));
+        assert_eq!(card.max_completion_tokens, Some(128_000));
+        let caps = card.capabilities.as_ref().expect("capabilities present");
+        assert_eq!(caps["contextWindow"], json!(1_050_000));
+        assert_eq!(caps["reasoning"], json!(true));
+
+        // The mini tier stays at 400k.
+        let mini = models
+            .iter()
+            .find(|m| m.id == "openai/gpt-5.4-mini")
+            .expect("openai/gpt-5.4-mini should be in the static catalog");
+        assert_eq!(mini.context_length, Some(400_000));
     }
 }

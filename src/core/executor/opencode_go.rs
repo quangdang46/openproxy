@@ -180,9 +180,7 @@ impl OpenCodeGoExecutor {
     fn base_model_id(model: &str) -> &str {
         let mut clean = model.trim();
         if let Some(open) = clean.rfind('(') {
-            if clean.ends_with(')')
-                && !clean[open + 1..clean.len() - 1].contains(['(', ')'])
-            {
+            if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
                 clean = clean[..open].trim_end();
             }
         }
@@ -197,9 +195,7 @@ impl OpenCodeGoExecutor {
         let Some(after_muse) = lower.strip_prefix("muse") else {
             return false;
         };
-        let after_sep = after_muse
-            .strip_prefix(['-', '_'])
-            .unwrap_or(after_muse);
+        let after_sep = after_muse.strip_prefix(['-', '_']).unwrap_or(after_muse);
         let Some(after_spark) = after_sep.strip_prefix("spark") else {
             return false;
         };
@@ -405,97 +401,99 @@ impl OpenCodeGoExecutor {
         if responses_lane {
             Self::transform_responses_body(&effective_model, &mut request.body);
         } else {
-        // Strip forbidden fields that Cloudflare Workers AI / Fireworks reject
-        let mut needs_chat_format = false;
-        if let Some(obj) = request.body.as_object_mut() {
-            for field in FORBIDDEN_FIELDS {
-                obj.remove(*field);
-            }
-            // Also strip from nested assistant tool_calls and messages
-            if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
-                for msg in messages.iter_mut() {
-                    if let Some(msg_obj) = msg.as_object_mut() {
-                        for field in FORBIDDEN_FIELDS {
-                            msg_obj.remove(*field);
+            // Strip forbidden fields that Cloudflare Workers AI / Fireworks reject
+            let mut needs_chat_format = false;
+            if let Some(obj) = request.body.as_object_mut() {
+                for field in FORBIDDEN_FIELDS {
+                    obj.remove(*field);
+                }
+                // Also strip from nested assistant tool_calls and messages
+                if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+                    for msg in messages.iter_mut() {
+                        if let Some(msg_obj) = msg.as_object_mut() {
+                            for field in FORBIDDEN_FIELDS {
+                                msg_obj.remove(*field);
+                            }
                         }
                     }
                 }
+
+                // Convert Responses API format (input) to chat format (messages)
+                // Codex CLI sends { model, input, client_metadata, ... }
+                // OpenCode Go /zen/go/v1/chat/completions expects { model, messages, ... }
+                if obj.contains_key("input") && !obj.contains_key("messages") {
+                    needs_chat_format = true;
+                    if let Some(input) = obj.remove("input") {
+                        let messages = responses_input_to_messages(input);
+                        obj.insert("messages".to_string(), messages);
+                    }
+                    // Responses API uses `previous_response_id` for multi-turn
+                    obj.remove("previous_response_id");
+                    // Responses API uses `instructions` — map to system message if present
+                    if let Some(instructions) = obj.remove("instructions") {
+                        if let Some(messages) =
+                            obj.get_mut("messages").and_then(Value::as_array_mut)
+                        {
+                            let sys_msg = serde_json::json!({
+                                "role": "system",
+                                "content": instructions
+                            });
+                            messages.insert(0, sys_msg);
+                        }
+                    }
+                }
+
+                // Remove Responses API fields that aren't needed for chat
+                obj.remove("tool_choice"); // OCg chat endpoint doesn't use Responses' tool_choice format
             }
 
-            // Convert Responses API format (input) to chat format (messages)
-            // Codex CLI sends { model, input, client_metadata, ... }
-            // OpenCode Go /zen/go/v1/chat/completions expects { model, messages, ... }
-            if obj.contains_key("input") && !obj.contains_key("messages") {
-                needs_chat_format = true;
-                if let Some(input) = obj.remove("input") {
-                    let messages = responses_input_to_messages(input);
-                    obj.insert("messages".to_string(), messages);
-                }
-                // Responses API uses `previous_response_id` for multi-turn
-                obj.remove("previous_response_id");
-                // Responses API uses `instructions` — map to system message if present
-                if let Some(instructions) = obj.remove("instructions") {
-                    if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
-                        let sys_msg = serde_json::json!({
-                            "role": "system",
-                            "content": instructions
-                        });
-                        messages.insert(0, sys_msg);
+            // Re-normalize developer→system after potential input→messages conversion
+            if needs_chat_format {
+                normalize_developer_role(&mut request.body);
+            }
+
+            // --- Fix: strip unsupported tools for Fireworks AI ---
+            if let Some(obj) = request.body.as_object_mut() {
+                // Fireworks rejects: tools with type != "function", and any top-level
+                // tool fields besides "type" and "function" (no name/description/parameters at tool level).
+                // Codex may send tools in flat format (name/desc/params at tool level) or
+                // nested format (inside function:{}). Both need to be normalized.
+                if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+                    tools.retain(|tool| {
+                        let t = tool.get("type").and_then(Value::as_str).unwrap_or("");
+                        ALLOWED_TOOL_TYPES.contains(&t)
+                    });
+                    for tool in tools.iter_mut() {
+                        let mut cleaned = serde_json::Map::new();
+                        // Keep type
+                        if let Some(t) = tool.get("type").and_then(Value::as_str) {
+                            cleaned.insert("type".into(), Value::String(t.into()));
+                        }
+                        // Extract function name from either nested function:{} or top-level name
+                        let fname = tool
+                            .get("function")
+                            .and_then(|f| f.get("name").and_then(Value::as_str))
+                            .or_else(|| tool.get("name").and_then(Value::as_str))
+                            .unwrap_or("")
+                            .to_string();
+                        if fname.is_empty() {
+                            continue;
+                        }
+                        cleaned.insert(
+                            "function".into(),
+                            serde_json::json!({
+                                "name": fname
+                            }),
+                        );
+                        *tool = Value::Object(cleaned);
                     }
                 }
             }
 
-            // Remove Responses API fields that aren't needed for chat
-            obj.remove("tool_choice"); // OCg chat endpoint doesn't use Responses' tool_choice format
-        }
-
-        // Re-normalize developer→system after potential input→messages conversion
-        if needs_chat_format {
-            normalize_developer_role(&mut request.body);
-        }
-
-        // --- Fix: strip unsupported tools for Fireworks AI ---
-        if let Some(obj) = request.body.as_object_mut() {
-            // Fireworks rejects: tools with type != "function", and any top-level
-            // tool fields besides "type" and "function" (no name/description/parameters at tool level).
-            // Codex may send tools in flat format (name/desc/params at tool level) or
-            // nested format (inside function:{}). Both need to be normalized.
-            if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
-                tools.retain(|tool| {
-                    let t = tool.get("type").and_then(Value::as_str).unwrap_or("");
-                    ALLOWED_TOOL_TYPES.contains(&t)
-                });
-                for tool in tools.iter_mut() {
-                    let mut cleaned = serde_json::Map::new();
-                    // Keep type
-                    if let Some(t) = tool.get("type").and_then(Value::as_str) {
-                        cleaned.insert("type".into(), Value::String(t.into()));
-                    }
-                    // Extract function name from either nested function:{} or top-level name
-                    let fname = tool
-                        .get("function")
-                        .and_then(|f| f.get("name").and_then(Value::as_str))
-                        .or_else(|| tool.get("name").and_then(Value::as_str))
-                        .unwrap_or("")
-                        .to_string();
-                    if fname.is_empty() {
-                        continue;
-                    }
-                    cleaned.insert(
-                        "function".into(),
-                        serde_json::json!({
-                            "name": fname
-                        }),
-                    );
-                    *tool = Value::Object(cleaned);
-                }
+            // Log if we had to convert format, so debugging is easier
+            if needs_chat_format {
+                tracing::debug!("Converted Responses API format to chat format for opencode-go");
             }
-        }
-
-        // Log if we had to convert format, so debugging is easier
-        if needs_chat_format {
-            tracing::debug!("Converted Responses API format to chat format for opencode-go");
-        }
         }
 
         // Upstream DefaultExecutor.transformRequest ends with

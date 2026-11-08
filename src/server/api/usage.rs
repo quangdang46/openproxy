@@ -12,11 +12,12 @@ use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
     codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
-    fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota, fetch_deepseek_usage,
-    fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota,
-    fetch_groq_quota, fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota,
-    fetch_minimax_quota, fetch_ollama_quota, fetch_opencode_go_quota, fetch_qoder_quota,
-    fetch_vercel_ai_gateway_quota, fetch_zed_quota, get_codex_rate_limit_reset_credits,
+    fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota, fetch_commandcode_quota,
+    fetch_deepseek_usage, fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota,
+    fetch_grok_cli_quota, fetch_groq_quota, fetch_kimi_oauth_usage, fetch_kimi_usage,
+    fetch_kiro_quota, fetch_minimax_quota, fetch_ollama_quota, fetch_opencode_go_quota,
+    fetch_qoder_quota, fetch_vercel_ai_gateway_quota, fetch_zed_quota,
+    get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
@@ -682,6 +683,7 @@ async fn get_connection_usage(
     // `quotas: {}` + `message` as "connected, but quota unavailable".
     let mut live_quotas = serde_json::json!({});
     let mut live_message: Option<String> = None;
+    let mut live_plan: Option<Value> = None;
     if is_apikey_eligible {
         if let Some(api_key) = connection
             .api_key
@@ -704,6 +706,7 @@ async fn get_connection_usage(
                 "codebuddy-cn" | "codebuddy-intl" => {
                     fetch_codebuddy_quota(api_key, &provider).await
                 }
+                "commandcode" => fetch_commandcode_quota(api_key).await,
                 // ollama has no live apikey quota fetcher yet — fall back to
                 // `{}` + per-request history (never 500).
                 _ => serde_json::json!({}),
@@ -714,10 +717,15 @@ async fn get_connection_usage(
             if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
                 live_message = Some(msg.to_string());
             }
+            // 9router surfaces the plan name alongside quotas (commandcode
+            // short plan ids resolve to "Go"/"Pro"/…) — same as the oauth
+            // branch below.
+            if let Some(plan) = result.get("plan") {
+                live_plan = Some(plan.clone());
+            }
         }
     }
 
-    let mut live_plan: Option<Value> = None;
     let mut live_reset_credits: Option<Value> = None;
     if is_oauth {
         // 9router route.js:158-183 — refresh credentials before the quota

@@ -76,7 +76,11 @@ async fn save_smelt_settings(
         return response;
     }
 
-    let Some(base_url) = body.base_url.filter(|value| !value.trim().is_empty()) else {
+    let Some(base_url) = body
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "baseUrl is required" })),
@@ -84,7 +88,7 @@ async fn save_smelt_settings(
             .into_response();
     };
 
-    match write_smelt_settings(&state, &body, &base_url).await {
+    match write_smelt_settings(&state, &body, base_url).await {
         Ok(config_path) => Json(json!({
             "success": true,
             "message": "Smelt settings applied successfully!",
@@ -177,10 +181,7 @@ async fn write_smelt_settings(
         })
         .unwrap_or_else(|| "provider/model-id".to_string());
 
-    existing.insert(
-        "baseUrl".to_string(),
-        Value::String(normalized_base_url),
-    );
+    existing.insert("baseUrl".to_string(), Value::String(normalized_base_url));
     existing.insert(
         "apiKey".to_string(),
         Value::String(resolve_cli_api_key(state, body.api_key.as_deref())),

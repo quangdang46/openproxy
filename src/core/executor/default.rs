@@ -297,6 +297,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.runcrate.ai/v1/chat/completions"),
         ),
         (
+            // 9router registry/sensenova.js:20 — SenseNova token platform,
+            // OpenAI-compatible chat completions.
+            "sensenova",
+            ProviderConfig::openai("https://token.sensenova.cn/v1/chat/completions"),
+        ),
+        (
             "venice",
             // /api/v1 (double path) — do NOT "fix" to /v1.
             ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),
@@ -638,13 +644,130 @@ impl ProviderConfig {
 /// opus/sonnet — cheaper models don't need them.
 const ANTHROPIC_BETA_BASE: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28";
 const ANTHROPIC_BETA_HEAVY_AGENT: &str = "advanced-tool-use-2025-11-20,effort-2025-11-24";
+/// `redact-thinking` asks Anthropic to return signature-only thinking blocks,
+/// which blanks the summaries a client explicitly requested with
+/// `thinking.display: "summarized"` (shared.js wantsThinkingSummaries).
+const ANTHROPIC_BETA_REDACT_THINKING: &str = "redact-thinking-2026-02-12";
 
-pub fn select_anthropic_beta(model: &str) -> String {
-    if model.starts_with("claude-opus") || model.starts_with("claude-sonnet") {
-        format!("{ANTHROPIC_BETA_BASE},{ANTHROPIC_BETA_HEAVY_AGENT}")
-    } else {
-        ANTHROPIC_BETA_BASE.to_string()
+/// Whether the request body asks for summarized thinking
+/// (`body.thinking.display === "summarized"`). Mirrors
+/// `wantsThinkingSummaries` in open-sse/providers/shared.js.
+pub fn wants_thinking_summaries(body: &Value) -> bool {
+    body.get("thinking")
+        .and_then(|t| t.get("display"))
+        .and_then(Value::as_str)
+        == Some("summarized")
+}
+
+/// Union of comma-separated `anthropic-beta` flag lists: client flags and
+/// computed flags are merged, deduped, order preserved. Mirrors
+/// `mergeAnthropicBeta` in open-sse/providers/shared.js.
+pub fn merge_anthropic_beta(parts: &[&str]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<&str> = Vec::new();
+    for part in parts {
+        for flag in part.split(',') {
+            let flag = flag.trim();
+            if !flag.is_empty() && seen.insert(flag) {
+                out.push(flag);
+            }
+        }
     }
+    out.join(",")
+}
+
+/// Apply per-provider user header overrides LAST, after the registry and
+/// connection headers are built (9router base.js:131
+/// `Object.assign(headers, providerOverrides.headers)`).
+///
+/// The overrides arrive on `credentials.provider_specific_data["providerOverrides"]`
+/// — the same dispatch-local channel `rawHeaders` uses — stamped by chat
+/// dispatch from `settings.providerOverrides`. Blocked header names
+/// (host/authorization/cookie/…) are rejected at the API boundary; this
+/// layer trusts what it is given and simply overwrites by name.
+pub fn apply_provider_header_overrides(headers: &mut HeaderMap, credentials: &ProviderConnection) {
+    let Some(map) = credentials
+        .provider_specific_data
+        .get("providerOverrides")
+        .and_then(|o| o.get("headers"))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    for (name, value) in map {
+        // Defense in depth: the API boundary rejects these, but a settings
+        // blob written any other way must not let a user override smuggle
+        // auth/transport headers upstream.
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "host"
+                | "content-length"
+                | "content-type"
+                | "connection"
+                | "transfer-encoding"
+                | "authorization"
+                | "cookie"
+        ) {
+            continue;
+        }
+        let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        if let Ok(header_value) = HeaderValue::from_str(value) {
+            headers.insert(header_name, header_value);
+        }
+    }
+}
+
+/// 9router `HEADER_HOOKS.codebuddyHeaders` (default.js:53-60): the CodeBuddy
+/// gateways (CN + intl) run a per-request channel check and reject anything
+/// without the official plugin's request/conversation identifiers —
+/// 400 {"code":11128,"msg":"request illegal"} ("failed channel
+/// verification"). One request id is shared across X-Request-ID /
+/// X-Conversation-Request-ID / X-Conversation-Message-ID; the conversation
+/// id is a separate fresh UUID per request (upstream test
+/// codebuddy-channel-headers.test.js locks exactly this shape).
+pub fn apply_codebuddy_channel_headers(headers: &mut HeaderMap) {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let conversation_id = uuid::Uuid::new_v4().to_string();
+    for (name, value) in [
+        ("x-request-id", request_id.as_str()),
+        ("x-conversation-id", conversation_id.as_str()),
+        ("x-conversation-request-id", request_id.as_str()),
+        ("x-conversation-message-id", request_id.as_str()),
+    ] {
+        if let Ok(v) = HeaderValue::from_str(value) {
+            headers.insert(name, v);
+        }
+    }
+}
+
+/// The client's own `anthropic-beta` header, read off the rawHeaders map
+/// chat dispatch stamps onto the credentials (chatCore.js:155 +
+/// default.js:218 `credentials?.rawHeaders?.["anthropic-beta"]`).
+fn client_anthropic_beta(credentials: &ProviderConnection) -> Option<String> {
+    credentials
+        .provider_specific_data
+        .get("rawHeaders")?
+        .get("anthropic-beta")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn select_anthropic_beta(model: &str, body: &Value) -> String {
+    let mut flags: Vec<&str> = ANTHROPIC_BETA_BASE
+        .split(',')
+        .filter(|flag| *flag != ANTHROPIC_BETA_REDACT_THINKING || !wants_thinking_summaries(body))
+        .collect();
+    if model.starts_with("claude-opus") || model.starts_with("claude-sonnet") {
+        flags.extend(ANTHROPIC_BETA_HEAVY_AGENT.split(','));
+    }
+    flags.join(",")
 }
 
 pub struct DefaultExecutor {
@@ -982,6 +1105,18 @@ pub fn provider_sim_format(
         "gemini" => crate::core::executor::ProviderFormat::Gemini,
         _ => crate::core::executor::ProviderFormat::OpenAI,
     }
+}
+
+/// Resolve a provider's built-in request headers from `PROVIDER_CONFIGS`
+/// (`ProviderConfig::default_headers`) — the registry `transport.headers`
+/// equivalent the overrides UI pre-fills and diffs against
+/// (9router api/providers/[id]/overrides `builtinHeaders`). Returns an empty
+/// vec for unknown providers.
+pub fn provider_config_headers(provider: &str) -> Vec<(String, String)> {
+    PROVIDER_CONFIGS
+        .get(provider)
+        .map(|config| config.default_headers.clone())
+        .unwrap_or_default()
 }
 
 /// Config format string for a provider (for status/dispatch surfaces).
@@ -2013,17 +2148,31 @@ impl DefaultExecutor {
                 );
                 headers.insert("X-IS-MULTIROOT", HeaderValue::from_static("false"));
             }
-            // Per-model Anthropic-Beta flags (9router default.js:167-170 +
-            // shared.js selectAnthropicBeta). anthropic-compatible nodes
-            // serving a real Claude model sit in front of Anthropic itself,
-            // so they need the same flags; the model id gates it so gateways
-            // fronting other models are left untouched. Overwrites the
-            // static default (which only had 2 flags).
+            // 9router HEADER_HOOKS.codebuddyHeaders — the CN + intl gateways
+            // reject requests missing the plugin's channel-check ids with
+            // 400 / 11128 "request illegal".
+            if matches!(self.provider.as_str(), "codebuddy-intl" | "codebuddy-cn") {
+                apply_codebuddy_channel_headers(&mut headers);
+            }
+            // Per-model Anthropic-Beta flags (9router default.js:218-223 +
+            // shared.js selectAnthropicBeta/mergeAnthropicBeta). The client's
+            // own `anthropic-beta` flags are UNIONED with the computed set —
+            // never overwritten — and `redact-thinking` is dropped when the
+            // body asks for `thinking.display: "summarized"`.
+            // anthropic-compatible nodes serving a real Claude model sit in
+            // front of Anthropic itself, so they need the same flags; the
+            // model id gates it so gateways fronting other models are left
+            // untouched.
             let is_claude_model = model.starts_with("claude-");
             if self.provider == "claude"
                 || (self.provider.starts_with("anthropic-compatible") && is_claude_model)
             {
-                if let Ok(val) = HeaderValue::from_str(&select_anthropic_beta(model)) {
+                let computed = select_anthropic_beta(model, body);
+                let merged = match client_anthropic_beta(credentials) {
+                    Some(client_beta) => merge_anthropic_beta(&[&computed, &client_beta]),
+                    None => computed,
+                };
+                if let Ok(val) = HeaderValue::from_str(&merged) {
                     headers.insert("anthropic-beta", val);
                 }
             }
@@ -2033,6 +2182,24 @@ impl DefaultExecutor {
                     compatible_value(credentials.provider_specific_data.get("orgId"))
                 {
                     headers.insert("x-kilocode-organizationid", HeaderValue::from_str(org_id)?);
+                }
+            }
+        }
+
+        // 9router default.js:222-223 — for the plain `anthropic` provider the
+        // static registry header stands and the client's own `anthropic-beta`
+        // flags are unioned into it (that provider's auth branch above never
+        // reaches the computed-beta block in the Bearer arm).
+        if self.provider == "anthropic" {
+            if let Some(client_beta) = client_anthropic_beta(credentials) {
+                let existing = headers
+                    .get("anthropic-beta")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let merged = merge_anthropic_beta(&[&existing, &client_beta]);
+                if let Ok(val) = HeaderValue::from_str(&merged) {
+                    headers.insert("anthropic-beta", val);
                 }
             }
         }
@@ -2343,6 +2510,9 @@ impl DefaultExecutor {
             request.stream,
             &transformed_body,
         )?;
+        // User per-provider header overrides win over everything above
+        // (9router base.js:131).
+        apply_provider_header_overrides(&mut headers, &request.credentials);
 
         // Try primary then fallback URLs.
         let urls = self.resolve_urls(&request.model, request.stream, &request.credentials);
@@ -2465,6 +2635,7 @@ impl DefaultExecutor {
                                 request.stream,
                                 &transformed_body,
                             )?;
+                            apply_provider_header_overrides(&mut headers, &request.credentials);
                             // Retry immediately with refreshed credentials.
                             //
                             // One attempt, deliberately — a refreshed-credential
@@ -2664,11 +2835,18 @@ impl DefaultExecutor {
                 .map(UpstreamResponse::Hyper)
         } else {
             let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
-            client
+            // Build the request so `send_with_tls_fallback` can replay it once
+            // on an insecure-verification client after a self-signed-cert
+            // error (9router proxyFetch.js fetchWithTlsFallback, bead
+            // openproxy-9router-parity-v5104-sync-eidj.23).
+            let req = client
                 .post(url)
                 .headers(headers.clone())
                 .json(transformed_body)
-                .send()
+                .build()
+                .map_err(ExecutorError::Request)?;
+            self.pool
+                .send_with_tls_fallback(&self.provider, request.proxy.as_ref(), req)
                 .await
                 .map_err(ExecutorError::Request)
                 .map(UpstreamResponse::Reqwest)
@@ -4204,6 +4382,15 @@ mod tests {
     }
 
     #[test]
+    fn sensenova_base_url_matches_js_registry() {
+        // 9router v0.5.112 registry/sensenova.js:20 — transport.baseUrl.
+        assert_eq!(
+            provider_config_base_url("sensenova"),
+            Some("https://token.sensenova.cn/v1/chat/completions".to_string())
+        );
+    }
+
+    #[test]
     fn runcrate_base_url_matches_js_registry() {
         // 9router registry/runcrate.js:22 — transport.baseUrl. Note its
         // /v1/models is public (answers 200 for any key); credential checks
@@ -4383,9 +4570,7 @@ mod tests {
 
 #[cfg(test)]
 mod retry_policy_tests {
-    use super::retry_policy;
-    // `use hyper::http;` exists at file scope; a child module reaches it via super.
-    use super::http;
+    use super::*;
 
     /// Ported from 9router `config/runtimeConfig.js:78-83`
     /// (`DEFAULT_RETRY_CONFIG`). "attempts" counts TOTAL attempts.
@@ -4429,5 +4614,122 @@ mod retry_policy_tests {
                 "{code} must not be retried on the same url"
             );
         }
+    }
+
+    // ─── anthropic-beta merge (bead .20) ───────────────────────────
+
+    #[test]
+    fn merge_anthropic_beta_unions_and_dedupes() {
+        let merged = merge_anthropic_beta(&["a,b", " b ,c", "a"]);
+        assert_eq!(merged, "a,b,c");
+        assert_eq!(merge_anthropic_beta(&["", "  "]), "");
+    }
+
+    #[test]
+    fn select_anthropic_beta_drops_redact_for_summarized_thinking() {
+        let plain = serde_json::json!({});
+        let summarized = serde_json::json!({"thinking": {"display": "summarized"}});
+        let flags = select_anthropic_beta("claude-sonnet-4-6", &summarized);
+        assert!(!flags.contains("redact-thinking-2026-02-12"));
+        assert!(flags.contains("claude-code-20250219"));
+        // Without the summarized display the flag stays.
+        let flags = select_anthropic_beta("claude-sonnet-4-6", &plain);
+        assert!(flags.contains("redact-thinking-2026-02-12"));
+    }
+
+    #[test]
+    fn build_headers_merges_client_anthropic_beta() {
+        let executor = DefaultExecutor::new("claude", Arc::new(ClientPool::new()), None).unwrap();
+        let mut credentials = ProviderConnection {
+            api_key: Some("sk-test".into()),
+            ..Default::default()
+        };
+        credentials.provider_specific_data.insert(
+            "rawHeaders".into(),
+            serde_json::json!({"anthropic-beta": "client-flag-1,client-flag-2"}),
+        );
+        let body = serde_json::json!({});
+        let headers = executor
+            .build_headers("claude-sonnet-4-6", &credentials, true, &body)
+            .unwrap();
+        let beta = headers
+            .get("anthropic-beta")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        // Client flags survive the merge alongside the computed ones.
+        assert!(beta.contains("client-flag-1"), "{beta}");
+        assert!(beta.contains("client-flag-2"), "{beta}");
+        assert!(beta.contains("claude-code-20250219"), "{beta}");
+        assert!(beta.contains("advanced-tool-use-2025-11-20"), "{beta}");
+    }
+
+    #[test]
+    fn build_headers_summarized_thinking_drops_redact_flag() {
+        let executor = DefaultExecutor::new("claude", Arc::new(ClientPool::new()), None).unwrap();
+        let credentials = ProviderConnection {
+            api_key: Some("sk-test".into()),
+            ..Default::default()
+        };
+        let body = serde_json::json!({"thinking": {"display": "summarized"}});
+        let headers = executor
+            .build_headers("claude-sonnet-4-6", &credentials, true, &body)
+            .unwrap();
+        let beta = headers
+            .get("anthropic-beta")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(!beta.contains("redact-thinking-2026-02-12"), "{beta}");
+    }
+
+    // ─── provider header overrides (bead .19) ──────────────────────
+
+    fn credentials_with_overrides(headers: serde_json::Value) -> ProviderConnection {
+        let mut credentials = ProviderConnection {
+            api_key: Some("sk-test".into()),
+            ..Default::default()
+        };
+        credentials.provider_specific_data.insert(
+            "providerOverrides".into(),
+            serde_json::json!({ "headers": headers }),
+        );
+        credentials
+    }
+
+    #[test]
+    fn header_overrides_replace_and_add() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-registry", HeaderValue::from_static("registry"));
+        headers.insert("x-other", HeaderValue::from_static("keep"));
+        let credentials = credentials_with_overrides(serde_json::json!({
+            "X-Registry": "user",
+            "X-Brand-New": "added"
+        }));
+        apply_provider_header_overrides(&mut headers, &credentials);
+        assert_eq!(headers.get("x-registry").unwrap().to_str().unwrap(), "user");
+        assert_eq!(
+            headers.get("x-brand-new").unwrap().to_str().unwrap(),
+            "added"
+        );
+        assert_eq!(headers.get("x-other").unwrap().to_str().unwrap(), "keep");
+    }
+
+    #[test]
+    fn header_overrides_skip_blocked_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer real"));
+        let credentials = credentials_with_overrides(serde_json::json!({
+            "Authorization": "Bearer evil",
+            "X-Ok": "fine"
+        }));
+        apply_provider_header_overrides(&mut headers, &credentials);
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap().to_str().unwrap(),
+            "Bearer real"
+        );
+        assert_eq!(headers.get("x-ok").unwrap().to_str().unwrap(), "fine");
     }
 }

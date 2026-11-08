@@ -94,7 +94,11 @@ async fn save_pi_settings(
         return response;
     }
 
-    let Some(base_url) = body.base_url.filter(|value| !value.trim().is_empty()) else {
+    let Some(base_url) = body
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "baseUrl is required" })),
@@ -102,7 +106,7 @@ async fn save_pi_settings(
             .into_response();
     };
 
-    match write_pi_settings(&state, &body, &base_url).await {
+    match write_pi_settings(&state, &body, base_url).await {
         Ok(config_path) => Json(json!({
             "success": true,
             "message": "Pi settings applied! Use /model in Pi to select the 9Router model.",
@@ -253,23 +257,21 @@ fn merge_model_entry(prev: Option<&Value>, incoming: &Value) -> Value {
     merged.insert("name".to_string(), Value::String(name));
 
     let context_window = sanitize_cap(
-        incoming.get("contextWindow").or_else(|| {
-            prev_obj.and_then(|p| p.get("contextWindow"))
-        }),
+        incoming
+            .get("contextWindow")
+            .or_else(|| prev_obj.and_then(|p| p.get("contextWindow"))),
         DEFAULT_CONTEXT_WINDOW,
         MAX_CONTEXT_WINDOW,
     );
     let max_tokens = sanitize_cap(
-        incoming.get("maxTokens")
+        incoming
+            .get("maxTokens")
             .or_else(|| prev_obj.and_then(|p| p.get("maxTokens"))),
         DEFAULT_MAX_TOKENS,
         MAX_MAX_TOKENS,
     );
     // Emit as integers when whole — upstream writes plain numbers.
-    merged.insert(
-        "contextWindow".to_string(),
-        json!(context_window as u64),
-    );
+    merged.insert("contextWindow".to_string(), json!(context_window as u64));
     merged.insert("maxTokens".to_string(), json!(max_tokens as u64));
 
     Value::Object(merged)
@@ -356,10 +358,7 @@ async fn write_pi_settings(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    provider.insert(
-        "baseUrl".to_string(),
-        Value::String(normalized_base_url),
-    );
+    provider.insert("baseUrl".to_string(), Value::String(normalized_base_url));
     provider.insert("apiKey".to_string(), Value::String(api_key));
     provider.insert("api".to_string(), Value::String(existing_api));
     provider.insert("models".to_string(), Value::Array(model_list));
@@ -392,10 +391,7 @@ async fn reset_pi_settings() -> AnyhowResult<Value> {
     };
 
     let mut changed = false;
-    if let Some(providers) = existing
-        .get_mut("providers")
-        .and_then(Value::as_object_mut)
-    {
+    if let Some(providers) = existing.get_mut("providers").and_then(Value::as_object_mut) {
         if providers.remove(PROVIDER_ID).is_some() {
             changed = true;
             if providers.is_empty() {

@@ -218,6 +218,9 @@ async fn execute_combo_fetch(
                     })
             }
         },
+        // Fetch responses carry no SSE/JSON content contract — accept
+        // every member result untouched.
+        |result, _is_last| async move { crate::core::combo::ComboOkVerdict::Accept(result) },
     )
     .await
     .map_err(|e| crate::core::combo::ComboExecutionError {
@@ -290,7 +293,12 @@ async fn execute_single_fetch(
                 let status = e.status;
                 let message = e.message.clone();
                 let current_backoff = connection.backoff_level.unwrap_or(0);
-                let decision = check_fallback_error(status, &message, current_backoff);
+                let decision = check_fallback_error(
+                    status,
+                    &message,
+                    current_backoff,
+                    Some(provider_id.as_str()),
+                );
                 let cooldown = decision.cooldown;
                 let backoff_level = decision.new_backoff_level.unwrap_or(current_backoff);
 

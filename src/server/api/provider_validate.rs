@@ -195,6 +195,11 @@ async fn validate_provider(
             validate_bearer(&client, "https://www.runcrate.ai/api/v1/billing/balance", &api_key)
                 .await
         }
+        // 9router registry/sensenova.js:21 — validateUrl is the standard
+        // OpenAI-style /v1/models bearer probe.
+        "sensenova" => {
+            validate_bearer(&client, "https://token.sensenova.cn/v1/models", &api_key).await
+        }
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,
         // Ported from 9router's probe table (testUtils.js). Only the providers
         // whose reference case is a plain bearer probe are added here — see the

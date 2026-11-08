@@ -9,6 +9,7 @@ import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS,
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useAvailableModels } from "@/shared/models/availableModels";
 import SimulationModeToggle from "@/components/providers/SimulationModeToggle";
+import CustomHeadersCard from "@/components/providers/CustomHeadersCard";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
@@ -1631,6 +1632,9 @@ export default function ProviderDetailPageClient() {
           )}
         </Card>
       )}
+
+      {/* Per-provider custom header overrides (9router CustomConfigCard) */}
+      <CustomHeadersCard providerId={providerId} />
 
       {/* Connections */}
       {isFreeNoAuth ? (

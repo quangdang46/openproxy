@@ -972,11 +972,7 @@ async fn generic_media_handler(
         &snapshot,
     );
     let key_access_denied = if combo_expands(route_kind) || route_kind == "images/edits" {
-        crate::core::key_access::enforce_key_access(
-            key_access_ctx.as_ref(),
-            model_str,
-            &snapshot,
-        )
+        crate::core::key_access::enforce_key_access(key_access_ctx.as_ref(), model_str, &snapshot)
     } else if route_kind == "search" {
         // Upstream `body.provider || body.model` is the provider input.
         crate::core::key_access::enforce_key_access_provider(
@@ -2085,10 +2081,7 @@ async fn video_create_handler(
         extract_api_key(&headers).as_deref(),
         &snapshot,
     );
-    let requested_model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let requested_model = body.get("model").and_then(Value::as_str).unwrap_or("");
     if let Err(message) = crate::core::key_access::enforce_key_access_resolved(
         key_access_ctx.as_ref(),
         requested_model,

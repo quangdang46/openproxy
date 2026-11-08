@@ -119,7 +119,7 @@ fn targeted_providers_headers_are_correct() {
     // openrouter must have Referer + X-Title
     let exec = DefaultExecutor::new("openrouter", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("gpt-4o", &conn("openrouter"), false)
+        .build_headers("gpt-4o", &conn("openrouter"), false, &serde_json::json!({}))
         .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
@@ -128,7 +128,12 @@ fn targeted_providers_headers_are_correct() {
     // nvidia is bare openai Bearer, no extra headers
     let exec = DefaultExecutor::new("nvidia", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("meta/llama-3.1-8b-instruct", &conn("nvidia"), false)
+        .build_headers(
+            "meta/llama-3.1-8b-instruct",
+            &conn("nvidia"),
+            false,
+            &serde_json::json!({}),
+        )
         .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
     assert!(
@@ -139,21 +144,36 @@ fn targeted_providers_headers_are_correct() {
     // llm7 same as nvidia — Bearer (OmniRoute says use 'unused' as key)
     let exec = DefaultExecutor::new("llm7", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("gemini-2.5-flash", &conn("llm7"), false)
+        .build_headers(
+            "gemini-2.5-flash",
+            &conn("llm7"),
+            false,
+            &serde_json::json!({}),
+        )
         .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
     // ollama-cloud Bearer
     let exec = DefaultExecutor::new("ollama-cloud", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("llama3", &conn("ollama-cloud"), false)
+        .build_headers(
+            "llama3",
+            &conn("ollama-cloud"),
+            false,
+            &serde_json::json!({}),
+        )
         .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
     // gemini uses x-goog-api-key
     let exec = DefaultExecutor::new("gemini", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("gemini-2.5-flash", &conn("gemini"), false)
+        .build_headers(
+            "gemini-2.5-flash",
+            &conn("gemini"),
+            false,
+            &serde_json::json!({}),
+        )
         .unwrap();
     assert_eq!(headers["x-goog-api-key"], "sk-test-loop");
     assert!(headers.get("authorization").is_none());
@@ -161,7 +181,12 @@ fn targeted_providers_headers_are_correct() {
     // opencode-go (opencode zen) Bearer
     let exec = DefaultExecutor::new("opencode-go", pool.clone(), None).unwrap();
     let headers = exec
-        .build_headers("kimi-k2.6", &conn("opencode-go"), false)
+        .build_headers(
+            "kimi-k2.6",
+            &conn("opencode-go"),
+            false,
+            &serde_json::json!({}),
+        )
         .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
@@ -170,7 +195,9 @@ fn targeted_providers_headers_are_correct() {
     let mut c = conn("kilocode");
     c.provider_specific_data
         .insert("orgId".into(), serde_json::Value::String("org-123".into()));
-    let headers = exec.build_headers("openai/gpt-4o", &c, false).unwrap();
+    let headers = exec
+        .build_headers("openai/gpt-4o", &c, false, &serde_json::json!({}))
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
     assert_eq!(headers["x-kilocode-organizationid"], "org-123");
 }

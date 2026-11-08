@@ -386,6 +386,9 @@ pub async fn handle_search_completions(
                         }
                     }
                 },
+                // Search results carry no SSE/JSON content contract —
+                // accept every member result untouched.
+                |result, _is_last| async move { crate::core::combo::ComboOkVerdict::Accept(result) },
             )
             .await;
 

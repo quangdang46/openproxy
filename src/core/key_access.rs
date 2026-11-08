@@ -236,8 +236,7 @@ pub fn allow_sets(ctx: &KeyAccessContext, snapshot: &AppDb) -> KeyAccessSets {
             sets.models.insert(canonical_model(&provider, &info.model));
         }
         if !entry.contains('/') {
-            sets
-                .providers
+            sets.providers
                 .insert(resolve_provider_alias(entry).to_lowercase());
         }
     }
@@ -248,15 +247,13 @@ pub fn allow_sets(ctx: &KeyAccessContext, snapshot: &AppDb) -> KeyAccessSets {
 /// resolved `provider/model` is in the models set; a string that resolves to
 /// no provider (a combo with no members) is allowed iff it names a listed
 /// combo.
-pub fn is_model_string_allowed(
-    sets: &KeyAccessSets,
-    requested: &str,
-    snapshot: &AppDb,
-) -> bool {
+pub fn is_model_string_allowed(sets: &KeyAccessSets, requested: &str, snapshot: &AppDb) -> bool {
     let info = get_model_info(requested, snapshot);
     match info.provider {
         None => sets.combos.contains(&requested.to_lowercase()),
-        Some(provider) => sets.models.contains(&canonical_model(&provider, &info.model)),
+        Some(provider) => sets
+            .models
+            .contains(&canonical_model(&provider, &info.model)),
     }
 }
 
@@ -360,8 +357,7 @@ pub fn enforce_key_access_provider(
     let allowed = if get_combo_models_from_data(requested, &snapshot.combos).is_some() {
         sets.combos.contains(&requested.to_lowercase())
     } else {
-        sets
-            .providers
+        sets.providers
             .contains(&resolve_provider_alias(requested).to_lowercase())
     };
     if allowed {
@@ -428,7 +424,8 @@ pub fn model_card_allowed(
     if kind.is_some_and(|k| KEY_ACCESS_PROVIDER_AS_MODEL_KINDS.contains(&k)) {
         return sets.providers.contains(&provider.to_lowercase());
     }
-    sets.models.contains(&canonical_model(&provider, &info.model))
+    sets.models
+        .contains(&canonical_model(&provider, &info.model))
 }
 
 #[cfg(test)]
@@ -464,7 +461,10 @@ mod tests {
         assert!(access.allow.is_empty());
 
         let access = key_access_from_columns(Some(1), Some("[\"Main\", \"main\", \"cx/gpt-5\"]"));
-        assert_eq!(access.allow, vec!["Main".to_string(), "cx/gpt-5".to_string()]);
+        assert_eq!(
+            access.allow,
+            vec!["Main".to_string(), "cx/gpt-5".to_string()]
+        );
 
         let (restricted, allow) = key_access_to_columns(&access);
         assert_eq!(restricted, 1);
@@ -482,13 +482,22 @@ mod tests {
         assert!(validate_key_access_input(&json!({"restricted": "yes", "allow": []})).is_err());
         assert!(validate_key_access_input(&json!({"restricted": true, "allow": "x"})).is_err());
         assert!(validate_key_access_input(&json!({"restricted": true, "allow": [1]})).is_err());
-        assert!(validate_key_access_input(&json!({"restricted": true, "allow": [], "extra": 1})).is_err());
+        assert!(
+            validate_key_access_input(&json!({"restricted": true, "allow": [], "extra": 1}))
+                .is_err()
+        );
         let too_many = vec!["a"; KEY_ACCESS_MAX_ENTRIES + 1];
-        assert!(validate_key_access_input(&json!({"restricted": true, "allow": too_many})).is_err());
+        assert!(
+            validate_key_access_input(&json!({"restricted": true, "allow": too_many})).is_err()
+        );
         let too_long = "x".repeat(KEY_ACCESS_MAX_ENTRY_LENGTH + 1);
-        assert!(validate_key_access_input(&json!({"restricted": true, "allow": [too_long]})).is_err());
+        assert!(
+            validate_key_access_input(&json!({"restricted": true, "allow": [too_long]})).is_err()
+        );
 
-        let ok = validate_key_access_input(&json!({"restricted": true, "allow": [" Combo ", "combo"]})).unwrap();
+        let ok =
+            validate_key_access_input(&json!({"restricted": true, "allow": [" Combo ", "combo"]}))
+                .unwrap();
         assert!(ok.restricted);
         assert_eq!(ok.allow, vec!["Combo".to_string()]);
     }

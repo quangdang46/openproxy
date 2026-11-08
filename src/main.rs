@@ -9,10 +9,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use openproxy::cli::config::ResolvedConfig;
 use openproxy::cli::{
-    chat as cli_chat, db as cli_db, logs as cli_logs, media as cli_media, mitm as cli_mitm,
-    provider_oauth, quota as cli_quota, settings as cli_settings, tool as cli_tool,
-    translator as cli_translator, tunnel_rt as cli_tunnel_rt, usage as cli_usage, AuthCmd, Cli,
-    Command, ProviderCmd, SchemaCmd, ServerCmd, TunnelCmd,
+    chat as cli_chat, connect as cli_connect, db as cli_db, logs as cli_logs, media as cli_media,
+    mitm as cli_mitm, provider_oauth, quota as cli_quota, settings as cli_settings,
+    tool as cli_tool, translator as cli_translator, tunnel_rt as cli_tunnel_rt, usage as cli_usage,
+    AuthCmd, Cli, Command, ProviderCmd, SchemaCmd, ServerCmd, TunnelCmd,
 };
 use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
@@ -338,6 +338,20 @@ async fn main() -> anyhow::Result<()> {
             }
             Command::Tool { cmd } => {
                 let exit = cli_tool::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Connect { args } => {
+                let exit = cli_connect::run_connect(args.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Show { args } => {
+                let exit = cli_connect::run_show(args.clone(), ctx)?;
                 if exit != 0 {
                     std::process::exit(exit);
                 }

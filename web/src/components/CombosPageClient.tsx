@@ -8,6 +8,11 @@ import { useSettingsStore } from "@/store/settingsStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import {
+  addPoolModel,
+  deselectPoolModel,
+  removePoolModelAt,
+} from "@/shared/utils/capacityAdapterPool";
 import type { ComboStrategyConfig, ComboStrategyOption } from "@/types";
 
 const STRATEGY_OPTIONS: ComboStrategyOption[] = [
@@ -1048,14 +1053,21 @@ function CapacityAdapterCap({
 
   const patch = (p: Partial<CapacityAdapterEntry>) => onChange({ ...entry, ...p });
 
-  const handleAdd = (model: { value: string }) => {
-    if (models.includes(model.value)) return;
-    patch({ models: [...models, model.value] });
+  // Pool mutations live in shared/utils/capacityAdapterPool.ts (unit-tested in
+  // web/tests/capacityAdapterPool.test.ts) — 9router commit 3e4323e semantics:
+  // the picker may hand back a Model object or a bare string, additions dedupe,
+  // and every removal falls back to the default when the pool would empty.
+  const handleAdd = (model: unknown) => {
+    patch({ models: addPoolModel(models, model) });
+  };
+
+  // Deselect from the model picker removes the entry from the ordered pool.
+  const handleDeselect = (model: unknown) => {
+    patch({ models: deselectPoolModel(models, model, DEFAULT_FALLBACK_MODEL) });
   };
 
   const handleRemove = (index: number) => {
-    const next = models.filter((_, i) => i !== index);
-    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+    patch({ models: removePoolModelAt(models, index, DEFAULT_FALLBACK_MODEL) });
   };
 
   const handleMove = (index: number, delta: number) => {
@@ -1084,33 +1096,6 @@ function CapacityAdapterCap({
               <code className="font-mono text-sm font-medium">{cap.label}</code>
               <span className="text-[10px] text-text-muted">— {cap.desc}</span>
             </div>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
-              {models.length === 0 ? (
-                <span className="text-xs text-text-muted italic">No models</span>
-              ) : (
-                models.slice(0, 3).map((model, index) => (
-                  <code
-                    key={`${model}-${index}`}
-                    className="group/chip inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5"
-                  >
-                    <span>{model}</span>
-                    <CapacityBadges caps={getCaps?.(model)} />
-                    <button onClick={() => handleMove(index, -1)} disabled={index === 0} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === 0 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
-                      <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
-                    </button>
-                    <button onClick={() => handleMove(index, 1)} disabled={index === models.length - 1} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === models.length - 1 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
-                      <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
-                    </button>
-                    <button onClick={() => handleRemove(index)} className="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500">
-                      <span className="material-symbols-outlined text-[12px]">close</span>
-                    </button>
-                  </code>
-                ))
-              )}
-              {models.length > 3 && (
-                <span className="text-[10px] text-text-muted">+{models.length - 3} more</span>
-              )}
-            </div>
           </div>
         </div>
 
@@ -1138,11 +1123,107 @@ function CapacityAdapterCap({
         </div>
       </div>
 
+      {/* Ordered model pool — 9router commit 3e4323e table view replaces the
+          old first-3 chips; every member is listed with its fallback order. */}
+      {models.length === 0 ? (
+        <div className="mt-3 py-2 text-center text-xs text-text-muted italic">
+          No models in pool (will fallback to {DEFAULT_FALLBACK_MODEL})
+        </div>
+      ) : (
+        <div className="mt-3 overflow-hidden rounded-lg border border-border/50">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-border/40 bg-black/[0.02] text-text-muted dark:bg-white/[0.02]">
+                <th className="w-12 px-3 py-1.5 font-medium text-center">#</th>
+                <th className="px-3 py-1.5 font-medium">Model</th>
+                <th className="w-24 px-3 py-1.5 font-medium text-center">Order</th>
+                <th className="w-12 px-3 py-1.5 font-medium text-right"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/30 font-mono">
+              {models.map((model, index) => (
+                <tr
+                  key={`${model}-${index}`}
+                  className="transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                >
+                  <td className="px-3 py-2 text-center font-sans text-[11px] text-text-muted">
+                    #{index + 1}
+                  </td>
+                  <td className="px-3 py-2 text-text-main">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate">{model}</span>
+                      <CapacityBadges caps={getCaps?.(model)} />
+                      {model === DEFAULT_FALLBACK_MODEL && (
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-sans text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                          free default
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleMove(index, -1)}
+                        disabled={!enabled || index === 0}
+                        className={`rounded p-1 transition-colors ${
+                          !enabled || index === 0
+                            ? "cursor-not-allowed text-text-muted/20"
+                            : "text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        }`}
+                        title="Move up"
+                      >
+                        <span className="material-symbols-outlined text-[16px] leading-none">
+                          arrow_upward
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMove(index, 1)}
+                        disabled={!enabled || index === models.length - 1}
+                        className={`rounded p-1 transition-colors ${
+                          !enabled || index === models.length - 1
+                            ? "cursor-not-allowed text-text-muted/20"
+                            : "text-text-muted hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+                        }`}
+                        title="Move down"
+                      >
+                        <span className="material-symbols-outlined text-[16px] leading-none">
+                          arrow_downward
+                        </span>
+                      </button>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => handleRemove(index)}
+                      disabled={!enabled}
+                      className={`rounded p-1 transition-colors ${
+                        !enabled
+                          ? "cursor-not-allowed text-text-muted/20"
+                          : "text-text-muted hover:bg-red-500/10 hover:text-red-500"
+                      }`}
+                      title="Remove model"
+                    >
+                      <span className="material-symbols-outlined text-[16px] leading-none">
+                        close
+                      </span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {showModelSelect && (
         <ModelSelectModal
           isOpen={showModelSelect}
           onClose={() => setShowModelSelect(false)}
           onSelect={handleAdd}
+          onDeselect={handleDeselect}
           activeProviders={activeProviders}
           title={`Add ${cap.label} Model`}
           addedModelValues={models}

@@ -149,30 +149,42 @@ pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, _model
             ),
         );
     }
-    // System prompt injection at RTK layer.
-    // Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
-    // `extra` map — these are unstructured/extra config keys that live alongside
-    // the known fields.
-    modified |= apply_rtk_system_injection(body, settings);
+    // Custom system prompt injection — upstream's Token Saver
+    // `customPromptEnabled`/`customPrompt` keys (settingsRepo.js:62-63), with
+    // the older `extra["systemInject"]`/`extra["systemPrompt"]` pair honored
+    // as a fallback for installs that set it before the typed keys existed.
+    modified |= apply_system_prompt_injection(body, settings);
     modified
 }
 
-/// Apply system prompt injection from settings extras if enabled.
-fn apply_rtk_system_injection(body: &mut Value, settings: &Settings) -> bool {
-    let system_inject = settings
-        .extra
-        .get("systemInject")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+/// Apply the user-authored custom system prompt when enabled.
+///
+/// 9router chatCore.js:314-315 runs `injectCustomPrompt` after translate,
+/// gated on `customPromptEnabled`; the prompt text is `customPrompt`. The
+/// format switch inside `inject_system_prompt` covers Kiro / Claude / Gemini
+/// (including the `request.systemInstruction` wrapper) — the same dispatch
+/// `core::chat::apply_preprocessing` delegates to, so both call sites behave
+/// identically.
+pub(crate) fn apply_system_prompt_injection(body: &mut Value, settings: &Settings) -> bool {
+    let system_inject = settings.custom_prompt_enabled
+        || settings
+            .extra
+            .get("systemInject")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if !system_inject {
         return false;
     }
-    let prompt = settings
-        .extra
-        .get("systemPrompt")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_string());
+    let prompt = if !settings.custom_prompt.trim().is_empty() {
+        Some(settings.custom_prompt.clone())
+    } else {
+        settings
+            .extra
+            .get("systemPrompt")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    };
     match prompt {
         Some(p) => {
             // Dispatch by body shape (9router injectSystemPrompt format switch):

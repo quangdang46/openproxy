@@ -19,10 +19,8 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
 
-use crate::cli::connect_tools::{
-    ApplyCtx, ConnectTool, CLAUDE_MODELS,
-};
 use crate::cli::config::ResolvedConfig;
+use crate::cli::connect_tools::{ApplyCtx, ConnectTool, CLAUDE_MODELS};
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
 
 #[derive(Debug, Clone, Args)]
@@ -129,7 +127,7 @@ pub fn normalize_server_url(input: &str) -> Result<String> {
 }
 
 fn default_key_name() -> String {
-    let host = whoami::fallible::hostname().unwrap_or_else(|_| "localhost".to_string());
+    let host = whoami::hostname().unwrap_or_else(|_| "localhost".to_string());
     format!("cli-{host}").chars().take(64).collect()
 }
 
@@ -143,7 +141,9 @@ fn load_saved_password(cfg: &ResolvedConfig, server: &str) -> Option<String> {
     let text = std::fs::read_to_string(saved_env_path(cfg)).ok()?;
     let mut env = std::collections::HashMap::new();
     for line in text.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if !k.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
             continue;
         }
@@ -395,9 +395,8 @@ async fn login(sc: &ServerClient, password: &str) -> Result<String> {
         let msg: String = msg.chars().filter(|c| !c.is_control()).collect();
         return Err(anyhow!("Login failed ({status}): {msg}"));
     }
-    extract_auth_cookie(&headers).ok_or_else(|| {
-        anyhow!("Login succeeded but server returned no session cookie")
-    })
+    extract_auth_cookie(&headers)
+        .ok_or_else(|| anyhow!("Login succeeded but server returned no session cookie"))
 }
 
 struct ApiKeyResult {
@@ -408,20 +407,20 @@ struct ApiKeyResult {
 async fn get_or_create_api_key(sc: &ServerClient, key_name: &str) -> Result<ApiKeyResult> {
     match sc.request(Method::GET, "/api/keys", None).await {
         Ok((status, _, Some(data))) if status.is_success() => {
-        if let Some(keys) = data.get("keys").and_then(Value::as_array) {
-            let existing = keys.iter().find(|k| {
-                k.get("name").and_then(Value::as_str) == Some(key_name)
-                    && k.get("isActive").and_then(Value::as_bool) != Some(false)
-            });
-            if let Some(k) = existing {
-                if let Some(key) = k.get("key").and_then(Value::as_str) {
-                    return Ok(ApiKeyResult {
-                        key: key.to_string(),
-                        created: false,
-                    });
+            if let Some(keys) = data.get("keys").and_then(Value::as_array) {
+                let existing = keys.iter().find(|k| {
+                    k.get("name").and_then(Value::as_str) == Some(key_name)
+                        && k.get("isActive").and_then(Value::as_bool) != Some(false)
+                });
+                if let Some(k) = existing {
+                    if let Some(key) = k.get("key").and_then(Value::as_str) {
+                        return Ok(ApiKeyResult {
+                            key: key.to_string(),
+                            created: false,
+                        });
+                    }
                 }
             }
-        }
         }
         Ok((status, _, _)) => {
             return Err(anyhow!("Failed to list API keys (HTTP {status})"));
@@ -429,11 +428,7 @@ async fn get_or_create_api_key(sc: &ServerClient, key_name: &str) -> Result<ApiK
         Err(e) => return Err(anyhow!(e)),
     }
     let (status, _, data) = sc
-        .request(
-            Method::POST,
-            "/api/keys",
-            Some(&json!({"name": key_name})),
-        )
+        .request(Method::POST, "/api/keys", Some(&json!({"name": key_name})))
         .await
         .map_err(|e| anyhow!(e))?;
     let key = data
@@ -442,19 +437,16 @@ async fn get_or_create_api_key(sc: &ServerClient, key_name: &str) -> Result<ApiK
         .and_then(Value::as_str)
         .map(str::to_string);
     match (status, key) {
-        (StatusCode::CREATED, Some(key)) | (StatusCode::OK, Some(key)) => Ok(ApiKeyResult {
-            key,
-            created: true,
-        }),
+        (StatusCode::CREATED, Some(key)) | (StatusCode::OK, Some(key)) => {
+            Ok(ApiKeyResult { key, created: true })
+        }
         _ => {
             let msg = data
                 .as_ref()
                 .and_then(|d| d.get("error"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            Err(anyhow!(
-                "Failed to create API key ({status}): {msg}"
-            ))
+            Err(anyhow!("Failed to create API key ({status}): {msg}"))
         }
     }
 }
@@ -513,11 +505,9 @@ fn droid_server_model(data: &Value) -> Option<String> {
         .as_array()?
         .iter()
         .find(|m| {
-            m.get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| {
-                    id.starts_with("custom:OpenProxy") || id.starts_with("custom:9Router")
-                })
+            m.get("id").and_then(Value::as_str).is_some_and(|id| {
+                id.starts_with("custom:OpenProxy") || id.starts_with("custom:9Router")
+            })
         })?
         .get("model")?
         .as_str()
@@ -568,10 +558,7 @@ struct ServerModels {
 }
 
 /// Best-effort: any failure returns empty maps and built-in defaults apply.
-async fn fetch_server_models(
-    sc: &ServerClient,
-    tools: &[ConnectTool],
-) -> ServerModels {
+async fn fetch_server_models(sc: &ServerClient, tools: &[ConnectTool]) -> ServerModels {
     let mut out = ServerModels {
         claude: BTreeMap::new(),
         by_tool: BTreeMap::new(),
@@ -597,7 +584,11 @@ async fn fetch_server_models(
     }
     // Each tool's own config; opencode doubles as the shared fallback, so fetch
     // it even when opencode itself wasn't selected.
-    let mut wanted: Vec<ConnectTool> = tools.iter().copied().filter(|t| t.route().is_some()).collect();
+    let mut wanted: Vec<ConnectTool> = tools
+        .iter()
+        .copied()
+        .filter(|t| t.route().is_some())
+        .collect();
     let opencode_selected = wanted.contains(&ConnectTool::OpenCode);
     if !opencode_selected && tools.iter().any(|t| t.needs_model()) {
         wanted.push(ConnectTool::OpenCode);
@@ -607,7 +598,9 @@ async fn fetch_server_models(
     for tool in wanted {
         let Some(route) = tool.route() else { continue };
         let path = format!("/api/cli-tools/{route}");
-        let Ok(Some(data)) = sc.get_json(&path).await else { continue };
+        let Ok(Some(data)) = sc.get_json(&path).await else {
+            continue;
+        };
         if let Some(model) = server_model_for(tool, &data) {
             out.by_tool.insert(tool.id().to_string(), model);
         }
@@ -618,10 +611,7 @@ async fn fetch_server_models(
 
 /// `GET /v1/models` → set of advertised ids (None when unavailable).
 async fn list_models(sc: &ServerClient) -> Option<BTreeSet<String>> {
-    let (status, _, data) = sc
-        .request(Method::GET, "/v1/models", None)
-        .await
-        .ok()?;
+    let (status, _, data) = sc.request(Method::GET, "/v1/models", None).await.ok()?;
     if status == StatusCode::UNAUTHORIZED {
         return None;
     }
@@ -639,11 +629,7 @@ async fn list_models(sc: &ServerClient) -> Option<BTreeSet<String>> {
 
 // ── connect ─────────────────────────────────────────────────────────────────
 
-pub async fn run_connect(
-    args: ConnectArgs,
-    cfg: &ResolvedConfig,
-    ctx: OutputCtx,
-) -> Result<i32> {
+pub async fn run_connect(args: ConnectArgs, cfg: &ResolvedConfig, ctx: OutputCtx) -> Result<i32> {
     // Pick tools before any network call: bad names fail fast.
     let tools = select_tools(&args, ctx)?;
 
@@ -700,10 +686,7 @@ pub async fn run_connect(
                     match save_password(cfg, &server, &password) {
                         Ok(f) => humanln(
                             ctx,
-                            format!(
-                                "• Saved password to {} (plain text, mode 600)",
-                                f.display()
-                            ),
+                            format!("• Saved password to {} (plain text, mode 600)", f.display()),
                         ),
                         Err(e) => humanln(ctx, format!("• Could not save password: {e}")),
                     }
@@ -720,12 +703,8 @@ pub async fn run_connect(
                 return Err(e);
             }
         }
-        let authed = ServerClient::new(server.clone())?
-            .with_auth(cookie.clone(), None);
-        let key_name = args
-            .key_name
-            .clone()
-            .unwrap_or_else(default_key_name);
+        let authed = ServerClient::new(server.clone())?.with_auth(cookie.clone(), None);
+        let key_name = args.key_name.clone().unwrap_or_else(default_key_name);
         match get_or_create_api_key(&authed, &key_name).await {
             Ok(r) => {
                 api_key = Some(r.key.clone());
@@ -819,7 +798,9 @@ pub async fn run_connect(
                 if !set.contains(m.as_str()) {
                     humanln(
                         ctx,
-                        format!("⚠ model: \"{m}\" not listed by server — override with --model <model>"),
+                        format!(
+                            "⚠ model: \"{m}\" not listed by server — override with --model <model>"
+                        ),
                     );
                 }
             }
@@ -876,7 +857,11 @@ pub async fn run_connect(
                         format!(
                             "[dry-run] {} → {}",
                             t.name(),
-                            files.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                            files
+                                .iter()
+                                .map(|(p, _)| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ),
                     );
                 }
@@ -894,7 +879,11 @@ pub async fn run_connect(
                     format!(
                         "✅ {} → {}",
                         t.name(),
-                        files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                        files
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 );
                 applied.push(json!({
@@ -910,7 +899,10 @@ pub async fn run_connect(
         }
     }
 
-    humanln(ctx, format!("   Base URL: {}/v1", server.trim_end_matches('/')));
+    humanln(
+        ctx,
+        format!("   Base URL: {}/v1", server.trim_end_matches('/')),
+    );
     if tools.contains(&ConnectTool::Claude) {
         for &(flag, env_key) in CLAUDE_MODELS {
             if let Some(Some(m)) = claude_models.get(env_key) {
@@ -949,7 +941,10 @@ pub async fn run_connect(
 
     if args.print_env {
         humanln(ctx, "\nOpenAI-compatible CLIs (codex, opencode, aider, …):");
-        humanln(ctx, format!("   OPENAI_BASE_URL={}/v1", server.trim_end_matches('/')));
+        humanln(
+            ctx,
+            format!("   OPENAI_BASE_URL={}/v1", server.trim_end_matches('/')),
+        );
         humanln(ctx, format!("   OPENAI_API_KEY={api_key}"));
     }
 
@@ -972,7 +967,10 @@ pub async fn run_connect(
     } else if args.dry_run {
         // Human dry-run already printed per-tool lines; also dump the payload
         // as JSON so it can be piped.
-        println!("{}", serde_json::to_string_pretty(&json!({"tools": dry_payload}))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"tools": dry_payload}))?
+        );
     }
 
     Ok(if failed > 0 || skipped > 0 { 1 } else { 0 })
@@ -987,7 +985,11 @@ fn select_tools(args: &ConnectArgs, ctx: OutputCtx) -> Result<Vec<ConnectTool>> 
         eprintln!("Select CLI tools to configure (comma-separated, empty = claude)");
         eprintln!(
             "Supported: {}",
-            ConnectTool::ALL.iter().map(|t| t.id()).collect::<Vec<_>>().join(", ")
+            ConnectTool::ALL
+                .iter()
+                .map(|t| t.id())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         eprint!("tools> ");
         let mut line = String::new();
@@ -1068,10 +1070,7 @@ pub fn run_show(args: ShowArgs, ctx: OutputCtx) -> Result<i32> {
         match t.show(&home) {
             Ok(s) => {
                 rec["configured"] = Value::Bool(s.configured());
-                rec["baseUrl"] = s
-                    .base_url
-                    .map(Value::String)
-                    .unwrap_or(Value::Null);
+                rec["baseUrl"] = s.base_url.map(Value::String).unwrap_or(Value::Null);
                 rec["apiKey"] = s
                     .api_key
                     .map(|k| Value::String(mask_key(&k)))
@@ -1122,7 +1121,10 @@ fn print_record(rec: &Value, ctx: OutputCtx) {
             .and_then(|a| a.first())
             .and_then(Value::as_str)
             .unwrap_or("?");
-        humanln(ctx, format!("• {name}: not configured for openproxy ({file})"));
+        humanln(
+            ctx,
+            format!("• {name}: not configured for openproxy ({file})"),
+        );
         return;
     }
     let inactive = rec.get("active").and_then(Value::as_bool) == Some(false);
@@ -1183,7 +1185,10 @@ fn print_record(rec: &Value, ctx: OutputCtx) {
                 );
             }
         }
-        _ => humanln(ctx, "   Models:   (none set — the tool's own default applies)"),
+        _ => humanln(
+            ctx,
+            "   Models:   (none set — the tool's own default applies)",
+        ),
     }
 }
 

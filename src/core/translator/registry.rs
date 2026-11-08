@@ -146,6 +146,12 @@ pub struct ResponseTransformState {
     /// `translate_response`/`finish_stream` so a provider that only ever saw
     /// the fingerprint aliases still answers with the caller's tool names.
     pub tool_name_map: Option<std::collections::BTreeMap<String, String>>,
+    /// Per-stream tool-call `index` → `id` map for
+    /// `ensureStreamToolCallIds` (9router streamHelpers.js:84-111, invoked on
+    /// the same-format translate path at translator/index.js:192-195). A
+    /// fragment that opens a new index without an id gets a stable minted id
+    /// so strict OpenAI-compatible clients do not abort the turn.
+    pub stream_tool_call_ids: std::collections::HashMap<i64, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -624,9 +630,7 @@ impl TranslationRegistry {
             Some(map) if !map.is_empty() => results
                 .into_iter()
                 .map(|chunk| {
-                    crate::core::utils::opencode_fingerprint::restore_tool_names_in_sse(
-                        &chunk, map,
-                    )
+                    crate::core::utils::opencode_fingerprint::restore_tool_names_in_sse(&chunk, map)
                 })
                 .collect(),
             _ => results,
@@ -641,8 +645,31 @@ impl TranslationRegistry {
         state: &mut ResponseTransformState,
     ) -> Vec<String> {
         if source == target {
-            return vec![String::from_utf8_lossy(chunk).to_string()];
+            // Same-format passthrough (9router translator/index.js:192-195):
+            // the chunk reaches the client as-is, except a fragment that
+            // opens a new tool-call index without an id must get a stable
+            // minted one first (ensureStreamToolCallIds). The chunk arrives
+            // as raw SSE text, so the helper rewrites `data:` JSON lines in
+            // place and leaves everything else byte-identical.
+            let text = String::from_utf8_lossy(chunk);
+            let out = crate::core::translator::helpers::tool_call_helper::ensure_stream_tool_call_ids_in_sse(
+                &text,
+                &mut state.stream_tool_call_ids,
+            );
+            return vec![out];
         }
+
+        // 9router stream.js injects the TRUE upstream format into the
+        // translator state as `targetFormat`. The chat→responses translator
+        // needs it to decide whether a deferred response.completed can rely on
+        // the stream-end flush (direct openai upstream) or must be emitted at
+        // finish_reason (pivot second hop, where the null chunk never
+        // arrives). Set once; `source` is the upstream wire format here.
+        state
+            .responses
+            .state
+            .entry("targetFormat".to_string())
+            .or_insert_with(|| Value::String(source.as_str().to_string()));
 
         // Direct route (provider→client)
         if let Some(transform) = self.response_transforms.get(&(source, target)) {
@@ -768,6 +795,33 @@ impl TranslationRegistry {
                 format!(
                     "data: {}\n\n",
                     serde_json::to_string(&v).unwrap_or_default()
+                )
+            })
+            .collect();
+        }
+        // Chat→Responses (openai→openai-responses/codex) in flight: a
+        // response.completed deferred at finish_reason while it waited for
+        // the usage trailer is still owed. The state guard (`responseId` is
+        // only ever set by the chat→responses transform) keeps this correct
+        // regardless of the (client, upstream) argument order at the call
+        // site, and `chat_to_responses_response(Null)` runs flushEvents —
+        // idempotent via `completedSent` (9router stream.js flush()).
+        if state.responses.state.get("responseId").is_some() {
+            return crate::core::translator::response::openai_responses::chat_to_responses_response(
+                &Value::Null,
+                &mut state.responses.state,
+            )
+            .into_iter()
+            .map(|v| {
+                let et = v
+                    .get("event")
+                    .and_then(|e| e.as_str())
+                    .or_else(|| v.get("type").and_then(|t| t.as_str()))
+                    .unwrap_or("message");
+                let data = v.get("data").cloned().unwrap_or(v.clone());
+                format!(
+                    "event: {et}\ndata: {}\n\n",
+                    serde_json::to_string(&data).unwrap_or_default()
                 )
             })
             .collect();
@@ -1603,6 +1657,45 @@ mod parity_tests {
             .is_empty());
     }
 
+    /// A chat→responses stream that deferred response.completed at
+    /// finish_reason (waiting for the usage trailer) must still emit it at
+    /// stream end — 9router stream.js flush() → flushEvents (bead
+    /// openproxy-9router-parity-v5104-sync-eidj.10).
+    #[test]
+    fn finish_stream_flushes_a_deferred_responses_completion() {
+        use crate::core::translator::response::openai_responses::chat_to_responses_response;
+        let mut state = ResponseTransformState::default();
+        // Direct openai upstream → the translator may defer.
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("openai".into()));
+        for chunk in [
+            json!({"id":"x","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}),
+            json!({"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        ] {
+            chat_to_responses_response(&chunk, &mut state.responses.state);
+        }
+        assert_eq!(
+            state.responses.state.get("completionPending"),
+            Some(&Value::Bool(true)),
+            "finish_reason without usage must defer"
+        );
+
+        let out =
+            global_registry().finish_stream(Format::OpenAi, Format::OpenAiResponses, &mut state);
+        assert_eq!(
+            out.len(),
+            1,
+            "expected the deferred terminal frame: {out:?}"
+        );
+        assert!(out[0].contains("response.completed"), "{out:?}");
+        // Idempotent: a second EOF must not emit a second terminal event.
+        assert!(global_registry()
+            .finish_stream(Format::OpenAi, Format::OpenAiResponses, &mut state)
+            .is_empty());
+    }
+
     // ─── trailing user turn / prefill (translator/index.js:73,153) ──
 
     #[test]
@@ -1698,5 +1791,55 @@ mod parity_tests {
             "assistant",
             "input[] prefill must survive as a trailing assistant turn: {msgs:?}"
         );
+    }
+
+    // ─── same-format tool-call id synthesis (openproxy-4d5h.20) ──
+
+    #[test]
+    fn same_format_response_mints_stable_id_for_idless_tool_call_fragment() {
+        let mut state = ResponseTransformState::default();
+        let chunk1 = br#"data: {"id":"chatcmpl-x","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":""}}]}}]}
+
+"#;
+        let out1 = global_registry().translate_response(
+            Format::OpenAi,
+            Format::OpenAi,
+            chunk1,
+            &mut state,
+        );
+        assert_eq!(out1.len(), 1);
+        let v1: Value =
+            serde_json::from_str(out1[0].trim().trim_start_matches("data:").trim()).expect("json");
+        let minted = v1["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(minted.starts_with("call_0_"), "minted id: {minted}");
+
+        let chunk2 = br#"data: {"id":"chatcmpl-x","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1"}}]}}]}
+
+"#;
+        let out2 = global_registry().translate_response(
+            Format::OpenAi,
+            Format::OpenAi,
+            chunk2,
+            &mut state,
+        );
+        let v2: Value =
+            serde_json::from_str(out2[0].trim().trim_start_matches("data:").trim()).expect("json");
+        assert_eq!(
+            v2["choices"][0]["delta"]["tool_calls"][0]["id"],
+            minted.as_str()
+        );
+    }
+
+    #[test]
+    fn same_format_response_leaves_clean_chunks_byte_identical() {
+        let mut state = ResponseTransformState::default();
+        let chunk =
+            b"data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let out =
+            global_registry().translate_response(Format::OpenAi, Format::OpenAi, chunk, &mut state);
+        assert_eq!(out[0].as_bytes(), chunk.as_slice());
     }
 }

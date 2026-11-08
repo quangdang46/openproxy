@@ -440,7 +440,6 @@ pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyh
         monthly_budget_usd: None,
         extra: std::collections::BTreeMap::new(),
         access: Default::default(),
-
     };
 
     let db = Db::load().await?;

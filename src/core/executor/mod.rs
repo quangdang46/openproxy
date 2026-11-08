@@ -53,8 +53,8 @@ pub use codex::{
     CodexExecutorResponse,
 };
 pub use commandcode::{
-    CommandCodeExecutionRequest, CommandCodeExecutor, CommandCodeExecutorError,
-    CommandCodeExecutorResponse,
+    build_command_code_headers, CommandCodeExecutionRequest, CommandCodeExecutor,
+    CommandCodeExecutorError, CommandCodeExecutorResponse,
 };
 pub use cursor::catalog::{
     resolve_cursor_models_for_connection, AutoModelSelection, CursorCatalogModel,
@@ -71,9 +71,10 @@ pub use deepseek_web::{
     DeepSeekWebExecutorResponse, DEEPSEEK_WEB_BASE,
 };
 pub use default::{
-    provider_config_base_url, provider_config_format, provider_config_names, provider_sim_format,
-    select_anthropic_beta, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
-    ProviderConfig, TransportKind, UpstreamResponse,
+    apply_provider_header_overrides, merge_anthropic_beta, provider_config_base_url,
+    provider_config_format, provider_config_headers, provider_config_names, provider_sim_format,
+    select_anthropic_beta, wants_thinking_summaries, DefaultExecutor, ExecutionRequest,
+    ExecutionResponse, ExecutorError, ProviderConfig, TransportKind, UpstreamResponse,
 };
 pub use devin_cli::{
     devin_bin_candidates, DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse,

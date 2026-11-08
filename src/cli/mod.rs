@@ -28,9 +28,9 @@ pub mod apply;
 pub mod auth;
 pub mod chat;
 pub mod combo;
+pub mod config;
 pub mod connect;
 pub mod connect_tools;
-pub mod config;
 pub mod db;
 pub mod doctor;
 pub mod key_ext;
@@ -1449,7 +1449,6 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                 monthly_budget_usd: None,
                 extra: std::collections::BTreeMap::new(),
                 access: Default::default(),
-
             };
 
             let used_http = try_add_key_via_http(&new_key).await;

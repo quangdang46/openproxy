@@ -34,6 +34,12 @@ pub struct ProviderCatalogModel {
     pub dimensions: Option<u32>,
     #[serde(default)]
     pub capabilities: Option<Vec<String>>,
+    /// Model-level transport marker (9router `models[].transport`). Dispatch
+    /// reads this — never a hardcoded model id — so new realtime transports
+    /// (e.g. `"gemini-live"` STT) extend the engine through data, not code.
+    /// Custom models may carry the same key in their `extra` blob.
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +103,20 @@ impl ProviderCatalog {
         self.models_for_alias(alias)?
             .iter()
             .find(|m| m.id == model_id)
+    }
+
+    /// Resolve the STT transport marker for `provider_id`/`model_id`
+    /// (9router `sttCore.js` `resolveModelTransport`): the registry entry whose
+    /// `id` matches and whose `kind` is `"stt"` (an LLM entry with the same id
+    /// must not claim the marker). Returns the trimmed marker, or `None`.
+    pub fn stt_transport(&self, provider_id: &str, model_id: &str) -> Option<&str> {
+        let alias = self.static_alias_for_provider(provider_id)?;
+        self.models_for_alias(alias)?
+            .iter()
+            .find(|m| m.id == model_id && m.kind == "stt")
+            .and_then(|m| m.transport.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
     /// Build reverse map: alias → provider_id.
@@ -271,6 +291,28 @@ mod tests {
             .find_model("kilo-gateway", "nvidia/nemotron-3-ultra-550b-a55b:free")
             .expect("kilo-gateway nemotron should be in the catalog");
         assert_eq!(m.context_window, Some(1_000_000));
+    }
+
+    // 9router #4940: the DeepSeek API only accepts "deepseek-flash" and 400s
+    // on the public "deepseek-v4.1-flash" id — the catalog must carry the
+    // upstreamModelId remap so dispatch sends the GA id.
+    #[test]
+    fn deepseek_v41_flash_maps_to_upstream_alias() {
+        let catalog = provider_catalog();
+        let m = catalog
+            .find_model("deepseek", "deepseek-v4.1-flash")
+            .expect("deepseek/deepseek-v4.1-flash should be in provider_catalog.json");
+        assert_eq!(m.upstream_model_id.as_deref(), Some("deepseek-flash"));
+        // Sibling tier aliases keep their upstream ids too.
+        for (id, up) in [
+            ("deepseek-v4-pro-max", "deepseek-v4-pro"),
+            ("deepseek-v4-pro-none", "deepseek-v4-pro"),
+        ] {
+            let m = catalog
+                .find_model("deepseek", id)
+                .unwrap_or_else(|| panic!("deepseek/{id} missing"));
+            assert_eq!(m.upstream_model_id.as_deref(), Some(up), "{id}");
+        }
     }
 
     // Media kinds and service metadata for the parity providers must match the
@@ -448,6 +490,56 @@ mod tests {
                 .and_then(|m| m.name.as_deref()),
             Some("GLM 5.3")
         );
+    }
+
+    // Bead openproxy-4d5h.40: sensenova (9router v0.5.112
+    // registry/sensenova.js — token.sensenova.cn, alias "sensenova") must be
+    // registered with its 7-model list incl. the two U1.5 image models.
+    #[test]
+    fn sensenova_registered_in_static_catalog() {
+        let catalog = provider_catalog();
+
+        let provider = catalog
+            .provider_info("sensenova")
+            .expect("sensenova should have a provider entry in provider_catalog.json");
+        assert_eq!(provider.alias, "sensenova");
+        assert_eq!(provider.service_kinds, vec!["llm", "image", "imageToText"]);
+
+        let models = catalog
+            .models_for_alias("sensenova")
+            .expect("sensenova should have models in provider_catalog.json");
+        assert_eq!(models.len(), 7, "expected the 7-model registry list");
+
+        let chat = catalog
+            .find_model("sensenova", "sensenova-6.8-flash-lite")
+            .expect("sensenova/sensenova-6.8-flash-lite should resolve");
+        assert_eq!(chat.kind, "llm");
+        assert_eq!(chat.name.as_deref(), Some("SenseNova 6.8 Flash Lite"));
+
+        let lite = catalog
+            .find_model("sensenova", "sensenova-u1.5-lite")
+            .expect("sensenova/sensenova-u1.5-lite should resolve");
+        assert_eq!(lite.kind, "image");
+        assert_eq!(
+            lite.capabilities.as_deref(),
+            Some(&["text2img".to_string(), "edit".to_string()][..])
+        );
+
+        let fast = catalog
+            .find_model("sensenova", "sensenova-u1.5-fast")
+            .expect("sensenova/sensenova-u1.5-fast should resolve");
+        assert_eq!(fast.kind, "image");
+        assert_eq!(
+            fast.capabilities.as_deref(),
+            Some(&["text2img".to_string()][..])
+        );
+
+        for id in ["deepseek-v4-flash", "deepseek-flash", "glm-5.2", "kimi-k3"] {
+            let m = catalog
+                .find_model("sensenova", id)
+                .unwrap_or_else(|| panic!("sensenova/{id} should resolve"));
+            assert_eq!(m.kind, "llm");
+        }
     }
 
     // providerIdToAlias must resolve provider ids to the JS aliases, and

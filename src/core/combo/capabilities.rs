@@ -36,6 +36,15 @@ pub struct ModelCapabilities {
     /// | hunyuan | step — None derives from transport format.
     pub thinking_format: Option<&'static str>,
     pub thinking_can_disable: bool,
+    /// zai format only: model accepts a reasoning_effort level
+    /// (GLM-5.2+; older GLM ignores it). JS `thinkingEffortSupported`.
+    pub thinking_effort_supported: bool,
+    /// JS `thinkingOffType`: alternate `thinking.type` written when the
+    /// caller requests thinking off (`"between_tools"` for Sonnet 5.5).
+    pub thinking_off_type: Option<&'static str>,
+    /// JS `forcedToolChoice`: `false` forbids `tool_choice` `any`/`tool`
+    /// (Claude Opus/Sonnet 5.5 reject them with 400).
+    pub forced_tool_choice: bool,
     /// { min, max } budget clamp for budget formats.
     pub thinking_range: Option<(i64, i64)>,
     pub context_window: u64,
@@ -56,6 +65,9 @@ impl Default for ModelCapabilities {
             reasoning: false,
             thinking_format: None,
             thinking_can_disable: true,
+            thinking_effort_supported: false,
+            thinking_off_type: None,
+            forced_tool_choice: true,
             thinking_range: None,
             context_window: 200_000,
             max_output: 64_000,
@@ -120,6 +132,20 @@ impl ModelCapabilities {
         }
         if let Some(b) = obj.get("thinkingCanDisable").and_then(Value::as_bool) {
             caps.thinking_can_disable = b;
+        }
+        if let Some(b) = obj.get("thinkingEffortSupported").and_then(Value::as_bool) {
+            caps.thinking_effort_supported = b;
+        }
+        if let Some(f) = obj.get("thinkingOffType").and_then(Value::as_str) {
+            // Only "between_tools" is defined upstream; unknown values are
+            // ignored rather than stored.
+            caps.thinking_off_type = match f {
+                "between_tools" => Some("between_tools"),
+                _ => None,
+            };
+        }
+        if let Some(b) = obj.get("forcedToolChoice").and_then(Value::as_bool) {
+            caps.forced_tool_choice = b;
         }
         if let Some(range) = obj.get("thinkingRange") {
             caps.thinking_range = match range {
@@ -231,82 +257,169 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("mimo-v2.6-flash-free", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1048576, "maxOutput": 131072 })),
             ("deepseek-v4.1-flash-free", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 330000, "maxOutput": 128000 })),
         ]));
+        // 9router v0.5.112 PROVIDER_CAPABILITIES["github"] (bead
+        // openproxy-4d5h.45): Copilot routes Claude to its Anthropic-native
+        // /v1/messages shim, which applies Anthropic's per-model thinking
+        // rules — claude-haiku-5.5 is adaptive-only there (budget shape →
+        // 400 "thinking.type.enabled" is not supported). Limits match the
+        // synced catalog's github entry.
+        table.insert("github", HashMap::from([
+            ("claude-haiku-5.5", serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
+        ]));
         table
     });
 
 static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::new(|| {
     HashMap::from([
+        // 9router v0.5.112 capabilities.js MODEL_CAPABILITIES — SenseNova
+        // 6.8 Flash Lite (bead openproxy-4d5h.40).
+        (
+            "sensenova-6.8-flash-lite",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
+        // Claude Fable 5.1 — 1M context + adaptive thinking, thinking cannot
+        // be disabled (upstream capabilities.js exact entry).
+        (
+            "claude-fable-5-1",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        // Claude Opus/Sonnet 5.5 (bead openproxy-4d5h.45): dotted ids serve
+        // Kiro preview, GitHub Copilot and Token Harbor; dashed ids are the
+        // same models under the level-suffixed spellings. Opus 5.5 rejects
+        // thinking.type "disabled" and forced tool_choice (any/tool);
+        // Sonnet 5.5 takes "between_tools" in place of "disabled" and also
+        // rejects forced tool_choice.
+        (
+            "claude-opus-5.5",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5.5-thinking",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5.5-agentic",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5.5-thinking-agentic",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5.5",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5-5",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5-5-thinking",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5-5-high",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5-5-medium",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-opus-5-5-low",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingCanDisable": false, "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5-5",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5-5-thinking",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5-5-high",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5-5-medium",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
+        (
+            "claude-sonnet-5-5-low",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000, "thinkingOffType": "between_tools", "forcedToolChoice": false }),
+        ),
         (
             "claude-opus-5",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-5-thinking",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-5-agentic",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-5-thinking-agentic",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4.6",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4.7",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4-7",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4.8",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4-6",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4-8",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4.8-thinking",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-opus-4-8-thinking",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-4.6",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-4-6",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-5",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-5-thinking",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-5-agentic",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "claude-sonnet-5-thinking-agentic",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "gpt-image-1",
@@ -358,6 +471,36 @@ static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::ne
             "muse-spark-1.3-contributor-free",
             serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
         ),
+        // DeepSeek V4.1-Flash is natively multimodal; upstream renamed the
+        // served id — the API only accepts "deepseek-flash" and rejects
+        // "deepseek-v4.1-flash" (#4940). "deepseek-flash" keeps the generic
+        // 128K/64K limits; the v4.1 ids carry the vision-exp envelope.
+        // "deepseek-v4-1-flash" (dash) is the Kenari alias (#4293).
+        (
+            "deepseek-v4.1-flash",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 }),
+        ),
+        (
+            "deepseek-v4-1-flash",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 }),
+        ),
+        (
+            "deepseek-flash",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 128000, "maxOutput": 64000 }),
+        ),
+        // DeepSeek's first V4 model with image input; text limits match V4-Flash.
+        (
+            "deepseek-v4-flash-vision-exp",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 }),
+        ),
+        // glm-5.3-flash (z.ai's own line): natively multimodal, 1M window.
+        // thinkingCanDisable:false is REQUIRED — the *glm-5.3* pattern also
+        // sets it, but the exact entry shadows the pattern and must repeat
+        // every field it owns (upstream capabilities.js MODEL_CAPABILITIES).
+        (
+            "glm-5.3-flash",
+            serde_json::json!({ "vision": true, "videoInput": true, "pdf": true, "reasoning": true, "thinkingFormat": "zai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 131072 }),
+        ),
         // glm-5.3-flash-free (OpenCode free lane): the /inference/v1 backend
         // validates the body strictly — the zai `thinking` object answers 400
         // "unknown field thinking" while reasoning_effort is accepted, so it
@@ -373,27 +516,31 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
     vec![
         (
             "*claude*opus-5*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "*claude*sonnet-5*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "*claude*opus-4.6*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
         (
             "*claude*opus-4.7*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
         (
             "*claude*opus-4.8*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
         (
             "*claude*sonnet-4.6*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
         (
             "*claude*sonnet-4.7*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
         // Haiku 5.5 is adaptive-only (upstream v0.5.111 #5183 / v0.5.112 —
         // GitHub Copilot's Anthropic-native /v1/messages shim 400s on the
@@ -406,7 +553,30 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         ),
         (
             "*claude*haiku-5-5*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        // PDF input is supported by current Claude families. Keep
+        // legacy/generic fallbacks conservative instead of inferring PDF
+        // support from vision alone (upstream capabilities.js PATTERN_CAPABILITIES,
+        // https://platform.claude.com/docs/en/build-with-claude/pdf-support).
+        // The versioned budget rules precede the generic family globs so
+        // claude-haiku-4-5 / claude-opus-4-1 / claude-sonnet-4-5 get pdf:true
+        // while unversioned ids stay conservative.
+        (
+            "*claude*haiku-5*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*haiku-4*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*opus-4*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*sonnet-4*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
         ),
         (
             "*claude*haiku*",
@@ -422,11 +592,11 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         ),
         (
             "*claude*fable*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "*claude*mythos*",
-            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         ("*claude-3*", serde_json::json!({ "vision": true })),
         (
@@ -478,6 +648,31 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         (
             "*gpt-5*codex*",
             serde_json::json!({ "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 }),
+        ),
+        // gpt-5.4 is where the 1.05M window starts, but the mini and nano
+        // tiers stayed at 400k — first match wins, so those two have to be
+        // listed ahead of it (upstream capabilities.js PATTERN_CAPABILITIES,
+        // 89ffac5). Gateway-specific overrides (codex OAuth, kiro) live in
+        // PROVIDER_CAPABILITIES and win over these patterns.
+        (
+            "*gpt-5.4-mini*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-5.4-nano*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-5.4*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 1050000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-5.5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 1050000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-5.6*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 1050000, "maxOutput": 128000 }),
         ),
         (
             "*gpt-5*",
@@ -605,6 +800,15 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
             "*kimi*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "kimi", "contextWindow": 262144 }),
         ),
+        // GLM-5.3 line cannot disable thinking — z.ai returns 400 code 1210
+        // when `thinking.type` is `disabled` (upstream #4409). Set on the
+        // pattern so both glm-5.3 and glm-5.3-flash inherit it while keeping
+        // the zai shape and reasoning_effort support. `thinkingEffortSupported`
+        // is stored verbatim for parity; ModelCapabilities does not model it.
+        (
+            "*glm-5.3*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "thinkingEffortSupported": true, "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
         (
             "*glm-5*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 }),
@@ -620,6 +824,13 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         (
             "*glm*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000 }),
+        ),
+        // Dotted v4.x ids (deepseek-v4.1-flash & friends) get vision + the
+        // 128K output cap; must precede the generic *deepseek-v4* row
+        // (upstream capabilities.js PATTERN_CAPABILITIES).
+        (
+            "*deepseek-v4.*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
         (
             "*deepseek-v4*",
@@ -827,6 +1038,152 @@ pub fn hand_capabilities_for_model(provider: &str, model: &str) -> ModelCapabili
     ModelCapabilities::default()
 }
 
+/// Nested-combo recursion guard (upstream `_depth > 6`).
+pub const COMBO_AGGREGATION_MAX_DEPTH: u32 = 6;
+
+/// Capabilities of one combo seat: a `provider/model` id, or a bare model id
+/// (provider `""` → pattern/exact tables only). The provider half is resolved
+/// alias → provider id exactly like upstream `comboSeatCapabilities`
+/// (`ALIAS_TO_PROVIDER_ID[alias] || alias`).
+fn combo_seat_capabilities(full_id: &str) -> ModelCapabilities {
+    let (provider, model) = match full_id.split_once('/') {
+        Some((provider, model)) => (provider, model),
+        None => ("", full_id),
+    };
+    let provider_id = if provider.is_empty() {
+        String::new()
+    } else {
+        crate::core::model::resolve_provider_alias(provider)
+    };
+    get_capabilities_for_model(&provider_id, model)
+}
+
+/// Aggregate capabilities for a combo from its constituent `provider/model`
+/// seats — port of 9router `aggregateComboCapabilities`
+/// (capabilities.js:683-720, 5c217d3).
+///
+/// - Union:        vision, pdf, audioInput, videoInput, imageOutput,
+///                 audioOutput, search
+/// - Intersection: tools (every seat must support it)
+/// - Primary:      reasoning / thinking* fields come from the first seat
+/// - Conservative: contextWindow = min, maxOutput = max
+///
+/// `combo_lookup` maps combo name → member ids so a bare-name seat that is
+/// itself a combo resolves recursively (depth-guarded at
+/// [`COMBO_AGGREGATION_MAX_DEPTH`]). Returns `None` for empty input or when
+/// the depth guard trips — upstream returns `null` there.
+pub fn aggregate_combo_capabilities(
+    combo_models: &[String],
+    combo_lookup: Option<&HashMap<String, Vec<String>>>,
+) -> Option<ModelCapabilities> {
+    aggregate_combo_capabilities_at(combo_models, combo_lookup, 0)
+}
+
+fn aggregate_combo_capabilities_at(
+    combo_models: &[String],
+    combo_lookup: Option<&HashMap<String, Vec<String>>>,
+    depth: u32,
+) -> Option<ModelCapabilities> {
+    if combo_models.is_empty() || depth > COMBO_AGGREGATION_MAX_DEPTH {
+        return None;
+    }
+
+    let all_caps: Vec<ModelCapabilities> = combo_models
+        .iter()
+        .map(|full_id| {
+            // Nested combo: bare name (no slash) present in the lookup —
+            // recurse; on guard trip or missing entry fall back to treating
+            // the id as a literal model (upstream `?? getCapabilitiesForModel`).
+            if !full_id.contains('/') {
+                if let Some(nested) = combo_lookup.and_then(|lookup| lookup.get(full_id)) {
+                    return aggregate_combo_capabilities_at(nested, combo_lookup, depth + 1)
+                        .unwrap_or_else(|| combo_seat_capabilities(full_id));
+                }
+            }
+            combo_seat_capabilities(full_id)
+        })
+        .collect();
+
+    let first = &all_caps[0];
+    Some(ModelCapabilities {
+        vision: all_caps.iter().any(|c| c.vision),
+        pdf: all_caps.iter().any(|c| c.pdf),
+        audio_input: all_caps.iter().any(|c| c.audio_input),
+        video_input: all_caps.iter().any(|c| c.video_input),
+        image_output: all_caps.iter().any(|c| c.image_output),
+        audio_output: all_caps.iter().any(|c| c.audio_output),
+        search: all_caps.iter().any(|c| c.search),
+        tools: all_caps.iter().all(|c| c.tools),
+        reasoning: first.reasoning,
+        thinking_format: first.thinking_format,
+        thinking_can_disable: first.thinking_can_disable,
+        thinking_effort_supported: first.thinking_effort_supported,
+        thinking_off_type: first.thinking_off_type,
+        forced_tool_choice: all_caps.iter().all(|c| c.forced_tool_choice),
+        thinking_range: first.thinking_range,
+        context_window: all_caps
+            .iter()
+            .map(|c| c.context_window)
+            .min()
+            .unwrap_or(first.context_window),
+        max_output: all_caps
+            .iter()
+            .map(|c| c.max_output)
+            .max()
+            .unwrap_or(first.max_output),
+    })
+}
+
+/// The token limits a combo can *promise* on `/v1/models`
+/// (`context_length` / `max_completion_tokens`) — port of 9router
+/// `comboSeatLimits` (models/route.js:281-311). Unlike
+/// [`aggregate_combo_capabilities`] (which reports `maxOutput` as the max so
+/// the envelope shows what the combo *can* reach), this is the min across
+/// every seat for BOTH fields: any seat can serve the request, so the only
+/// window guaranteed is the smallest. Nested combos expand cycle-guarded.
+pub fn combo_seat_limits(
+    combo_models: &[String],
+    combo_lookup: &HashMap<String, Vec<String>>,
+) -> (Option<u64>, Option<u64>) {
+    fn seat_limits(
+        seat: &str,
+        combo_lookup: &HashMap<String, Vec<String>>,
+        visiting: &mut std::collections::HashSet<String>,
+        ctx: &mut Option<u64>,
+        out: &mut Option<u64>,
+    ) {
+        if !seat.contains('/') {
+            if let Some(nested) = combo_lookup.get(seat) {
+                // Cycle guard: a self-referential or looping combo publishes
+                // no limits rather than recursing forever.
+                if !visiting.insert(seat.to_string()) {
+                    return;
+                }
+                for member in nested {
+                    seat_limits(member, combo_lookup, visiting, ctx, out);
+                }
+                visiting.remove(seat);
+                return;
+            }
+        }
+        let caps = combo_seat_capabilities(seat);
+        if caps.context_window > 0 {
+            *ctx = Some(ctx.map_or(caps.context_window, |c| c.min(caps.context_window)));
+        }
+        if caps.max_output > 0 {
+            *out = Some(out.map_or(caps.max_output, |o| o.min(caps.max_output)));
+        }
+    }
+
+    let mut ctx = None;
+    let mut out = None;
+    let mut visiting = std::collections::HashSet::new();
+    for seat in combo_models {
+        seat_limits(seat, combo_lookup, &mut visiting, &mut ctx, &mut out);
+    }
+    (ctx, out)
+}
+
 /// Apply the synced models.dev catalog overlay + the vision name heuristic
 /// on top of a table-resolved result. Strictly additive: a capability
 /// already true stays true, and a false one only flips when an outside
@@ -1021,6 +1378,31 @@ fn looks_like_vision_model(model_id: &str) -> bool {
     false
 }
 
+/// Serialize a resolved [`ModelCapabilities`] to the camelCase JSON object
+/// 9router emits on `/v1/models` entries and the dashboard caps feed
+/// (`capabilities.js` resolved-caps shape, incl. `thinkingEffortSupported`).
+pub fn capabilities_json(caps: &ModelCapabilities) -> Value {
+    serde_json::json!({
+        "vision": caps.vision,
+        "pdf": caps.pdf,
+        "audioInput": caps.audio_input,
+        "videoInput": caps.video_input,
+        "imageOutput": caps.image_output,
+        "audioOutput": caps.audio_output,
+        "search": caps.search,
+        "tools": caps.tools,
+        "reasoning": caps.reasoning,
+        "thinkingFormat": caps.thinking_format,
+        "thinkingCanDisable": caps.thinking_can_disable,
+        "thinkingEffortSupported": caps.thinking_effort_supported,
+        "thinkingOffType": caps.thinking_off_type,
+        "forcedToolChoice": caps.forced_tool_choice,
+        "thinkingRange": caps.thinking_range.map(|(min, max)| serde_json::json!({ "min": min, "max": max })),
+        "contextWindow": caps.context_window,
+        "maxOutput": caps.max_output,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1494,20 @@ mod tests {
     }
 
     #[test]
+    fn gpt_6_image_variants_resolve_image_output() {
+        // Upstream capabilities.js orders `*gpt-6*image*` before `*gpt-6*` so
+        // image variants resolve imageOutput instead of chat caps.
+        for model in ["gpt-6-sol-image", "gpt-6-astra-image", "cx/gpt-6-sol-image"] {
+            let caps = get_capabilities_for_model("", model);
+            assert!(caps.image_output, "{model}");
+            assert!(!caps.vision, "{model}");
+        }
+        // Chat gpt-6 still resolves the generic family caps.
+        let chat = get_capabilities_for_model("", "gpt-6-sol");
+        assert!(chat.vision && !chat.image_output);
+    }
+
+    #[test]
     fn pattern_fallback_and_floor() {
         // Unknown family → floor defaults.
         let unknown = get_capabilities_for_model("", "totally-unknown-model");
@@ -1121,6 +1517,140 @@ mod tests {
         let gem = get_capabilities_for_model("", "google/gemini-3-pro");
         assert!(gem.vision);
         assert_eq!(gem.thinking_format, Some("gemini-level"));
+    }
+
+    #[test]
+    fn gpt_5_4_plus_publish_1m_window_mini_nano_stay_400k() {
+        // Upstream capabilities.js PATTERN_CAPABILITIES (89ffac5): the 1.05M
+        // API window starts at gpt-5.4; mini/nano tiers stayed at 400k.
+        for model in [
+            "gpt-6-astra",
+            "gpt-6.1-terra",
+            "gpt-5.4",
+            "gpt-5.5",
+            "gpt-5.6",
+            "openai/gpt-5.4-pro",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.context_window, 1_050_000, "{model}");
+            assert_eq!(caps.max_output, 128_000, "{model}");
+            assert!(caps.vision && caps.reasoning && caps.search, "{model}");
+        }
+        for model in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-mini-2026-01"] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.context_window, 400_000, "{model}");
+        }
+        // Older gpt-5.x and codex-suffixed ids keep the 400k generic window.
+        for model in ["gpt-5", "gpt-5.1", "gpt-5.2-codex"] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.context_window, 400_000, "{model}");
+        }
+        // Gateway overrides still win: codex gpt-5.6-sol is 372k.
+        assert_eq!(
+            get_capabilities_for_model("codex", "gpt-5.6-sol").context_window,
+            372_000
+        );
+    }
+
+    #[test]
+    fn aggregate_unions_modalities_and_intersects_tools() {
+        // vision seat + plain text seat: union keeps vision; tools requires
+        // every seat (default tools:true), so tools stays true here.
+        let models = vec![
+            "openai/gpt-4o".to_string(), // vision via *gpt-4o* pattern
+            "openai/gpt-3.5-turbo".to_string(),
+        ];
+        let caps = aggregate_combo_capabilities(&models, None).unwrap();
+        assert!(caps.vision);
+        assert!(caps.tools);
+        // contextWindow = min, maxOutput = max across seats.
+        let ctx = models
+            .iter()
+            .map(|m| {
+                let (p, id) = m.split_once('/').unwrap();
+                get_capabilities_for_model(p, id).context_window
+            })
+            .min()
+            .unwrap();
+        assert_eq!(caps.context_window, ctx);
+    }
+
+    #[test]
+    fn aggregate_intersects_tools_and_takes_primary_reasoning() {
+        // gpt-image-1 has tools:false in MODEL_CAPABILITIES — a combo
+        // containing it must report tools:false (intersection, not union).
+        let models = vec![
+            "openai/gpt-4o".to_string(),
+            "openai/gpt-image-1".to_string(),
+        ];
+        let caps = aggregate_combo_capabilities(&models, None).unwrap();
+        assert!(!caps.tools);
+        // reasoning comes from the FIRST seat only.
+        let first = get_capabilities_for_model("openai", "gpt-4o");
+        assert_eq!(caps.reasoning, first.reasoning);
+        assert_eq!(caps.thinking_format, first.thinking_format);
+    }
+
+    #[test]
+    fn aggregate_resolves_nested_combos_and_guards_depth() {
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "inner".to_string(),
+            vec!["anthropic/claude-opus-4.8".to_string()],
+        );
+        lookup.insert(
+            "outer".to_string(),
+            vec!["inner".to_string(), "openai/gpt-4o".to_string()],
+        );
+        // A pure chain deeper than the guard: d0 contains only d1, …, d8
+        // contains only d9 (a real model). Upstream `_depth > 6` makes the
+        // nested call return null, and the `?? getCapabilitiesForModel`
+        // fallback then treats the too-deep name as a literal model — the
+        // top-level aggregate still resolves (floor caps), it just stops
+        // recursing.
+        for i in 0..9 {
+            lookup.insert(format!("d{i}"), vec![format!("d{}", i + 1)]);
+        }
+        lookup.insert("d9".to_string(), vec!["openai/gpt-4o".to_string()]);
+
+        let nested = vec!["inner".to_string(), "openai/gpt-4o".to_string()];
+        let caps = aggregate_combo_capabilities(&nested, Some(&lookup)).unwrap();
+        // claude seat contributes vision+reasoning+search; union with gpt-4o.
+        assert!(caps.vision && caps.search && caps.reasoning);
+        assert_eq!(caps.context_window, 128_000); // min(1M claude, 128k gpt-4o)
+        assert_eq!(caps.max_output, 128_000); // max(128k, 16k)
+
+        // Depth guard: recursion stops at depth 6 — d7 resolves as a literal
+        // model id (floor caps) instead of expanding to gpt-4o's 128k window.
+        let deep = vec!["d0".to_string()];
+        let deep_caps = aggregate_combo_capabilities(&deep, Some(&lookup)).unwrap();
+        assert_eq!(deep_caps.context_window, 200_000);
+
+        // Empty input → None.
+        assert!(aggregate_combo_capabilities(&[], Some(&lookup)).is_none());
+    }
+
+    #[test]
+    fn combo_seat_limits_takes_min_of_both_fields() {
+        // Upstream comboSeatLimits: BOTH context_length and
+        // max_completion_tokens are the min across seats (any seat can serve).
+        // gpt-4o: 128k ctx / 16k out; claude-opus-4.8: 1M ctx / 128k out.
+        let models = vec![
+            "openai/gpt-4o".to_string(),
+            "anthropic/claude-opus-4.8".to_string(),
+        ];
+        let mut lookup = HashMap::new();
+        let (ctx, out) = combo_seat_limits(&models, &lookup);
+        assert_eq!(ctx, Some(128_000));
+        assert_eq!(out, Some(16_384));
+
+        // Nested combo expands; a self-referencing combo cannot loop forever.
+        lookup.insert(
+            "loop".to_string(),
+            vec!["loop".to_string(), "openai/gpt-4o".to_string()],
+        );
+        let (ctx2, _) = combo_seat_limits(&["loop".to_string()], &lookup);
+        assert_eq!(ctx2, Some(128_000));
     }
 
     #[test]
@@ -1135,5 +1665,125 @@ mod tests {
         required.insert("vision".to_string());
         let ordered = reorder_by_capabilities(&models, &required);
         assert_eq!(ordered[0], "google/gemini-3-pro");
+    }
+
+    #[test]
+    fn current_claude_models_report_pdf_input() {
+        // Bead openproxy-9router-parity-v5104-sync-eidj.27: upstream marks
+        // pdf:true on every current Claude family (adaptive 5.x/4.6+ and the
+        // versioned budget rules haiku-4/5, opus-4, sonnet-4, fable, mythos).
+        for model in [
+            // Exact MODEL_CAPABILITIES entries.
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4.7",
+            "claude-sonnet-4-6",
+            // Adaptive + sonnet-5 patterns.
+            "anthropic/claude-opus-5-20261001",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            // Versioned budget patterns.
+            "claude-haiku-4-5",
+            "claude-haiku-5",
+            "claude-opus-4-1",
+            "claude-sonnet-4-5",
+            // fable/mythos budget patterns.
+            "claude-fable-5",
+            "claude-mythos-preview",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert!(caps.pdf, "{model} should accept PDF input");
+            assert!(caps.vision, "{model} should accept images");
+        }
+        // Unversioned legacy ids stay conservative (no pdf) per upstream.
+        // hand_* bypasses the synced-catalog overlay so a models.dev delta
+        // can't flip the assertion.
+        let legacy = hand_capabilities_for_model("", "claude-haiku");
+        assert!(!legacy.pdf);
+        let generic = hand_capabilities_for_model("", "claude-3-opus");
+        assert!(!generic.pdf);
+    }
+
+    #[test]
+    fn glm_5_3_cannot_disable_thinking() {
+        // Bead .27 / upstream #4409: z.ai returns 400 code 1210 when
+        // thinking.type is "disabled" on the whole GLM-5.3 line.
+        for model in ["glm-5.3", "glm-5.3-flash", "z-ai/glm-5.3"] {
+            let caps = get_capabilities_for_model("", model);
+            assert!(!caps.thinking_can_disable, "{model}");
+            assert_eq!(caps.thinking_format, Some("zai"), "{model}");
+            assert!(caps.reasoning, "{model}");
+        }
+        // The exact glm-5.3-flash entry is multimodal per z.ai.
+        let flash = get_capabilities_for_model("", "glm-5.3-flash");
+        assert!(flash.vision && flash.video_input && flash.pdf);
+        assert_eq!(flash.context_window, 1_000_000);
+        assert_eq!(flash.max_output, 131_072);
+        // Older GLM lines keep the disable-able default.
+        let glm52 = get_capabilities_for_model("", "glm-5.2");
+        assert!(glm52.thinking_can_disable);
+    }
+
+    #[test]
+    fn claude_5_5_dotted_and_dashed_rules() {
+        // Bead openproxy-4d5h.45 / upstream v0.5.112 capabilities.js: Opus
+        // 5.5 rejects thinking "disabled" (canDisable:false) and forced
+        // tool_choice; Sonnet 5.5 substitutes "between_tools" and also bans
+        // forced tool_choice. Dotted (Copilot/Kiro) and dashed (level-suffix)
+        // spellings share the rules.
+        for model in [
+            "claude-opus-5.5",
+            "claude-opus-5.5-thinking",
+            "claude-opus-5.5-agentic",
+            "claude-opus-5-5",
+            "claude-opus-5-5-high",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.thinking_format, Some("claude-adaptive"), "{model}");
+            assert!(!caps.thinking_can_disable, "{model}");
+            assert!(!caps.forced_tool_choice, "{model}");
+            assert_eq!(caps.thinking_off_type, None, "{model}");
+            assert_eq!(caps.context_window, 1_000_000, "{model}");
+        }
+        for model in [
+            "claude-sonnet-5.5",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5-5-medium",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.thinking_format, Some("claude-adaptive"), "{model}");
+            assert_eq!(caps.thinking_off_type, Some("between_tools"), "{model}");
+            assert!(!caps.forced_tool_choice, "{model}");
+            // Sonnet 5.5 keeps thinkingCanDisable at the default (true).
+            assert!(caps.thinking_can_disable, "{model}");
+        }
+        // claude-fable-5-1 exact entry is adaptive-only (upstream key is the
+        // dashed spelling; the dotted github id falls through to the fable
+        // pattern exactly as upstream does).
+        let fable = get_capabilities_for_model("", "claude-fable-5-1");
+        assert_eq!(fable.thinking_format, Some("claude-adaptive"));
+        assert!(!fable.thinking_can_disable);
+    }
+
+    #[test]
+    fn github_haiku_5_5_provider_override() {
+        // Bead openproxy-4d5h.45: PROVIDER_CAPABILITIES["github"] pins
+        // claude-haiku-5.5 to claude-adaptive on Copilot's Anthropic-native
+        // /v1/messages shim (budget shape 400s upstream).
+        let caps = get_capabilities_for_model("github", "claude-haiku-5.5");
+        assert_eq!(caps.thinking_format, Some("claude-adaptive"));
+        assert_eq!(caps.context_window, 1_000_000);
+        assert_eq!(caps.max_output, 128_000);
+    }
+
+    #[test]
+    fn sensenova_flash_lite_capabilities() {
+        // Bead openproxy-4d5h.40 / upstream capabilities.js exact entry.
+        let caps = get_capabilities_for_model("sensenova", "sensenova-6.8-flash-lite");
+        assert!(caps.vision);
+        assert!(caps.reasoning);
+        assert_eq!(caps.thinking_format, Some("openai"));
+        assert_eq!(caps.context_window, 1_000_000);
+        assert_eq!(caps.max_output, 131_072);
     }
 }

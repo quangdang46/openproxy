@@ -808,6 +808,18 @@ async fn test_api_key_connection(
             )
             .await
         }
+        // 9router registry/sensenova.js:21 — validateUrl is the standard
+        // OpenAI-style /v1/models bearer probe.
+        "sensenova" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://token.sensenova.cn/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
         "xiaomi-tokenplan" => {
             let region =
                 provider_specific_string(connection, "region").unwrap_or("sgp".to_string());

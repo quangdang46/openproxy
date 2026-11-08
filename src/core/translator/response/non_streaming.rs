@@ -29,6 +29,7 @@ pub fn claude_to_openai_non_streaming(response: &mut Value) -> bool {
 
     // Extract text content and tool calls from Claude's content array.
     let mut text_content = String::new();
+    let mut thinking_content = String::new();
     let mut tool_calls = Vec::new();
 
     if let Some(content_arr) = response.get("content").and_then(|v| v.as_array()) {
@@ -37,6 +38,13 @@ pub fn claude_to_openai_non_streaming(response: &mut Value) -> bool {
                 Some("text") => {
                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                         text_content.push_str(text);
+                    }
+                }
+                // Thinking blocks surface as reasoning_content — upstream
+                // nonStreamingHandler.js:192 `block.type === "thinking"`.
+                Some("thinking") => {
+                    if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
+                        thinking_content.push_str(thinking);
                     }
                 }
                 Some("tool_use") => {
@@ -140,6 +148,9 @@ pub fn claude_to_openai_non_streaming(response: &mut Value) -> bool {
 
     if !tool_calls.is_empty() {
         choice["message"]["tool_calls"] = Value::Array(tool_calls);
+    }
+    if !thinking_content.is_empty() {
+        choice["message"]["reasoning_content"] = Value::String(thinking_content);
     }
 
     let created = chrono::Utc::now().timestamp();
@@ -683,6 +694,35 @@ mod tests {
         assert_eq!(resp["object"], "chat.completion");
         assert_eq!(resp["choices"][0]["message"]["content"], "");
         assert_eq!(resp["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_claude_to_openai_thinking_block_becomes_reasoning_content() {
+        // Upstream nonStreamingHandler.js:183-200 — thinking blocks surface
+        // as message.reasoning_content so OpenAI-format clients receive the
+        // thinking text Claude returned under thinking.display "summarized".
+        let mut resp = json!({
+            "id": "msg_think",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me reason about this."},
+                {"type": "text", "text": "The answer is 42."}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        });
+        let result = claude_to_openai_non_streaming(&mut resp);
+        assert!(result);
+        assert_eq!(
+            resp["choices"][0]["message"]["reasoning_content"],
+            "Let me reason about this."
+        );
+        assert_eq!(
+            resp["choices"][0]["message"]["content"],
+            "The answer is 42."
+        );
     }
 
     #[test]

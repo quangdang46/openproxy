@@ -492,7 +492,6 @@ mod tests {
             monthly_budget_usd: None,
             extra: std::collections::BTreeMap::new(),
             access: Default::default(),
-
         }];
         db
     }

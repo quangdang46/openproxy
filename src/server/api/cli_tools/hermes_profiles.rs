@@ -79,8 +79,7 @@ pub fn resolve_hermes_home(profile: Option<&str>) -> Result<HermesHome, String> 
     }
     if !is_valid_profile_name(name) {
         return Err(
-            "Invalid Hermes profile name (letters, digits, - and _ only, max 64 chars)"
-                .to_string(),
+            "Invalid Hermes profile name (letters, digits, - and _ only, max 64 chars)".to_string(),
         );
     }
     let profiles_root = profiles_root();
@@ -89,7 +88,8 @@ pub fn resolve_hermes_home(profile: Option<&str>) -> Result<HermesHome, String> 
     // the name regex already excludes separators, but never trust it alone).
     let dir_str = dir.to_string_lossy().to_string();
     let root_str = profiles_root.to_string_lossy().to_string();
-    if dir != profiles_root && !dir_str.starts_with(&format!("{root_str}{}", std::path::MAIN_SEPARATOR))
+    if dir != profiles_root
+        && !dir_str.starts_with(&format!("{root_str}{}", std::path::MAIN_SEPARATOR))
     {
         return Err("Invalid Hermes profile path".to_string());
     }
@@ -103,10 +103,7 @@ pub fn resolve_hermes_home(profile: Option<&str>) -> Result<HermesHome, String> 
 }
 
 pub async fn dir_exists(dir: &std::path::Path) -> bool {
-    fs::metadata(dir)
-        .await
-        .map(|m| m.is_dir())
-        .unwrap_or(false)
+    fs::metadata(dir).await.map(|m| m.is_dir()).unwrap_or(false)
 }
 
 /// Recognised as a profile only when one identity file is present (Hermes ignores bare dirs).

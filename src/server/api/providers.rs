@@ -1429,6 +1429,13 @@ pub fn routes() -> Router<AppState> {
             "/api/providers/{id}/test",
             post(super::provider_connection_test::test_provider_connection),
         )
+        // Per-provider custom header overrides -
+        // GET/PUT /api/providers/{id}/overrides (9router parity)
+        .route(
+            "/api/providers/{id}/overrides",
+            get(super::provider_overrides::get_provider_overrides)
+                .put(super::provider_overrides::put_provider_overrides),
+        )
         // Provider-node validate - POST /api/provider-nodes/validate
         .route("/api/provider-nodes/validate", post(validate_provider_node))
         // Model test - POST /api/models/test

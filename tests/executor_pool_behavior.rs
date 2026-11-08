@@ -402,6 +402,7 @@ fn api_airforce_headers_and_url() {
             "anthropic/claude-3.7-sonnet",
             &connection("api-airforce"),
             true,
+            &serde_json::json!({}),
         )
         .expect("headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
@@ -461,7 +462,12 @@ fn clinepass_url_and_headers() {
         "https://api.cline.bot/api/v1/chat/completions"
     );
     let headers = executor
-        .build_headers("cline-pass/glm-5.2", &connection("clinepass"), true)
+        .build_headers(
+            "cline-pass/glm-5.2",
+            &connection("clinepass"),
+            true,
+            &serde_json::json!({}),
+        )
         .expect("headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["http-referer"], "https://cline.bot");
@@ -488,7 +494,12 @@ fn codebuddy_intl_url_and_headers() {
         "https://www.codebuddy.ai/v2/chat/completions"
     );
     let headers = executor
-        .build_headers("glm-5.2", &connection("codebuddy-intl"), true)
+        .build_headers(
+            "glm-5.2",
+            &connection("codebuddy-intl"),
+            true,
+            &serde_json::json!({}),
+        )
         .expect("headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["user-agent"], "IDE/2.108.1 CodeBuddy/2.108.1");
@@ -663,14 +674,24 @@ fn default_executor_builds_expected_headers() {
     let openrouter =
         DefaultExecutor::new("openrouter", pool.clone(), None).expect("openrouter executor");
     let headers = openrouter
-        .build_headers("gpt-4.1", &connection("openrouter"), true)
+        .build_headers(
+            "gpt-4.1",
+            &connection("openrouter"),
+            true,
+            &serde_json::json!({}),
+        )
         .expect("headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["accept"], "text/event-stream");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
     assert_eq!(headers["x-title"], "Endpoint Proxy");
     let non_stream_headers = openrouter
-        .build_headers("gpt-4.1", &connection("openrouter"), false)
+        .build_headers(
+            "gpt-4.1",
+            &connection("openrouter"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("non-stream headers");
     assert!(non_stream_headers.get("accept").is_none());
 
@@ -679,14 +700,19 @@ fn default_executor_builds_expected_headers() {
     oauth_connection.access_token = Some("oauth-token".into());
     let oauth_headers = DefaultExecutor::new("openai", pool.clone(), None)
         .expect("openai")
-        .build_headers("gpt-4.1", &oauth_connection, false)
+        .build_headers("gpt-4.1", &oauth_connection, false, &serde_json::json!({}))
         .expect("oauth headers");
     assert_eq!(oauth_headers["authorization"], "Bearer oauth-token");
 
     let anthropic =
         DefaultExecutor::new("anthropic", pool.clone(), None).expect("anthropic executor");
     let anthropic_headers = anthropic
-        .build_headers("claude-sonnet-4.5", &connection("anthropic"), false)
+        .build_headers(
+            "claude-sonnet-4.5",
+            &connection("anthropic"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("anthropic headers");
     assert_eq!(anthropic_headers["x-api-key"], "sk-test");
     assert_eq!(
@@ -697,7 +723,12 @@ fn default_executor_builds_expected_headers() {
 
     let gemini = DefaultExecutor::new("gemini", pool.clone(), None).expect("gemini executor");
     let gemini_headers = gemini
-        .build_headers("gemini-2.5-flash", &connection("gemini"), true)
+        .build_headers(
+            "gemini-2.5-flash",
+            &connection("gemini"),
+            true,
+            &serde_json::json!({}),
+        )
         .expect("gemini headers");
     assert_eq!(gemini_headers["x-goog-api-key"], "sk-test");
     assert_eq!(gemini_headers["accept"], "text/event-stream");
@@ -705,7 +736,12 @@ fn default_executor_builds_expected_headers() {
 
     let cline = DefaultExecutor::new("cline", pool.clone(), None).expect("cline executor");
     let cline_headers = cline
-        .build_headers("gpt-5.4", &connection("cline"), false)
+        .build_headers(
+            "gpt-5.4",
+            &connection("cline"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("cline headers");
     assert_eq!(cline_headers["authorization"], "Bearer sk-test");
     assert_eq!(cline_headers["http-referer"], "https://cline.bot");
@@ -725,7 +761,12 @@ fn default_executor_builds_expected_headers() {
     let anthropic =
         DefaultExecutor::new("anthropic-node", pool, Some(compatible_node)).expect("anthropic");
     let headers = anthropic
-        .build_headers("claude-sonnet", &connection("anthropic-node"), false)
+        .build_headers(
+            "claude-sonnet",
+            &connection("anthropic-node"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("anthropic headers");
     assert_eq!(headers["x-api-key"], "sk-test");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
@@ -735,7 +776,12 @@ fn default_executor_builds_expected_headers() {
     oauth_connection.api_key = None;
     oauth_connection.access_token = Some("oauth-token".into());
     let headers = anthropic
-        .build_headers("claude-sonnet", &oauth_connection, false)
+        .build_headers(
+            "claude-sonnet",
+            &oauth_connection,
+            false,
+            &serde_json::json!({}),
+        )
         .expect("anthropic oauth headers");
     assert_eq!(headers["authorization"], "Bearer oauth-token");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
@@ -748,7 +794,12 @@ fn default_executor_builds_expected_headers() {
         .provider_specific_data
         .insert("orgId".into(), serde_json::Value::String("org-42".into()));
     let headers = kilocode
-        .build_headers("openai/gpt-4.1", &kilocode_connection, false)
+        .build_headers(
+            "openai/gpt-4.1",
+            &kilocode_connection,
+            false,
+            &serde_json::json!({}),
+        )
         .expect("kilocode headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["x-kilocode-organizationid"], "org-42");
@@ -756,13 +807,23 @@ fn default_executor_builds_expected_headers() {
     let opencode_go = DefaultExecutor::new("opencode-go", Arc::new(ClientPool::new()), None)
         .expect("opencode-go");
     let headers = opencode_go
-        .build_headers("kimi-k2.6", &connection("opencode-go"), false)
+        .build_headers(
+            "kimi-k2.6",
+            &connection("opencode-go"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("opencode-go openai headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert!(headers.get("x-api-key").is_none());
 
     let claude_headers = opencode_go
-        .build_headers("minimax-m2.5", &connection("opencode-go"), false)
+        .build_headers(
+            "minimax-m2.5",
+            &connection("opencode-go"),
+            false,
+            &serde_json::json!({}),
+        )
         .expect("opencode-go claude headers");
     assert_eq!(claude_headers["x-api-key"], "sk-test");
     assert_eq!(claude_headers["anthropic-version"], "2023-06-01");
@@ -787,7 +848,7 @@ fn default_executor_builds_beta_provider_urls_and_special_headers() {
         "https://api.z.ai/api/anthropic/v1/messages?beta=true"
     );
     let headers = glm
-        .build_headers("glm-5", &connection("glm"), false)
+        .build_headers("glm-5", &connection("glm"), false, &serde_json::json!({}))
         .expect("glm headers");
     assert_eq!(headers["x-api-key"], "sk-test");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
@@ -851,7 +912,12 @@ fn default_executor_builds_bearer_headers_for_openai_passthrough_matrix() {
         let executor =
             DefaultExecutor::new(provider, pool.clone(), None).expect("passthrough executor");
         let headers = executor
-            .build_headers("gpt-4.1", &connection(provider), true)
+            .build_headers(
+                "gpt-4.1",
+                &connection(provider),
+                true,
+                &serde_json::json!({}),
+            )
             .expect("passthrough headers");
         assert_eq!(
             headers["authorization"], "Bearer sk-test",
@@ -871,7 +937,12 @@ fn default_executor_builds_claude_headers_for_compatible_passthrough_matrix() {
         let executor =
             DefaultExecutor::new(provider, pool.clone(), None).expect("claude-compatible executor");
         let headers = executor
-            .build_headers("claude-sonnet", &connection(provider), false)
+            .build_headers(
+                "claude-sonnet",
+                &connection(provider),
+                false,
+                &serde_json::json!({}),
+            )
             .expect("claude-compatible headers");
         // Each claude-compatible passthrough provider uses either x-api-key (glm, kimi) or
         // Bearer auth (minimax, minimax-cn) as their credential header.
@@ -1118,14 +1189,14 @@ fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let mut missing = connection("openai");
     missing.api_key = None;
     let error = executor
-        .build_headers("gpt-4.1", &missing, false)
+        .build_headers("gpt-4.1", &missing, false, &serde_json::json!({}))
         .expect_err("missing credentials should fail");
     assert!(matches!(error, ExecutorError::MissingCredentials(provider) if provider == "openai"));
 
     let mut invalid = connection("openai");
     invalid.api_key = Some("bad\nkey".into());
     let error = executor
-        .build_headers("gpt-4.1", &invalid, false)
+        .build_headers("gpt-4.1", &invalid, false, &serde_json::json!({}))
         .expect_err("invalid header should fail");
     assert!(matches!(error, ExecutorError::InvalidHeader(_)));
 
@@ -1150,7 +1221,12 @@ fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let mut anthropic_missing = connection("anthropic-node");
     anthropic_missing.api_key = None;
     let error = anthropic
-        .build_headers("claude-sonnet", &anthropic_missing, false)
+        .build_headers(
+            "claude-sonnet",
+            &anthropic_missing,
+            false,
+            &serde_json::json!({}),
+        )
         .expect_err("anthropic missing credentials should fail");
     assert!(matches!(
         error,
@@ -1160,7 +1236,12 @@ fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let mut anthropic_invalid = connection("anthropic-node");
     anthropic_invalid.api_key = Some("bad\nkey".into());
     let error = anthropic
-        .build_headers("claude-sonnet", &anthropic_invalid, false)
+        .build_headers(
+            "claude-sonnet",
+            &anthropic_invalid,
+            false,
+            &serde_json::json!({}),
+        )
         .expect_err("anthropic invalid api key should fail");
     assert!(matches!(error, ExecutorError::InvalidHeader(_)));
 
@@ -2216,7 +2297,7 @@ mod sim_fallback {
             }
             last_status = status;
             let text = serde_json::to_string(&resp.transformed_body).unwrap_or_default();
-            if !check_fallback_error(status, &text, 0).should_fallback {
+            if !check_fallback_error(status, &text, 0, None).should_fallback {
                 panic!(
                     "member {} status {status} not fallback-eligible",
                     m.provider
@@ -2306,7 +2387,8 @@ mod sim_fallback {
             check_fallback_error(
                 429,
                 &serde_json::to_string(&r0.transformed_body).unwrap(),
-                0
+                0,
+                None
             )
             .should_fallback
         );

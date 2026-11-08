@@ -62,23 +62,23 @@ fn round_robin_rotation_advances_state() {
 
 #[test]
 fn fallback_error_rules_match_js_semantics() {
-    let unauthorized = check_fallback_error(401, "bad token", 0);
+    let unauthorized = check_fallback_error(401, "bad token", 0, None);
     assert_eq!(unauthorized.cooldown.as_secs(), 120);
 
-    let quota_1 = check_fallback_error(429, "rate limit exceeded", 0);
-    let quota_2 = check_fallback_error(429, "rate limit exceeded", 1);
+    let quota_1 = check_fallback_error(429, "rate limit exceeded", 0, None);
+    let quota_2 = check_fallback_error(429, "rate limit exceeded", 1, None);
     assert_eq!(quota_1.cooldown, get_quota_cooldown(1));
     assert_eq!(quota_2.cooldown, get_quota_cooldown(2));
     assert!(quota_2.cooldown > quota_1.cooldown);
 
-    let transient = check_fallback_error(503, "temporary upstream issue", 0);
+    let transient = check_fallback_error(503, "temporary upstream issue", 0, None);
     assert_eq!(transient.cooldown.as_secs(), 30);
 }
 
 #[test]
 fn fallback_error_rules_retry_for_transient_gateway_statuses() {
     for status in [502, 503, 504] {
-        let decision = check_fallback_error(status, "upstream gateway issue", 0);
+        let decision = check_fallback_error(status, "upstream gateway issue", 0, None);
         assert!(decision.should_fallback, "{status} should trigger fallback");
         assert_eq!(
             decision.cooldown.as_secs(),

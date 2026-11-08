@@ -221,4 +221,40 @@ mod tests {
         assert!(out2.get("reasoning_effort").is_some());
         assert_eq!(out2["reasoning_summary"], "auto");
     }
+
+    // --- openproxy-4d5h.43: channel-check identity headers ---
+
+    #[test]
+    fn intl_dispatch_sends_codebuddy_channel_ids() {
+        // The intl executor delegates wire headers to DefaultExecutor; the
+        // channel-check ids must be present on that path (upstream
+        // codebuddy-channel-headers.test.js).
+        let inner = DefaultExecutor::new("codebuddy-intl", Arc::new(ClientPool::new()), None)
+            .expect("codebuddy-intl registered");
+        let mut creds = ProviderConnection::default();
+        creds.access_token = Some("TESTTOKEN".to_string());
+        let headers = inner
+            .build_headers("glm-5", &creds, true, &json!({"messages": []}))
+            .expect("headers build");
+
+        let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        for name in [
+            "x-request-id",
+            "x-conversation-id",
+            "x-conversation-request-id",
+            "x-conversation-message-id",
+        ] {
+            assert!(
+                get(name).is_some_and(|v| !v.is_empty()),
+                "codebuddy-intl must send {name}"
+            );
+        }
+        assert_eq!(get("x-request-id"), get("x-conversation-request-id"));
+        assert_eq!(get("x-request-id"), get("x-conversation-message-id"));
+        assert_ne!(get("x-conversation-id"), get("x-conversation-message-id"));
+        assert_eq!(
+            headers.get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer TESTTOKEN")
+        );
+    }
 }

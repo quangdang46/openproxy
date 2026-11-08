@@ -27,15 +27,36 @@ pub fn inject_system_prompt(body: &mut Value, format: &str, prompt: &str) -> boo
     }
 }
 
+/// Exact idempotency: the prompt counts as present only when it stands as its
+/// own `SEP`-delimited segment (or the whole string), never as a substring of
+/// unrelated text — 9router systemInject.js:75-79 `hasPrompt`. This is what
+/// makes injection safe across account-fallback retries, where the body can
+/// already carry the prompt from a previous attempt.
+fn has_prompt(haystack: &str, prompt: &str) -> bool {
+    haystack == prompt || haystack.split(SEP).any(|seg| seg == prompt)
+}
+
+/// 9router `dedupStringAppend` (systemInject.js:81-86): empty content becomes
+/// the prompt, an already-present prompt is left untouched.
+fn dedup_string_append(current: &str, prompt: &str) -> Option<String> {
+    if current.is_empty() {
+        return Some(prompt.to_string());
+    }
+    if has_prompt(current, prompt) {
+        return None;
+    }
+    Some(format!("{current}{SEP}{prompt}"))
+}
+
 /// OpenAI-shaped: `messages[]` (chat) or `input[]` (responses) or
 /// `instructions` (responses top-level string). 9router injectSystemPrompt.
 fn inject_messages_system(body: &mut Value, prompt: &str) -> bool {
     // OpenAI Responses API: top-level string field.
     if let Some(Value::String(instructions)) = body.get_mut("instructions") {
-        if !instructions.is_empty() {
-            instructions.push_str(SEP);
-        }
-        instructions.push_str(prompt);
+        let Some(next) = dedup_string_append(instructions, prompt) else {
+            return false;
+        };
+        *instructions = next;
         return true;
     }
 
@@ -53,6 +74,11 @@ fn inject_messages_system(body: &mut Value, prompt: &str) -> bool {
 /// Chat `messages[]` takes a bare `{role, content}` system entry.
 /// 9router injectChatSystem.
 fn inject_chat_system(messages: &mut Vec<Value>, prompt: &str) -> bool {
+    // Exact idempotency: scan existing system/developer content for the full
+    // prompt as a SEP-delimited segment before appending anywhere.
+    if contains_prompt_in_messages(messages, prompt) {
+        return false;
+    }
     let idx = messages.iter().position(|m| {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         role == "system" || role == "developer"
@@ -69,10 +95,37 @@ fn inject_chat_system(messages: &mut Vec<Value>, prompt: &str) -> bool {
     }
 }
 
+/// 9router `containsPromptInMessages` (systemInject.js:118-133): only
+/// system/developer messages count, and the prompt must appear as a whole
+/// SEP-delimited segment of a string content or a part's `text`.
+fn contains_prompt_in_messages(messages: &[Value], prompt: &str) -> bool {
+    messages.iter().any(|m| {
+        if !matches!(
+            m.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        ) {
+            return false;
+        }
+        match m.get("content") {
+            Some(Value::String(content)) => has_prompt(content, prompt),
+            Some(Value::Array(parts)) => parts.iter().any(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| has_prompt(text, prompt))
+            }),
+            _ => false,
+        }
+    })
+}
+
 /// Responses `input[]` items are typed: only `type == "message"` entries with a
 /// system/developer role qualify, and the injected content is an `input_text`
 /// part. 9router injectResponsesInputSystem.
 fn inject_responses_input(input: &mut Vec<Value>, prompt: &str) -> bool {
+    // 9router containsPromptInResponsesInput — typed message items only.
+    if contains_prompt_in_responses_input(input, prompt) {
+        return false;
+    }
     let idx = input.iter().position(|item| {
         item.get("type").and_then(Value::as_str) == Some("message")
             && matches!(
@@ -96,18 +149,49 @@ fn inject_responses_input(input: &mut Vec<Value>, prompt: &str) -> bool {
     }
 }
 
+/// 9router `containsPromptInResponsesInput` (systemInject.js:181-196).
+fn contains_prompt_in_responses_input(input: &[Value], prompt: &str) -> bool {
+    input.iter().any(|item| {
+        if item.get("type").and_then(Value::as_str) != Some("message") {
+            return false;
+        }
+        if !matches!(
+            item.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        ) {
+            return false;
+        }
+        match item.get("content") {
+            Some(Value::String(content)) => has_prompt(content, prompt),
+            Some(Value::Array(parts)) => parts.iter().any(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| has_prompt(text, prompt))
+            }),
+            _ => false,
+        }
+    })
+}
+
 /// Append a prompt to a Responses message item, which unlike a chat message
 /// takes typed `input_text` content. 9router appendToResponsesMessage.
 fn append_to_responses_message(message: &mut Value, prompt: &str) -> bool {
     match message.get_mut("content") {
         Some(Value::String(content)) => {
-            if !content.is_empty() {
-                content.push_str(SEP);
-            }
-            content.push_str(prompt);
+            let Some(next) = dedup_string_append(content, prompt) else {
+                return false;
+            };
+            *content = next;
             true
         }
         Some(Value::Array(parts)) => {
+            // 9router guards on exact part text equality.
+            if parts
+                .iter()
+                .any(|part| part.get("text").and_then(Value::as_str) == Some(prompt))
+            {
+                return false;
+            }
             parts.push(serde_json::json!({ "type": "input_text", "text": prompt }));
             true
         }
@@ -152,28 +236,34 @@ fn append_kiro_prompt(message: &mut Map<String, Value>, prompt: &str) -> bool {
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let next = if current.is_empty() {
-        prompt.to_string()
-    } else {
-        format!("{current}{SEP}{prompt}")
+    let Some(next) = dedup_string_append(current, prompt) else {
+        return false;
     };
     message.insert("content".into(), Value::String(next));
     true
 }
 
-/// Append a prompt to an OpenAI message (string content, array of parts, or
-/// replace). 9router appendToOpenAIMessage.
+/// Append a prompt to an OpenAI chat message (string content, array of parts,
+/// or replace). 9router appendToChatMessage — chat content parts use the
+/// `"text"` block type, not Responses' `"input_text"`.
 fn append_to_openai_message(msg: &mut Value, prompt: &str) -> bool {
     match msg.get_mut("content") {
         Some(Value::String(content)) => {
-            if !content.is_empty() {
-                content.push_str(SEP);
-            }
-            content.push_str(prompt);
+            let Some(next) = dedup_string_append(content, prompt) else {
+                return false;
+            };
+            *content = next;
             true
         }
         Some(Value::Array(parts)) => {
-            parts.push(serde_json::json!({ "type": "input_text", "text": prompt }));
+            // 9router guards on exact part text equality.
+            if parts
+                .iter()
+                .any(|part| part.get("text").and_then(Value::as_str) == Some(prompt))
+            {
+                return false;
+            }
+            parts.push(serde_json::json!({ "type": "text", "text": prompt }));
             true
         }
         _ => {
@@ -189,13 +279,20 @@ fn append_to_openai_message(msg: &mut Value, prompt: &str) -> bool {
 fn inject_claude_system(body: &mut Value, prompt: &str) -> bool {
     match body.get_mut("system") {
         Some(Value::String(content)) => {
-            if !content.is_empty() {
-                content.push_str(SEP);
-            }
-            content.push_str(prompt);
+            let Some(next) = dedup_string_append(content, prompt) else {
+                return false;
+            };
+            *content = next;
             true
         }
         Some(Value::Array(blocks)) => {
+            // 9router guards on exact block text equality.
+            if blocks
+                .iter()
+                .any(|block| block.get("text").and_then(Value::as_str) == Some(prompt))
+            {
+                return false;
+            }
             let block = serde_json::json!({ "type": "text", "text": prompt });
             let last_cache = blocks
                 .iter()
@@ -231,6 +328,13 @@ fn inject_gemini_system(body: &mut Value, prompt: &str) -> bool {
     let sys = target.get_mut(key);
     if let Some(sys) = sys {
         if let Some(parts) = sys.get_mut("parts").and_then(Value::as_array_mut) {
+            // 9router guards on exact part text equality.
+            if parts
+                .iter()
+                .any(|part| part.get("text").and_then(Value::as_str) == Some(prompt))
+            {
+                return false;
+            }
             parts.push(serde_json::json!({ "text": prompt }));
             return true;
         }

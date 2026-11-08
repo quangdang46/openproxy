@@ -16,9 +16,8 @@ use serde_json::{json, Map, Value};
 
 /// Top-level "model:" mapping block — key on its own line, indented children.
 /// NOTE: does NOT match the scalar sentinel `model: ""` (no newline right after `model:`).
-pub static MODEL_BLOCK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^model:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)").unwrap()
-});
+pub static MODEL_BLOCK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^model:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)").unwrap());
 /// Single-line form: `model: ""`, `model: ''`, `model:` at EOF. Anchored without indent so
 /// only the top-level key matches (`model_aliases:` never does — `:` must follow "model").
 pub static MODEL_SCALAR_RE: Lazy<Regex> =
@@ -33,15 +32,12 @@ pub static AUX_BLOCK_RE: Lazy<Regex> = Lazy::new(|| {
 });
 /// Sub-entries inside the auxiliary body: `  <role>:` followed by 4+-space fields.
 static AUX_ROLE_SUB_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?m)^  ([A-Za-z0-9_]+):[ \t]*\r?\n((?:(?:[ \t]{4,}.*\r?\n?)|(?:[ \t]*\r?\n))*)",
-    )
-    .unwrap()
+    Regex::new(r"(?m)^  ([A-Za-z0-9_]+):[ \t]*\r?\n((?:(?:[ \t]{4,}.*\r?\n?)|(?:[ \t]*\r?\n))*)")
+        .unwrap()
 });
 /// Top-level "stt:" block — same capture shape as delegation.
-pub static STT_BLOCK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^stt:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)").unwrap()
-});
+pub static STT_BLOCK_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^stt:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)").unwrap());
 
 fn aux_role_re(role: &str) -> Regex {
     Regex::new(&format!(
@@ -84,7 +80,7 @@ pub fn build_aux_role_block(role: &str, model: &str, base_url: &str) -> String {
 /// `^[ \t]+<key>:[ \t]*["']?([^"'\r\n]+)["']?` — indented `key: value`, value required.
 fn extract_field(body: &str, key: &str) -> Option<String> {
     let pattern = format!(
-        r"(?m)^[ \t]+{}:[ \t]*[\"']?([^\"'\r\n]+)[\"']?",
+        r#"(?m)^[ \t]+{}:[ \t]*["']?([^"'\r\n]+)["']?"#,
         regex::escape(key)
     );
     Regex::new(&pattern)
@@ -210,7 +206,12 @@ pub fn remove_aux_role(yaml: &str, role: &str) -> String {
 /// Replace the text covered by `captures` group 0 with `replacement`.
 fn splice_match(yaml: &str, captures: &Captures<'_>, replacement: &str) -> String {
     let whole = captures.get(0).unwrap();
-    format!("{}{}{}", &yaml[..whole.start()], replacement, &yaml[whole.end()..])
+    format!(
+        "{}{}{}",
+        &yaml[..whole.start()],
+        replacement,
+        &yaml[whole.end()..]
+    )
 }
 
 pub fn remove_model_block(yaml: &str) -> String {
@@ -258,9 +259,7 @@ pub fn has_openproxy_config(model_cfg: Option<&Value>) -> bool {
 /// A block openproxy wrote (provider "custom") regardless of endpoint — covers tunnel
 /// URLs, so reset/bulk logic can find them even when base_url is not localhost.
 pub fn is_custom_block(cfg: Option<&Value>) -> bool {
-    cfg.and_then(|c| c.get("provider"))
-        .and_then(Value::as_str)
-        == Some("custom")
+    cfg.and_then(|c| c.get("provider")).and_then(Value::as_str) == Some("custom")
 }
 
 // ── stt: audio transcription via openproxy ───────────────────────────────────
@@ -303,7 +302,10 @@ pub fn parse_stt_block(yaml: &str) -> Option<Value> {
 
     for line in body.lines() {
         // `^  \S` — exactly two-space indent (a 4+-space line belongs to a sub-block).
-        if line.starts_with("  ") && !line.starts_with("   ") && line[2..].starts_with(|c: char| !c.is_whitespace()) {
+        if line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line[2..].starts_with(|c: char| !c.is_whitespace())
+        {
             if let Some(kv) = direct_re.captures(line) {
                 let key = kv.get(1).map(|m| m.as_str()).unwrap_or_default();
                 let val = kv.get(2).map(|m| m.as_str()).unwrap_or_default();
@@ -346,7 +348,10 @@ pub fn parse_stt_block(yaml: &str) -> Option<Value> {
 pub fn is_openproxy_stt(cfg: Option<&Value>) -> bool {
     let Some(cfg) = cfg else { return false };
     cfg.get("provider").and_then(Value::as_str) == Some("openai")
-        && cfg.get("base_url").and_then(Value::as_str).is_some_and(|v| !v.is_empty())
+        && cfg
+            .get("base_url")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
         && cfg.get("api_key").and_then(Value::as_str) == Some(STT_API_KEY_REF)
 }
 
@@ -432,10 +437,8 @@ pub fn remove_stt_openproxy(yaml: &str) -> String {
         return yaml.to_string();
     };
     let body = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
-    let enabled_re =
-        Regex::new(r"(?m)^  enabled:[ \t]*[\"']?true[\"']?[ \t]*\r?\n?").unwrap();
-    let provider_re =
-        Regex::new(r"(?m)^  provider:[ \t]*[\"']?openai[\"']?[ \t]*\r?\n?").unwrap();
+    let enabled_re = Regex::new(r#"(?m)^  enabled:[ \t]*["']?true["']?[ \t]*\r?\n?"#).unwrap();
+    let provider_re = Regex::new(r#"(?m)^  provider:[ \t]*["']?openai["']?[ \t]*\r?\n?"#).unwrap();
     let mut new_body = enabled_re.replace(body, "").into_owned();
     new_body = provider_re.replace(&new_body, "").into_owned();
 
@@ -444,9 +447,11 @@ pub fn remove_stt_openproxy(yaml: &str) -> String {
         let sub_body = sub_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
         let mut new_sub_body = sub_body.to_string();
         for key in ["model", "base_url", "api_key"] {
-            let kv_re =
-                Regex::new(&format!(r"(?m)^ {{4}}{}:[^\r\n]*\r?\n?", regex::escape(key)))
-                    .unwrap();
+            let kv_re = Regex::new(&format!(
+                r"(?m)^ {{4}}{}:[^\r\n]*\r?\n?",
+                regex::escape(key)
+            ))
+            .unwrap();
             new_sub_body = kv_re.replace(&new_sub_body, "").into_owned();
         }
         let replacement = if new_sub_body.trim().is_empty() {

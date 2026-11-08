@@ -76,7 +76,11 @@ async fn save_crush_settings(
         return response;
     }
 
-    let Some(base_url) = body.base_url.filter(|value| !value.trim().is_empty()) else {
+    let Some(base_url) = body
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "baseUrl is required" })),
@@ -84,7 +88,7 @@ async fn save_crush_settings(
             .into_response();
     };
 
-    match write_crush_settings(&state, &body, &base_url).await {
+    match write_crush_settings(&state, &body, base_url).await {
         Ok(config_path) => Json(json!({
             "success": true,
             "message": "Crush settings applied successfully!",
@@ -136,7 +140,9 @@ async fn read_config() -> AnyhowResult<Value> {
 }
 
 fn has_openproxy_config(config: Option<&Map<String, Value>>) -> bool {
-    let Some(providers) = config.and_then(|c| c.get("providers")).and_then(Value::as_object)
+    let Some(providers) = config
+        .and_then(|c| c.get("providers"))
+        .and_then(Value::as_object)
     else {
         return false;
     };
@@ -165,7 +171,11 @@ async fn write_crush_settings(
         fs::create_dir_all(parent).await?;
     }
 
-    let mut existing = read_config().await?.as_object().cloned().unwrap_or_default();
+    let mut existing = read_config()
+        .await?
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     let normalized_base_url = normalize_base_url(base_url);
     let model_id = body
         .model
@@ -229,10 +239,7 @@ async fn reset_crush_settings() -> AnyhowResult<Value> {
     };
 
     let mut changed = false;
-    if let Some(providers) = existing
-        .get_mut("providers")
-        .and_then(Value::as_object_mut)
-    {
+    if let Some(providers) = existing.get_mut("providers").and_then(Value::as_object_mut) {
         if providers.remove(PROVIDER_ID).is_some() {
             changed = true;
             if providers.is_empty() {

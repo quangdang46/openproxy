@@ -18,11 +18,23 @@ use uuid::Uuid;
 use super::base::{now_secs, ImageAdapter, ImageRequest, ImageResponse, ParseContext};
 
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_USER_AGENT: &str = "codex_cli_rs/0.136.0";
-const CODEX_VERSION: &str = "0.136.0";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.159.0";
+const CODEX_VERSION: &str = "0.159.0";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_MODEL_SUFFIX: &str = "-image";
 const CODEX_REF_DETAIL: &str = "high";
+/// Chat model that hosts the image_generation tool call; any chat model on
+/// the plan works as host (9router v0.5.111 default).
+const CODEX_IMAGES_MAIN_MODEL: &str = "gpt-6-sol";
+/// Dedicated gpt-image-* models route through the tool with an explicit
+/// `model` + `action` instead of the plain `-image` suffix strip.
+const CODEX_TOOL_IMAGE_MODELS: &[&str] = &[
+    "gpt-image-1.5",
+    "gpt-image-2",
+    "gpt-image-2.5",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+];
 
 pub struct CodexAdapter;
 pub static ADAPTER: CodexAdapter = CodexAdapter;
@@ -47,6 +59,17 @@ fn decode_account_id(id_token: &str) -> Option<String> {
 
 fn strip_image_suffix(model: &str) -> &str {
     model.strip_suffix(CODEX_MODEL_SUFFIX).unwrap_or(model)
+}
+
+/// If `model` is a dedicated `gpt-image-*` tool model, return it as `Some`.
+/// Those models are hosted by [`CODEX_IMAGES_MAIN_MODEL`] on the Responses
+/// API and passed through on the `image_generation` tool; every other model
+/// is sent verbatim minus a trailing `-image` suffix.
+fn codex_tool_image_model(model: &str) -> Option<&'static str> {
+    CODEX_TOOL_IMAGE_MODELS
+        .iter()
+        .copied()
+        .find(|m| *m == model)
 }
 
 fn to_data_url(input: &str) -> Option<String> {
@@ -241,6 +264,12 @@ impl ImageAdapter for CodexAdapter {
             .and_then(|v| v.as_str())
             .unwrap_or(CODEX_REF_DETAIL);
 
+        let tool_model = codex_tool_image_model(request.model);
+        let responses_model: String = match tool_model {
+            Some(_) => CODEX_IMAGES_MAIN_MODEL.to_string(),
+            None => strip_image_suffix(request.model).to_string(),
+        };
+
         let mut img_tool = json!({
             "type": "image_generation",
             "output_format": request
@@ -250,6 +279,11 @@ impl ImageAdapter for CodexAdapter {
                 .map(str::to_lowercase)
                 .unwrap_or_else(|| "png".to_string()),
         });
+        if let Some(tool) = tool_model {
+            // Dedicated tool model: explicit action + model on the tool call.
+            img_tool["action"] = json!(if refs.is_empty() { "generate" } else { "edit" });
+            img_tool["model"] = json!(tool);
+        }
         for key in ["size", "quality", "background"] {
             if let Some(v) = request.body.get(key).and_then(|v| v.as_str()) {
                 if !v.is_empty() {
@@ -261,7 +295,7 @@ impl ImageAdapter for CodexAdapter {
         }
 
         Ok(json!({
-            "model": strip_image_suffix(request.model),
+            "model": responses_model,
             "instructions": "",
             "input": [{
                 "type": "message",
@@ -269,12 +303,20 @@ impl ImageAdapter for CodexAdapter {
                 "content": build_content(prompt, &refs, detail),
             }],
             "tools": [img_tool],
-            "tool_choice": "auto",
+            "tool_choice": if tool_model.is_some() {
+                json!({ "type": "image_generation" })
+            } else {
+                json!("auto")
+            },
             "parallel_tool_calls": false,
             "prompt_cache_key": Uuid::new_v4().to_string(),
             "stream": true,
             "store": false,
-            "reasoning": null,
+            "reasoning": if tool_model.is_some() {
+                json!({ "effort": "medium", "summary": "auto" })
+            } else {
+                Value::Null
+            },
         }))
     }
 
@@ -316,7 +358,54 @@ mod tests {
     /// must byte-match 9router `imageProviders/codex.js` (lines 7-9).
     #[test]
     fn codex_version_constants_match_js() {
-        assert_eq!(CODEX_VERSION, "0.136.0");
-        assert_eq!(CODEX_USER_AGENT, "codex_cli_rs/0.136.0");
+        assert_eq!(CODEX_VERSION, "0.159.0");
+        assert_eq!(CODEX_USER_AGENT, "codex_cli_rs/0.159.0");
+    }
+
+    #[test]
+    fn tool_image_models_host_on_gpt_6_sol() {
+        // v0.5.111: dedicated gpt-image-* models are hosted by gpt-6-sol and
+        // passed through on the image_generation tool.
+        for m in CODEX_TOOL_IMAGE_MODELS {
+            assert_eq!(codex_tool_image_model(m), Some(*m));
+        }
+        assert_eq!(codex_tool_image_model("gpt-6-sol-image"), None);
+        assert_eq!(codex_tool_image_model("gpt-5.6-sol-image"), None);
+        assert_eq!(strip_image_suffix("gpt-6-sol-image"), "gpt-6-sol");
+        assert_eq!(CODEX_IMAGES_MAIN_MODEL, "gpt-6-sol");
+    }
+
+    #[tokio::test]
+    async fn build_body_uses_tool_model_path() {
+        let body = serde_json::json!({"prompt": "a cat"});
+        let req = ImageRequest {
+            body: &body,
+            model: "gpt-image-2",
+            credentials: &crate::types::ProviderConnection::default(),
+        };
+        let out = ADAPTER.build_body(&req).await.unwrap();
+        assert_eq!(out["model"], "gpt-6-sol");
+        assert_eq!(
+            out["tool_choice"],
+            serde_json::json!({"type": "image_generation"})
+        );
+        assert_eq!(out["tools"][0]["model"], "gpt-image-2");
+        assert_eq!(out["tools"][0]["action"], "generate");
+        assert_eq!(out["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test]
+    async fn build_body_plain_image_suffix() {
+        let body = serde_json::json!({"prompt": "a cat"});
+        let req = ImageRequest {
+            body: &body,
+            model: "gpt-6-sol-image",
+            credentials: &crate::types::ProviderConnection::default(),
+        };
+        let out = ADAPTER.build_body(&req).await.unwrap();
+        assert_eq!(out["model"], "gpt-6-sol");
+        assert_eq!(out["tool_choice"], "auto");
+        assert!(out["tools"][0].get("model").is_none());
+        assert!(out["reasoning"].is_null());
     }
 }

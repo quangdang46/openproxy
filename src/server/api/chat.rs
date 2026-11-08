@@ -24,6 +24,7 @@ use crate::core::combo::{
         strip_history_for_context,
     },
     check_fallback_error, combo_quarantine_for, detect_required_capabilities,
+    empty_failover::inspect_combo_response,
     execute_combo_strategy_full, get_combo_models_from_data, get_disabled_members_for_combo,
     mark_combo_member_quarantined, strategy_for_combo, ComboAttemptError, ComboExecutionError,
     ComboStrategy, FallbackDecision, FusionConfig, ModelCapacity,
@@ -145,6 +146,32 @@ fn sse_stall_timeout(provider: &str) -> Duration {
 /// are at risk.
 fn sse_first_chunk_timeout() -> Duration {
     Duration::from_millis(crate::core::config::runtime_config::STREAM_FIRST_CHUNK_TIMEOUT_MS)
+}
+
+/// 9router stream.js `PENDING_COMPLETION_FLUSH_MS`: upper bound on the
+/// deferred `response.completed` wait — a chat→responses stream that saw
+/// finish_reason without usage must not hold the client's terminal event
+/// forever when the upstream stalls with no usage trailer and no [DONE].
+const PENDING_COMPLETION_FLUSH: Duration = Duration::from_secs(3);
+
+/// Whether the streaming translator is holding a deferred
+/// `response.completed` (9router `state.completionPending &&
+/// !state.completedSent`, stream.js:461).
+fn translator_completion_pending(
+    ts: &Option<crate::core::translator::registry::ResponseTransformState>,
+) -> bool {
+    ts.as_ref().is_some_and(|s| {
+        s.responses
+            .state
+            .get("completionPending")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && s.responses
+                .state
+                .get("completedSent")
+                .and_then(Value::as_bool)
+                != Some(true)
+    })
 }
 
 /// Maximum number of concurrent in-flight requests per provider account.
@@ -835,7 +862,7 @@ async fn chat_completions_impl(
                         // openproxy-s2oc: park the panels that actually
                         // failed so the next request does not immediately
                         // re-attempt the same broken member.
-                        let cooldown = check_fallback_error(e.status, &e.message, 0).cooldown;
+                        let cooldown = check_fallback_error(e.status, &e.message, 0, None).cooldown;
                         for member in failed_panels.lock().iter() {
                             mark_combo_member_quarantined(
                                 &combo_name_for_quarantine,
@@ -927,6 +954,12 @@ async fn chat_completions_impl(
                             .await
                         }
                     },
+                    // 9router combo.js:482-549 — a 2xx is necessary but not
+                    // sufficient: peek SSE streams for real content and
+                    // JSON bodies for zero usable content so an empty
+                    // generation fails over to the next member instead of
+                    // being delivered as a successful empty answer.
+                    |response: Response, is_last: bool| inspect_combo_response(response, is_last),
                 )
                 .await
             };
@@ -941,7 +974,8 @@ async fn chat_completions_impl(
                     // is the "hook / pre-gate" that stops the CLI agent
                     // from appearing to hang on a known-broken combo
                     // member.
-                    let cooldown = check_fallback_error(error.status, &error.message, 0).cooldown;
+                    let cooldown =
+                        check_fallback_error(error.status, &error.message, 0, None).cooldown;
                     let attempted = attempted_members.lock().clone();
                     for member in attempted {
                         mark_combo_member_quarantined(
@@ -1429,6 +1463,16 @@ async fn execute_single_model(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // 9router resolveKiroModelIntent: a model(level) suffix is a request
+        // override, not part of the upstream model id — apply it to the body
+        // BEFORE translation so resolve_kiro_thinking_budget sees it (Kiro's
+        // thinking native is Noop, so the generic post-translate reapply
+        // would drop it). Bead openproxy-4d5h.46.
+        if plan.provider == "kiro" {
+            if let Some(level) = plan.thinking_level.as_deref() {
+                crate::core::config::kiro_constants::apply_kiro_thinking_override(&mut body, level);
+            }
+        }
         registry::global_registry().translate_request_with_strip(
             plan.source_format,
             plan.target_format,
@@ -1509,21 +1553,17 @@ async fn execute_single_model(
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
-        let final_is_claude = (plan.passthrough && plan.source_format == Format::Claude)
-            || (!plan.passthrough && plan.target_format == Format::Claude);
-        // 9router parity: dispatch the headroom pass on the final body format.
-        // Kiro stays a Kiro-shaped body; Responses-API gets its own path.
-        let headroom_format = if final_is_claude {
-            "claude"
-        } else if plan.target_format == Format::Kiro || plan.source_format == Format::Kiro {
-            "kiro"
-        } else if plan.target_format == Format::OpenAiResponses
-            || plan.source_format == Format::OpenAiResponses
-        {
-            "openai-responses"
+        // 9router parity: dispatch the headroom pass on the final body format
+        // (`finalFormat = passthrough ? sourceFormat : targetFormat`,
+        // chatCore.js:242). openproxy-4d5h.22: CommandCode `params.messages`,
+        // tool-output-only projection (gemini family / openai-responses) and the
+        // Kiro/CommandCode projections all key off this format string.
+        let final_format = if plan.passthrough {
+            plan.source_format
         } else {
-            "openai"
+            plan.target_format
         };
+        let headroom_format = final_format.as_str();
         if let Ok(body_str) = serde_json::to_string(&body) {
             let est_tokens = body_str.len().div_ceil(4);
             if est_tokens > 0 {
@@ -1563,14 +1603,16 @@ async fn execute_single_model(
         false
     };
 
-    // 7. Tool dedupe for Claude clients (after translate, before dispatch)
-    if client_tool == Some(ClientTool::Claude) {
-        if let Some(tools_val) = body.get("tools").and_then(|t| t.as_array()) {
-            let result = dedupe_tools(tools_val);
-            if !result.stripped.is_empty() {
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert("tools".into(), Value::Array(result.tools));
-                }
+    // 7. Tool dedupe (after translate, before dispatch) — 9router
+    // chatCore.js:229-236 runs `dedupeTools` for EVERY client: the
+    // MCP-equivalent built-in rules are gated to Claude clients inside the
+    // deduper, while the same-name pass fires for DeepSeek models on any
+    // client.
+    if let Some(tools_val) = body.get("tools").and_then(|t| t.as_array()) {
+        let result = dedupe_tools(tools_val, client_tool, &dispatch_model);
+        if !result.stripped.is_empty() {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("tools".into(), Value::Array(result.tools));
             }
         }
     }
@@ -1705,6 +1747,36 @@ pub fn attach_client_raw_headers(
         connection
             .provider_specific_data
             .insert("rawHeaders".into(), raw);
+    }
+}
+
+/// Stamp the provider's user header overrides onto the credentials clone so
+/// the executor can merge them LAST, after the registry/connection headers
+/// (9router chatCore.js:343 reads `chatSettings.providerOverrides[provider]`;
+/// base.js:131 `Object.assign(headers, providerOverrides.headers)`).
+///
+/// Same dispatch-local channel as [`attach_client_raw_headers`]: the write
+/// lands on the per-attempt clone only, so nothing persisted picks it up.
+/// Overrides are keyed by canonical provider id — the API resolves aliases
+/// on write, so resolve here too and fall back to the raw provider string
+/// for node-name dispatches.
+pub fn attach_provider_header_overrides(
+    connection: &mut crate::types::ProviderConnection,
+    settings: &crate::types::Settings,
+    provider: &str,
+) {
+    let canonical = crate::core::model::resolve_provider_alias(provider);
+    let headers = settings
+        .provider_overrides
+        .get(&canonical)
+        .or_else(|| settings.provider_overrides.get(provider))
+        .map(|o| o.headers.clone())
+        .filter(|h| !h.is_empty());
+    if let Some(headers) = headers {
+        connection.provider_specific_data.insert(
+            "providerOverrides".into(),
+            serde_json::json!({ "headers": headers }),
+        );
     }
 }
 
@@ -2052,6 +2124,9 @@ async fn forward_with_provider_fallback(
         // lands on the dispatch-local clone only, so nothing persisted picks up
         // the caller's `authorization`.
         attach_client_raw_headers(&mut connection, client_headers);
+        // 9router chatCore.js:343 + base.js:131 — per-provider custom header
+        // overrides from settings.providerOverrides, applied last at dispatch.
+        attach_provider_header_overrides(&mut connection, &snapshot.settings, provider);
 
         // get_model_info resolves openai-compatible/anthropic-compatible
         // nodes to their node NAME as the provider — match on name OR prefix
@@ -3178,9 +3253,32 @@ async fn forward_with_provider_fallback(
                     .finish_request(model, provider, Some(connection.id.as_str()), true)
                     .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
-                let decision = check_fallback_error(status.as_u16(), &message, current_backoff);
+                let decision = check_fallback_error(
+                    status.as_u16(),
+                    &message,
+                    current_backoff,
+                    Some(provider),
+                );
+                // 9router auth.js:262-267: a provider-reported reset time
+                // (`resetsAtMs` — our `retry_after` header/body equivalent)
+                // is clamped to MAX_RATE_LIMIT_COOLDOWN_MS, EXCEPT for
+                // antigravity whose quota API returns an exact per-model
+                // resetAt that must not be truncated.
+                // Upstream also requires `resetsAtMs > Date.now()` — a reset
+                // time already in the past falls through to the rule-based
+                // cooldown instead of pinning a zero-length lock.
                 let cooldown = retry_after
-                    .map(|timestamp| (timestamp - Utc::now()).to_std().unwrap_or_default())
+                    .and_then(|timestamp| (timestamp - Utc::now()).to_std().ok())
+                    .filter(|d| !d.is_zero())
+                    .map(|d| {
+                        if crate::core::model::resolve_provider_alias(provider) == "antigravity" {
+                            d
+                        } else {
+                            d.min(Duration::from_millis(
+                                crate::core::config::error_config::MAX_RATE_LIMIT_COOLDOWN_MS,
+                            ))
+                        }
+                    })
                     .unwrap_or(decision.cooldown);
                 last_error = Some(ComboAttemptError {
                     status: status.as_u16(),
@@ -3316,7 +3414,7 @@ async fn forward_with_provider_fallback(
                     .finish_request(model, provider, Some(connection.id.as_str()), true)
                     .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
-                let decision = check_fallback_error(502, &message, current_backoff);
+                let decision = check_fallback_error(502, &message, current_backoff, Some(provider));
                 let error_for_return = ComboAttemptError::new(502, message.clone());
                 last_error = Some(error);
 
@@ -4228,6 +4326,17 @@ async fn proxy_response_with_usage_tracking(
             decloaked_body.clone()
         };
 
+        // 9router handleNonStreamingResponse: strip `reasoning_content` from
+        // translated chat.completion choices when `content` is non-empty —
+        // except for Claude-message and Responses-API clients, which keep it
+        // (nonStreamingHandler.js:326-335). When content is empty the
+        // reasoning is the only useful output and must be preserved.
+        let translated_body = if plan.needs_translation() {
+            strip_reasoning_content_with_content(translated_body, plan.source_format)
+        } else {
+            translated_body
+        };
+
         Body::from(translated_body)
     } else {
         Body::from(decloaked_body)
@@ -4260,6 +4369,52 @@ fn unwrap_cline_envelope(body: &[u8], provider: &str) -> Bytes {
         _ => return Bytes::copy_from_slice(body),
     };
     serde_json::to_vec(&data).map_or_else(|_| Bytes::copy_from_slice(body), Bytes::from)
+}
+
+/// 9router `handleNonStreamingResponse` post-pass
+/// (nonStreamingHandler.js:326-335): for translated responses, delete
+/// `message.reasoning_content` whenever `message.content` is non-empty —
+/// except when the client speaks Claude (`type:"message"` survives
+/// translation) or the Responses API (`object:"response"`). Bodies that do
+/// not parse as a chat.completion JSON pass through untouched.
+fn strip_reasoning_content_with_content(body: Bytes, source_format: registry::Format) -> Bytes {
+    let Ok(mut val) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let is_claude_message = source_format == registry::Format::Claude
+        && val.get("type").and_then(Value::as_str) == Some("message");
+    let is_responses = source_format == registry::Format::OpenAiResponses
+        && val.get("object").and_then(Value::as_str) == Some("response");
+    if is_claude_message || is_responses {
+        return body;
+    }
+    let truthy_content = |content: &Value| match content {
+        Value::Null => false,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Bool(b) => *b,
+        _ => true,
+    };
+    let mut changed = false;
+    if let Some(choices) = val.get_mut("choices").and_then(Value::as_array_mut) {
+        for choice in choices {
+            let Some(message) = choice.get_mut("message").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let has_reasoning = message
+                .get("reasoning_content")
+                .is_some_and(|v| !v.is_null());
+            let has_content = message.get("content").is_some_and(truthy_content);
+            if has_reasoning && has_content {
+                message.remove("reasoning_content");
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return body;
+    }
+    serde_json::to_vec(&val).map_or(body, Bytes::from)
 }
 
 /// Translate a non-streaming Codex/Responses API response into standard Chat Completions format.
@@ -4470,6 +4625,11 @@ async fn proxy_response_with_pending_tracking(
             // synthesized `response.failed` is still owed.
             let mut responses_terminal_seen = false;
             let mut passthrough_pending: Vec<u8> = Vec::new();
+            // Per-stream tool-call index → id map for ensureStreamToolCallIds
+            // (openproxy-4d5h.20). Stateless-per-line transforms cannot mint a
+            // stable id across fragments without it.
+            let mut seen_tool_call_ids: std::collections::HashMap<i64, String> =
+                std::collections::HashMap::new();
             let custom_tool_names = custom_tool_names.clone();
             let tool_name_map_stream = tool_name_map.cloned();
             let request_body = request_body;
@@ -4522,18 +4682,45 @@ async fn proxy_response_with_pending_tracking(
                         // tracks the same `totalContentLength`).
                         let mut content_chars = 0usize;
                         loop {
-                            let deadline = if saw_first_chunk {
+                            let mut deadline = if saw_first_chunk {
                                 sse_stall_timeout(&provider)
                             } else {
                                 sse_first_chunk_timeout()
                             };
+                            // 9router stream.js watchdog: a deferred
+                            // response.completed gets 3s — not the full stall
+                            // budget — to receive its usage trailer.
+                            if translator_completion_pending(&t_state) {
+                                deadline = deadline.min(PENDING_COMPLETION_FLUSH);
+                            }
                             let next = tokio::time::timeout(deadline, upstream.try_next()).await;
                             match next {
                                 Err(_elapsed) => {
+                                    // Deferred-completion watchdog fired: the
+                                    // usage trailer never arrived inside 3s.
+                                    // Flush response.completed now and keep
+                                    // reading (9router flushPendingCompletion).
+                                    if translator_completion_pending(&t_state) {
+                                        if let Some(ts) = t_state.as_mut() {
+                                            for out in registry::global_registry()
+                                                .finish_stream(
+                                                    stream_client_format,
+                                                    stream_upstream_format,
+                                                    ts,
+                                                )
+                                            {
+                                                yield Ok::<Bytes, std::io::Error>(
+                                                    Bytes::from(out),
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     // Upstream went silent. 9router aborts the
-                                    // fetch and closes the stream; it does NOT
-                                    // inject an error frame into a stream that
-                                    // may already have committed output.
+                                    // fetch, then reports the abort in-band
+                                    // (buildStreamErrorBytes): an error frame
+                                    // the client shape expects, never a
+                                    // fabricated success.
                                     tracing::warn!(
                                         target: "openproxy::chat::stream",
                                         provider = %provider,
@@ -4547,7 +4734,7 @@ async fn proxy_response_with_pending_tracking(
                                         .usage_live
                                         .finish_request(&model, &provider, connection_id.as_deref(), true)
                                         .await;
-                                    for frame in stream_termination_frames(responses_passthrough, responses_terminal_seen) {
+                                    for frame in stream_termination_frames(stream_client_format, responses_passthrough, responses_terminal_seen, "stream stall timeout") {
                                         yield Ok::<Bytes, std::io::Error>(frame);
                                     }
                                     return;
@@ -4654,7 +4841,11 @@ async fn proxy_response_with_pending_tracking(
                                             yield Ok::<Bytes, std::io::Error>(
                                                 sanitize_sse_chunk(
                                                     &passthrough_frame_bytes(
-                                                        &restore_names(apply_passthrough_transforms(&line, &provider)),
+                                                        &restore_names(apply_passthrough_transforms(
+                                                            &line,
+                                                            &provider,
+                                                            &mut seen_tool_call_ids,
+                                                        )),
                                                     ),
                                                 ),
                                             );
@@ -4670,7 +4861,7 @@ async fn proxy_response_with_pending_tracking(
                                         .usage_live
                                         .finish_request(&model, &provider, connection_id.as_deref(), true)
                                         .await;
-                                    for frame in stream_termination_frames(responses_passthrough, responses_terminal_seen) {
+                                    for frame in stream_termination_frames(stream_client_format, responses_passthrough, responses_terminal_seen, "upstream connection lost") {
                                         yield Ok::<Bytes, std::io::Error>(frame);
                                     }
                                     return;
@@ -4724,9 +4915,9 @@ async fn proxy_response_with_pending_tracking(
                         // or the last frame is the one frame nobody
                         // normalised.
                         let text = String::from_utf8_lossy(&final_frame).into_owned();
-                        sanitize_sse_chunk(&passthrough_frame_bytes(
-                            &restore_names(apply_passthrough_transforms(&text, &provider)),
-                        ))
+                        sanitize_sse_chunk(&passthrough_frame_bytes(&restore_names(
+                            apply_passthrough_transforms(&text, &provider, &mut seen_tool_call_ids),
+                        )))
                     });
                 let coalescer_lines = if qoder_sse_unwrap {
                     qoder_coalescer_flush(qoder_coalescer.as_mut())
@@ -4792,6 +4983,10 @@ async fn proxy_response_with_pending_tracking(
             // the same raw-chunk defect the Reqwest arm had.
             let mut translate_pending2: Vec<u8> = Vec::new();
             let mut passthrough_pending2: Vec<u8> = Vec::new();
+            // Per-stream tool-call index → id map (openproxy-4d5h.20), same as
+            // the Reqwest arm's `seen_tool_call_ids`.
+            let mut seen_tool_call_ids2: std::collections::HashMap<i64, String> =
+                std::collections::HashMap::new();
             let took_passthrough2 =
                 !qoder_sse_unwrap && transformer.is_none() && !needs_stream_translation;
             let mut saw_done2 = false;
@@ -4837,14 +5032,36 @@ async fn proxy_response_with_pending_tracking(
                 let mut saw_first_chunk = false;
                 let mut content_chars = 0usize;
                 loop {
-                    let deadline = if saw_first_chunk {
+                    let mut deadline = if saw_first_chunk {
                         sse_stall_timeout(&provider)
                     } else {
                         sse_first_chunk_timeout()
                     };
+                    // 9router stream.js watchdog: a deferred
+                    // response.completed gets 3s — not the full stall
+                    // budget — to receive its usage trailer.
+                    if translator_completion_pending(&t_state) {
+                        deadline = deadline.min(PENDING_COMPLETION_FLUSH);
+                    }
                     let next = tokio::time::timeout(deadline, body.frame()).await;
                     let frame_result = match next {
                         Err(_elapsed) => {
+                            // Deferred-completion watchdog fired: the usage
+                            // trailer never arrived inside 3s. Flush
+                            // response.completed now and keep reading
+                            // (9router flushPendingCompletion).
+                            if translator_completion_pending(&t_state) {
+                                if let Some(ts) = t_state.as_mut() {
+                                    for out in registry::global_registry().finish_stream(
+                                        stream_client_format,
+                                        stream_upstream_format,
+                                        ts,
+                                    ) {
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
+                                    }
+                                }
+                                continue;
+                            }
                             tracing::warn!(
                                 target: "openproxy::chat::stream",
                                 provider = %provider,
@@ -4858,7 +5075,7 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
-                            for frame in stream_termination_frames(responses_passthrough, responses_terminal_seen) {
+                            for frame in stream_termination_frames(stream_client_format, responses_passthrough, responses_terminal_seen, "stream stall timeout") {
                                 yield Ok::<Bytes, std::io::Error>(frame);
                             }
                             return;
@@ -4914,7 +5131,11 @@ async fn proxy_response_with_pending_tracking(
                                         yield Ok::<Bytes, std::io::Error>(
                                             sanitize_sse_chunk(
                                                 &passthrough_frame_bytes(
-                                                    &restore_names2(apply_passthrough_transforms(&line, &provider)),
+                                                    &restore_names2(apply_passthrough_transforms(
+                                                        &line,
+                                                        &provider,
+                                                        &mut seen_tool_call_ids2,
+                                                    )),
                                                 ),
                                             ),
                                         );
@@ -4930,7 +5151,7 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
-                            for frame in stream_termination_frames(responses_passthrough, responses_terminal_seen) {
+                            for frame in stream_termination_frames(stream_client_format, responses_passthrough, responses_terminal_seen, "upstream connection lost") {
                                 yield Ok::<Bytes, std::io::Error>(frame);
                             }
                             return;
@@ -4966,9 +5187,9 @@ async fn proxy_response_with_pending_tracking(
                     let passthrough_terminal =
                         take_terminal_passthrough_frame(&mut passthrough_pending2).map(|final_frame| {
                             let text = String::from_utf8_lossy(&final_frame).into_owned();
-                            sanitize_sse_chunk(&passthrough_frame_bytes(
-                                &restore_names2(apply_passthrough_transforms(&text, &provider)),
-                            ))
+                            sanitize_sse_chunk(&passthrough_frame_bytes(&restore_names2(
+                                apply_passthrough_transforms(&text, &provider, &mut seen_tool_call_ids2),
+                            )))
                         });
                     // NOT a pure refactor on this arm. `qoder_sse_unwrap` and
                     // the coalescer are shared by both arms, and the Hyper main
@@ -5135,28 +5356,64 @@ pub(crate) fn build_aborted_responses_terminal() -> Vec<Bytes> {
     ]
 }
 
-/// What a stream owes the client when it ends abnormally — a stall, a transport
-/// error, or a clean EOF that never reached a Responses terminal event.
+/// What a stream owes the client when it aborts after HTTP 200 was already
+/// sent, so the status code can no longer change — a stall, a transport
+/// error, or a lost upstream (9router `buildStreamErrorBytes`,
+/// open-sse/utils/streamHelpers.js:184, wired as `onAbortTerminal` in
+/// streamingHandler.js:85-96).
 ///
-/// 9router closes the stream on a network close or a stall
-/// (streamHandler.js:155-163, :208 — `controller.close()` after
-/// `streamController.abort()`), and only injects a frame when a structured
-/// terminal is available. OpenProxy used to write a synthetic
-/// `data: {"error":…}` frame into an already-committed SSE stream at all four
-/// of these arms: a protocol violation for clients that dispatch on event
-/// shape, and a 502-shaped retry signal fired after output the client has
-/// already rendered.
-///
-/// So: nothing for every format except a Responses passthrough, which gets the
-/// failure frame plus `[DONE]`.
+/// A Responses passthrough keeps its own `response.failed` + `[DONE]` shape
+/// (`buildAbortedResponsesTerminalBytes`); every other client format gets the
+/// in-band error frame — `data: {"error":{…}}` then `data: [DONE]` for
+/// OpenAI-compatible clients (openai-python raises APIError on any `data:`
+/// payload carrying an `error` key, checked before [DONE]), or
+/// `event: error` for Anthropic clients. `message` is the abort reason
+/// ("stream stall timeout" / "upstream connection lost"), reported under the
+/// 504 `gateway_timeout` error type upstream uses for post-commit aborts.
+/// Never fabricate a successful finish_reason instead.
 pub(crate) fn stream_termination_frames(
+    client_format: Format,
     responses_passthrough: bool,
     terminal_seen: bool,
+    message: &str,
 ) -> Vec<Bytes> {
-    if responses_passthrough && !terminal_seen {
-        build_aborted_responses_terminal()
+    if responses_passthrough {
+        return if terminal_seen {
+            Vec::new()
+        } else {
+            build_aborted_responses_terminal()
+        };
+    }
+    build_stream_error_bytes(client_format, message)
+}
+
+/// 9router `buildStreamErrorBytes` (open-sse/utils/streamHelpers.js:184-192)
+/// with `HTTP_STATUS.GATEWAY_TIMEOUT` (504): `buildErrorBody` maps it to
+/// `{error:{message,type:"server_error",code:"gateway_timeout"}}`.
+fn build_stream_error_bytes(client_format: Format, message: &str) -> Vec<Bytes> {
+    let error = json!({
+        "message": message,
+        "type": "server_error",
+        "code": "gateway_timeout",
+    });
+    if client_format == Format::Claude {
+        // Anthropic shape (formatSSE CLAUDE branch): `event: error` carrying
+        // {"type":"error","error":{…}} — no [DONE] sentinel.
+        vec![Bytes::from(format!(
+            "event: error\ndata: {}\n\n",
+            serde_json::to_string(&json!({ "type": "error", "error": error })).unwrap_or_default()
+        ))]
     } else {
-        Vec::new()
+        // OpenAI shape (and the upstream default for every other format):
+        // the error frame first — clients dispatch on the `error` key before
+        // [DONE] — then the terminator, since a client stops reading at it.
+        vec![
+            Bytes::from(format!(
+                "data: {}\n\n",
+                serde_json::to_string(&json!({ "error": error })).unwrap_or_default()
+            )),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]
     }
 }
 
@@ -5339,7 +5596,11 @@ pub(crate) fn should_block_non_sse(content_type: &str) -> bool {
 /// returned unchanged — 9router skips non-JSON data lines silently
 /// ("Upstream providers sometimes return plain-text errors in the SSE stream
 /// that would break downstream JSON decoders", stream.js:225-231).
-pub(crate) fn apply_passthrough_transforms(line: &str, _provider: &str) -> String {
+pub(crate) fn apply_passthrough_transforms(
+    line: &str,
+    _provider: &str,
+    seen_tool_call_ids: &mut std::collections::HashMap<i64, String>,
+) -> String {
     let trimmed = line.trim();
     let Some(payload) = trimmed.strip_prefix("data:") else {
         return line.to_string();
@@ -5351,7 +5612,7 @@ pub(crate) fn apply_passthrough_transforms(line: &str, _provider: &str) -> Strin
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
         return line.to_string();
     };
-    if normalise_passthrough_chunk(&mut value) {
+    if normalise_passthrough_chunk(&mut value, seen_tool_call_ids) {
         format!(
             "data: {}\n",
             serde_json::to_string(&value).unwrap_or_default()
@@ -5382,7 +5643,10 @@ pub(crate) fn apply_passthrough_transforms(line: &str, _provider: &str) -> Strin
 /// Returns the transformed payload plus whether anything changed, which is how
 /// 9router decides between re-serialising and relaying the line verbatim
 /// (`else if (idFixed || fieldsInjected)` at :221).
-pub(crate) fn normalise_passthrough_chunk(payload: &mut Value) -> bool {
+pub(crate) fn normalise_passthrough_chunk(
+    payload: &mut Value,
+    seen_tool_call_ids: &mut std::collections::HashMap<i64, String>,
+) -> bool {
     use serde_json::Value;
     let mut changed = false;
 
@@ -5405,6 +5669,16 @@ pub(crate) fn normalise_passthrough_chunk(payload: &mut Value) -> bool {
             }
             changed = true;
         }
+    }
+
+    // ensureStreamToolCallIds (streamHelpers.js:84-111, invoked at
+    // stream.js:191): a fragment that opens a new tool-call index without an
+    // id aborts strict OpenAI-compatible clients — mint/reuse one per index.
+    if crate::core::translator::helpers::tool_call_helper::ensure_stream_tool_call_ids(
+        payload,
+        seen_tool_call_ids,
+    ) {
+        changed = true;
     }
 
     let has_choices = payload
@@ -7455,7 +7729,7 @@ mod tests {
     // taking the rate-limit path the level exists to model.
     #[test]
     fn only_a_backoff_decision_advances_the_persisted_level() {
-        let decision = check_fallback_error(404, "The model `gpt-9` does not exist", 3);
+        let decision = check_fallback_error(404, "The model `gpt-9` does not exist", 3, None);
         assert_eq!(
             super::next_backoff_level(&decision, 3),
             3,
@@ -7472,7 +7746,7 @@ mod tests {
             (404, "no such model"),
             (502, "connection refused"),
         ] {
-            let decision = check_fallback_error(status, text, 7);
+            let decision = check_fallback_error(status, text, 7, None);
             assert_eq!(
                 super::next_backoff_level(&decision, 7),
                 7,
@@ -7480,7 +7754,7 @@ mod tests {
             );
         }
 
-        let rate_limited = check_fallback_error(429, "boom", 2);
+        let rate_limited = check_fallback_error(429, "boom", 2, None);
         assert_eq!(super::next_backoff_level(&rate_limited, 2), 3);
     }
 
@@ -8990,7 +9264,8 @@ mod passthrough_transform_tests {
     use serde_json::{json, Value};
 
     fn transformed(line: &str) -> Value {
-        let out = apply_passthrough_transforms(line, "openai");
+        let out =
+            apply_passthrough_transforms(line, "openai", &mut std::collections::HashMap::new());
         serde_json::from_str(out.trim().trim_start_matches("data:").trim()).expect("json out")
     }
 
@@ -9071,17 +9346,28 @@ mod passthrough_transform_tests {
     #[test]
     fn a_non_json_data_line_is_left_untouched() {
         let raw = "data: upstream rate limit reached";
-        assert_eq!(apply_passthrough_transforms(raw, "openai"), raw);
+        assert_eq!(
+            apply_passthrough_transforms(raw, "openai", &mut std::collections::HashMap::new()),
+            raw
+        );
     }
 
     #[test]
     fn the_done_sentinel_and_event_lines_pass_through() {
         assert_eq!(
-            apply_passthrough_transforms("data: [DONE]", "openai"),
+            apply_passthrough_transforms(
+                "data: [DONE]",
+                "openai",
+                &mut std::collections::HashMap::new()
+            ),
             "data: [DONE]"
         );
         assert_eq!(
-            apply_passthrough_transforms("event: ping", "openai"),
+            apply_passthrough_transforms(
+                "event: ping",
+                "openai",
+                &mut std::collections::HashMap::new()
+            ),
             "event: ping"
         );
     }
@@ -9099,13 +9385,17 @@ mod passthrough_transform_tests {
             "\"created\":1700000000,",
             "\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"
         );
-        assert_eq!(apply_passthrough_transforms(raw, "openai"), raw);
+        assert_eq!(
+            apply_passthrough_transforms(raw, "openai", &mut std::collections::HashMap::new()),
+            raw
+        );
 
         // And a chunk MISSING object/created must come back re-serialised with
         // them injected — the complement of the case above.
         let bare =
             "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}";
-        let out = apply_passthrough_transforms(bare, "openai");
+        let out =
+            apply_passthrough_transforms(bare, "openai", &mut std::collections::HashMap::new());
         assert_ne!(out, bare, "a chunk needing injection must be re-serialised");
         let v: serde_json::Value =
             serde_json::from_str(out.trim().trim_start_matches("data:").trim()).expect("json");
@@ -9134,6 +9424,32 @@ mod passthrough_transform_tests {
         }
     }
 
+    /// openproxy-4d5h.20 / streamHelpers.js ensureStreamToolCallIds — a
+    /// fragment that opens a tool-call index without an id gets one minted,
+    /// and later fragments on the same index reuse it.
+    #[test]
+    fn an_idless_tool_call_fragment_gets_a_stable_minted_id() {
+        let mut seen = std::collections::HashMap::new();
+        let first = "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\"}}]}}]}";
+        let out1 = apply_passthrough_transforms(first, "openai", &mut seen);
+        let v1: Value =
+            serde_json::from_str(out1.trim().trim_start_matches("data:").trim()).expect("json");
+        let minted = v1["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(minted.starts_with("call_0_"), "minted id: {minted}");
+
+        let second = "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1\"}}]}}]}";
+        let out2 = apply_passthrough_transforms(second, "openai", &mut seen);
+        let v2: Value =
+            serde_json::from_str(out2.trim().trim_start_matches("data:").trim()).expect("json");
+        assert_eq!(
+            v2["choices"][0]["delta"]["tool_calls"][0]["id"],
+            minted.as_str()
+        );
+    }
+
     /// The transform must never panic on odd shapes.
     #[test]
     fn odd_payload_shapes_do_not_panic() {
@@ -9149,6 +9465,7 @@ mod passthrough_transform_tests {
             let _ = normalise_passthrough_chunk(
                 &mut serde_json::from_str::<Value>(raw.trim_start_matches("data:").trim())
                     .unwrap_or(Value::Null),
+                &mut std::collections::HashMap::new(),
             );
         }
     }
@@ -9571,6 +9888,7 @@ mod responses_terminal_tests {
         build_aborted_responses_terminal, format_incomplete_responses_failure,
         is_responses_terminal_event, responses_line_is_terminal, stream_termination_frames,
     };
+    use crate::core::translator::registry::Format;
     use serde_json::Value;
 
     /// A Responses passthrough that stalls, errors or EOFs owes the client a
@@ -9654,14 +9972,59 @@ mod responses_terminal_tests {
         assert!(!responses_line_is_terminal(": keepalive"));
     }
 
-    /// The four termination arms share one decision, and for every format but
-    /// Responses it is "emit nothing".
+    /// The four termination arms share one decision: a Responses passthrough
+    /// that never reached a terminal event gets `response.failed` + `[DONE]`,
+    /// and every other client format gets the in-band abort error
+    /// (9router `buildStreamErrorBytes`, streamHelpers.js:184).
     #[test]
-    fn only_a_responses_passthrough_without_a_terminal_gets_frames() {
-        assert!(stream_termination_frames(false, false).is_empty());
-        assert!(stream_termination_frames(false, true).is_empty());
-        assert!(stream_termination_frames(true, true).is_empty());
-        assert_eq!(stream_termination_frames(true, false).len(), 2);
+    fn termination_frames_cover_every_client_format() {
+        // Responses passthrough: unchanged dedicated shape.
+        assert!(stream_termination_frames(
+            Format::OpenAiResponses,
+            true,
+            true,
+            "stream stall timeout"
+        )
+        .is_empty());
+        assert_eq!(
+            stream_termination_frames(Format::OpenAiResponses, true, false, "stream stall timeout")
+                .len(),
+            2
+        );
+
+        // OpenAI-compatible clients: `data: {"error":{…}}` then `data: [DONE]`.
+        let openai =
+            stream_termination_frames(Format::OpenAi, false, false, "stream stall timeout");
+        assert_eq!(openai.len(), 2);
+        let first = String::from_utf8_lossy(&openai[0]);
+        assert!(first.starts_with("data: {\"error\":"), "{first}");
+        let payload: Value =
+            serde_json::from_str(first.trim_start_matches("data: ").trim()).unwrap();
+        assert_eq!(payload["error"]["type"], "server_error");
+        assert_eq!(payload["error"]["code"], "gateway_timeout");
+        assert_eq!(payload["error"]["message"], "stream stall timeout");
+        assert_eq!(&openai[1][..], b"data: [DONE]\n\n");
+
+        // Anthropic clients: `event: error` frame, no [DONE] sentinel.
+        let claude =
+            stream_termination_frames(Format::Claude, false, false, "upstream connection lost");
+        assert_eq!(claude.len(), 1);
+        let frame = String::from_utf8_lossy(&claude[0]);
+        assert!(frame.starts_with("event: error\n"), "{frame}");
+        let data_line = frame
+            .lines()
+            .find(|l| l.starts_with("data:"))
+            .expect("error frame must carry data");
+        let payload: Value =
+            serde_json::from_str(data_line.trim_start_matches("data:").trim()).unwrap();
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["error"]["code"], "gateway_timeout");
+        assert_eq!(payload["error"]["message"], "upstream connection lost");
+
+        // Other formats take the OpenAI-shaped default, same as upstream.
+        let gemini = stream_termination_frames(Format::Gemini, false, false, "x");
+        assert_eq!(gemini.len(), 2);
+        assert_eq!(&gemini[1][..], b"data: [DONE]\n\n");
     }
 }
 

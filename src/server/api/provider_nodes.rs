@@ -328,16 +328,19 @@ async fn delete_provider_node(
     // Cascade: a connection references a node by using the node id as its
     // provider alias, so leaving those rows behind would keep them listed by
     // /api/providers and selectable in filter_available_accounts with no UI
-    // left to remove them. Custom models are keyed `providerAlias|id|type` in
-    // their own scope and are deliberately not cascaded: 9router's delete
-    // leaves them behind too, so a node deleted and recreated with the same id
-    // gets the user's custom model list back instead of losing it.
+    // left to remove them. Custom models go too: upstream's delete runs
+    // `DELETE FROM kv WHERE scope='customModels' AND key LIKE '${id}|%'`
+    // inside the same transaction (nodesRepo.js:85-96), and the kv key is
+    // `${providerAlias}|${id}|${type}` (aliasRepo.js:22) — the node id IS the
+    // providerAlias node connections are stored under, so `provider_alias ==
+    // id` is the exact equivalent of that LIKE prefix match.
     let result = state
         .db
         .update(|db| {
             db.provider_nodes.retain(|n| n.id != id);
             db.provider_connections
                 .retain(|c| c.provider.as_str() != id.as_str());
+            db.custom_models.retain(|model| model.provider_alias != id);
         })
         .await;
 
@@ -443,7 +446,6 @@ mod node_id_tests {
                 monthly_budget_usd: None,
                 extra: BTreeMap::new(),
                 access: Default::default(),
-
             }];
         })
         .await
@@ -536,5 +538,83 @@ mod node_id_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 9router nodesRepo.js:85-96 deletes the node and its
+    /// `customModels`/`connections` KV rows in one transaction. OpenProxy's
+    /// equivalent: connections keyed `provider == node.id` and custom models
+    /// keyed `provider_alias == node.id` must be pruned by the delete —
+    /// otherwise the custom model stays listed under a provider that no
+    /// longer exists.
+    #[tokio::test]
+    async fn test_delete_provider_node_prunes_connections_and_custom_models() {
+        use crate::types::{CustomModel, ProviderConnection, ProviderNode};
+
+        let state = create_test_state().await;
+        let node_id = "openai-compatible-chat-deadbeef".to_string();
+        state
+            .db
+            .update(|db| {
+                db.provider_nodes.push(ProviderNode {
+                    id: node_id.clone(),
+                    r#type: "openai-compatible".to_string(),
+                    name: "dead node".to_string(),
+                    prefix: None,
+                    api_type: Some("chat".to_string()),
+                    base_url: Some("https://example.com/v1".to_string()),
+                    created_at: None,
+                    updated_at: None,
+                    extra: BTreeMap::new(),
+                });
+                let mut connection = ProviderConnection::default();
+                connection.provider = node_id.clone();
+                db.provider_connections.push(connection);
+                db.custom_models.push(CustomModel {
+                    provider_alias: node_id.clone(),
+                    id: "node-only-model".to_string(),
+                    r#type: "llm".to_string(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                });
+                db.custom_models.push(CustomModel {
+                    provider_alias: "other-provider".to_string(),
+                    id: "other-model".to_string(),
+                    r#type: "llm".to_string(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                });
+            })
+            .await
+            .expect("seed");
+
+        let app = routes().with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/provider-nodes/{node_id}"))
+                    .header("Authorization", format!("Bearer {TEST_KEY}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let snapshot = state.db.snapshot();
+        assert!(!snapshot.provider_nodes.iter().any(|n| n.id == node_id));
+        assert!(!snapshot
+            .provider_connections
+            .iter()
+            .any(|c| c.provider == node_id));
+        assert!(!snapshot
+            .custom_models
+            .iter()
+            .any(|m| m.provider_alias == node_id));
+        // Custom models belonging to other providers must survive.
+        assert!(snapshot
+            .custom_models
+            .iter()
+            .any(|m| m.provider_alias == "other-provider"));
     }
 }

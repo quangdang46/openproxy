@@ -84,7 +84,11 @@ async fn save_codewhale_settings(
         return response;
     }
 
-    let Some(base_url) = body.base_url.filter(|value| !value.trim().is_empty()) else {
+    let Some(base_url) = body
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "baseUrl is required" })),
@@ -92,7 +96,7 @@ async fn save_codewhale_settings(
             .into_response();
     };
 
-    match write_codewhale_settings(&state, &body, &base_url).await {
+    match write_codewhale_settings(&state, &body, base_url).await {
         Ok(config_path) => Json(json!({
             "success": true,
             "message": "CodeWhale settings applied successfully!",
@@ -110,10 +114,7 @@ async fn save_codewhale_settings(
     }
 }
 
-async fn delete_codewhale_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn delete_codewhale_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = super::super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
@@ -157,8 +158,8 @@ async fn write_codewhale_settings(
     }
 
     let raw = read_config_raw().await.unwrap_or_default();
-    let mut existing = toml::from_str::<TomlValue>(&raw)
-        .unwrap_or(TomlValue::Table(TomlMap::new()));
+    let mut existing =
+        toml::from_str::<TomlValue>(&raw).unwrap_or(TomlValue::Table(TomlMap::new()));
     if !existing.is_table() {
         existing = TomlValue::Table(TomlMap::new());
     }
@@ -172,7 +173,10 @@ async fn write_codewhale_settings(
         .unwrap_or_else(|| "provider/model-id".to_string());
 
     let openai = TomlValue::Table(TomlMap::from_iter([
-        ("base_url".to_string(), TomlValue::String(normalized_base_url)),
+        (
+            "base_url".to_string(),
+            TomlValue::String(normalized_base_url),
+        ),
         ("api_key".to_string(), TomlValue::String(api_key)),
         ("model".to_string(), TomlValue::String(model)),
     ]));
@@ -214,10 +218,7 @@ async fn reset_codewhale_settings() -> AnyhowResult<Value> {
         table.remove("openai");
     }
 
-    let is_empty = existing
-        .as_table()
-        .map(|t| t.is_empty())
-        .unwrap_or(true);
+    let is_empty = existing.as_table().map(|t| t.is_empty()).unwrap_or(true);
     if is_empty {
         match fs::remove_file(&config_path).await {
             Ok(()) => {}

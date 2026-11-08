@@ -16,6 +16,7 @@ use crate::types::{AppDb, Combo, PricingTable};
 pub mod auto_combo;
 pub mod capabilities;
 pub mod capacity_adapter;
+pub mod empty_failover;
 pub mod fusion;
 pub mod hedging;
 pub mod ordering;
@@ -271,8 +272,35 @@ pub struct ComboExecutionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FallbackDecision {
     pub should_fallback: bool,
+    /// 9router `requestScoped` (accountFallback.js:48-61): the REQUEST
+    /// itself is what the member rejected — advance to the next combo
+    /// member with NO cooldown and NO account eviction, and return the
+    /// first scoped response verbatim if every member fails.
+    pub request_scoped: bool,
     pub cooldown: Duration,
     pub new_backoff_level: Option<u32>,
+}
+
+/// Verdict from the optional 2xx content inspector
+/// ([`empty_failover::inspect_combo_response`]), run inside
+/// [`iterate_combo_models`] on every `Ok` member result — the Rust shape of
+/// upstream combo.js's `if (result.ok)` peek block (combo.js:482-549).
+#[derive(Debug)]
+pub enum ComboOkVerdict<T> {
+    /// The 2xx result carries usable content (or is not inspectable) —
+    /// accept it as the combo response.
+    Accept(T),
+    /// The 2xx result finished with zero usable content.
+    /// `result` is the (possibly reconstructed) response, returned verbatim
+    /// when this is the last member or the finish reason is a no-retry
+    /// class; `failure` is the synthetic [`ComboAttemptError`] recorded when
+    /// a later member is tried instead (upstream `lastError`/`lastStatus`).
+    Empty {
+        result: T,
+        failure: ComboAttemptError,
+        /// Finish reason in hub (OpenAI) vocabulary, for the no-retry check.
+        finish_reason: Option<String>,
+    },
 }
 
 /// Whether a combo member model currently has capacity to serve a new request.
@@ -595,32 +623,56 @@ pub fn reorder_by_capabilities(models: &[String], required: &HashSet<String>) ->
 }
 
 /// Single source of truth: delegates to `error_config::classify_error`.
-pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -> FallbackDecision {
+///
+/// `provider` is the resolved provider id (or alias — it is resolved
+/// internally) so provider-scoped [`ERROR_RULES`](crate::core::config::error_config::ERROR_RULES)
+/// entries like the codex / codebuddy-intl rules can fire
+/// (9router accountFallback.js:30 `rule.provider !== provider → skip`).
+pub fn check_fallback_error(
+    status: u16,
+    error_text: &str,
+    backoff_level: u32,
+    provider: Option<&str>,
+) -> FallbackDecision {
     use crate::core::config::error_config::{classify_error, ErrorClassification};
 
-    match classify_error(Some(error_text), Some(status)) {
+    match classify_error(Some(error_text), Some(status), provider) {
         ErrorClassification::Backoff => {
             let new_level = (backoff_level + 1).min(MAX_BACKOFF_LEVEL);
             FallbackDecision {
                 should_fallback: true,
+                request_scoped: false,
                 cooldown: get_quota_cooldown(new_level),
                 new_backoff_level: Some(new_level),
             }
         }
         ErrorClassification::Cooldown(d) => FallbackDecision {
             should_fallback: true,
+            request_scoped: false,
             cooldown: d,
+            new_backoff_level: None,
+        },
+        // 9router accountFallback.js:48-61 — an unmatched request-scoped
+        // 4xx reports `shouldFallback: false` (the CREDENTIAL is not at
+        // fault, so the account loop returns the error without locking the
+        // connection) AND `requestScoped: true` (the REQUEST is what this
+        // member rejected, so the combo still rotates to the next member —
+        // different providers validate differently). Cooldown is 0.
+        ErrorClassification::RequestScoped => FallbackDecision {
+            should_fallback: false,
+            request_scoped: true,
+            cooldown: Duration::ZERO,
             new_backoff_level: None,
         },
         ErrorClassification::NoMatch => FallbackDecision {
             should_fallback: true,
+            request_scoped: false,
             cooldown: TRANSIENT_COOLDOWN,
             new_backoff_level: None,
         },
         // 9router parity (accountFallback.js:23-50): the rule walk has no
-        // "permanent" tier. Every error falls back to the next member, and the
-        // duration comes from ERROR_RULES — so an unmatched 400 gets the same
-        // 30 s transient a 500 does, not a longer lock.
+        // "permanent" tier. Every credential-scoped error falls back to the
+        // next member, and the duration comes from ERROR_RULES.
     }
 }
 
@@ -898,6 +950,9 @@ where
         &PricingTable::new(),
         capacity_check,
         handle_single_model,
+        // Non-chat callers (search/fetch/tests) have no SSE/JSON content
+        // contract to inspect — accept every 2xx untouched.
+        |result, _is_last| async move { ComboOkVerdict::Accept(result) },
     )
     .await
 }
@@ -908,7 +963,7 @@ where
 /// `pricing` drives the cost/latency-aware orderings for the `Cheapest` and
 /// `Fastest` strategies. Pass `&PricingTable::new()` when no pricing data is
 /// available — both strategies then fall back to the configured priority order.
-pub async fn execute_combo_strategy_full<T, F, Fut, C>(
+pub async fn execute_combo_strategy_full<T, F, Fut, C, I, IFut>(
     models: &[String],
     combo_name: Option<&str>,
     strategy: ComboStrategy,
@@ -918,11 +973,14 @@ pub async fn execute_combo_strategy_full<T, F, Fut, C>(
     pricing: &PricingTable,
     capacity_check: C,
     mut handle_single_model: F,
+    mut inspect_ok: I,
 ) -> Result<T, ComboExecutionError>
 where
     F: FnMut(&str) -> Fut,
     Fut: Future<Output = Result<T, ComboAttemptError>>,
     C: Fn(&str) -> ModelCapacity,
+    I: FnMut(T, bool) -> IFut,
+    IFut: Future<Output = ComboOkVerdict<T>>,
 {
     // Manual disable + auto-quarantine pre-gate. Applied to the raw
     // member list *before* rotation so the round-robin index doesn't
@@ -1019,38 +1077,77 @@ where
         }
         available.extend(busy);
 
-        return iterate_combo_models(&available, &mut handle_single_model).await;
+        return iterate_combo_models(&available, &mut handle_single_model, &mut inspect_ok).await;
     }
 
-    iterate_combo_models(&order, &mut handle_single_model).await
+    iterate_combo_models(&order, &mut handle_single_model, &mut inspect_ok).await
 }
 
-async fn iterate_combo_models<T, F, Fut>(
+async fn iterate_combo_models<T, F, Fut, I, IFut>(
     order: &[String],
     handle_single_model: &mut F,
+    inspect_ok: &mut I,
 ) -> Result<T, ComboExecutionError>
 where
     F: FnMut(&str) -> Fut,
     Fut: Future<Output = Result<T, ComboAttemptError>>,
+    I: FnMut(T, bool) -> IFut,
+    IFut: Future<Output = ComboOkVerdict<T>>,
 {
     let mut last_error: Option<ComboAttemptError> = None;
-    let mut first_error: Option<ComboAttemptError> = None;
+    // 9router combo.js tracks `lastStatus` as the FIRST failure's status
+    // (`if (!lastStatus) lastStatus = …`), with two overrides: a JSON
+    // zero-content member overwrites it unconditionally with 200
+    // (combo.js:508) and an SSE empty generation sets 502 only while unset
+    // (combo.js:544). `ComboOkVerdict::Empty::failure.status` carries the
+    // same distinction (200 = JSON zero-content, 502 = SSE empty).
+    let mut last_status: Option<u16> = None;
+    // 9router `requestScopedResult` (combo.js:580-634): the FIRST member
+    // whose failure was caused by the request itself. When every member
+    // fails, that member's own response is returned verbatim — status and
+    // body — rather than the synthesized envelope, which would read as a
+    // 200 carrying an error object and bury the member that named the real
+    // cause.
+    let mut first_request_scoped: Option<ComboAttemptError> = None;
     let mut earliest_retry_after = None;
-    // Track actual backoff level across consecutive failures (H21).
-    let mut consecutive_backoff_level: u32 = 0;
 
-    for model in order {
+    for (index, model) in order.iter().enumerate() {
+        let is_last = index + 1 == order.len();
         match handle_single_model(model).await {
-            Ok(result) => return Ok(result),
+            Ok(result) => match inspect_ok(result, is_last).await {
+                ComboOkVerdict::Accept(result) => return Ok(result),
+                ComboOkVerdict::Empty {
+                    result,
+                    failure,
+                    finish_reason,
+                } => {
+                    // 9router combo.js:532-549 — a legitimately-empty class
+                    // (content filter) or the last candidate returns the
+                    // (empty) response as-is, preserving prior behaviour
+                    // rather than manufacturing a 5xx.
+                    if empty_failover::is_no_retry_finish(finish_reason.as_deref()) || is_last {
+                        return Ok(result);
+                    }
+                    // Empty generation: fall through to the next candidate.
+                    // Recorded like a failure for lastError/lastStatus but
+                    // bypasses checkFallbackError entirely — upstream never
+                    // cools an account down for an empty 200.
+                    // combo.js:507-509 — a JSON zero-content member
+                    // overwrites lastStatus with 200 unconditionally;
+                    // combo.js:543-545 — an SSE empty generation only sets
+                    // 502 while lastStatus is still unset.
+                    if failure.status == 200 {
+                        last_status = Some(200);
+                    } else if last_status.is_none() {
+                        last_status = Some(502);
+                    }
+                    last_error = Some(failure);
+                    continue;
+                }
+            },
             Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(ComboAttemptError {
-                        status: error.status,
-                        message: error.message.clone(),
-                        retry_after: error.retry_after,
-                        upstream_body: error.upstream_body.clone(),
-                        upstream_headers: error.upstream_headers.clone(),
-                    });
+                if last_status.is_none() {
+                    last_status = Some(error.status);
                 }
                 // 9router combo.js:319 reads `retryAfter` out of the member's
                 // JSON BODY — not off a Retry-After header, which its own
@@ -1068,8 +1165,37 @@ where
                     };
                 }
 
-                let decision =
-                    check_fallback_error(error.status, &error.message, consecutive_backoff_level);
+                // Provider-scoped ERROR_RULES (codex / codebuddy-intl) need
+                // the member's provider — members are "provider/model" (or a
+                // bare alias) strings, so resolve the prefix the same way
+                // dispatch does.
+                let member_provider = crate::core::model::parse_model(model).provider;
+                // combo.js:587 — the combo layer always classifies with
+                // backoff level 0; per-member backoff lives in the inner
+                // account loop, not here.
+                let decision = check_fallback_error(
+                    error.status,
+                    &error.message,
+                    0,
+                    member_provider.as_deref(),
+                );
+
+                // 9router combo.js:600-612 — a request-scoped 4xx (validation
+                // failure, unsupported parameter, context overflow) says this
+                // member cannot serve THIS request — not that the credential
+                // is unhealthy. Members run on different providers with
+                // different validation, so the next member may well serve
+                // it. Advance WITHOUT a cooldown and WITHOUT waiting: there
+                // is nothing to recover. The inner account loop already
+                // declined to cool the connection (`should_fallback: false`).
+                if decision.request_scoped {
+                    if first_request_scoped.is_none() {
+                        first_request_scoped = Some(error.clone());
+                    }
+                    last_error = Some(error);
+                    continue;
+                }
+
                 if !decision.should_fallback {
                     return Err(ComboExecutionError {
                         status: error.status,
@@ -1091,28 +1217,41 @@ where
                     tokio::time::sleep(decision.cooldown).await;
                 }
 
-                // Advance backoff level when the decision requested a new one (H21).
-                if let Some(new_level) = decision.new_backoff_level {
-                    consecutive_backoff_level = new_level;
-                }
-
                 last_error = Some(error);
             }
         }
     }
 
-    // 9router keeps the *first* failure status for the final response.
-    let first_status = first_error.as_ref().map(|e| e.status);
+    // 9router combo.js:617-627 — at least one member rejected the request
+    // itself. Hand back that member's own response — status and body —
+    // rather than the synthesized envelope below: the synthesized one
+    // reaches the client as a 200 carrying an error object, which reads as
+    // an empty success, and it buries the member that named the real cause.
+    // This is also what the caller saw before combos advanced on these
+    // errors.
+    if let Some(scoped) = first_request_scoped {
+        return Err(ComboExecutionError {
+            status: scoped.status,
+            message: scoped.message,
+            // No retry-after synthesis: the verbatim upstream headers already
+            // carry whatever Retry-After the member sent.
+            earliest_retry_after: None,
+            upstream_body: scoped.upstream_body,
+            upstream_headers: scoped.upstream_headers,
+        });
+    }
+
+    // 9router keeps the *first* failure status for the final response
+    // (`if (!lastStatus)`), overridden by the empty-generation arms above.
     let message = last_error
         .as_ref()
         .map(|e| e.message.clone())
-        .or_else(|| first_error.as_ref().map(|e| e.message.clone()))
         .unwrap_or_else(|| "All combo models unavailable".into());
 
     let status = if message.to_lowercase().contains("no credentials") {
         503
     } else {
-        match first_status.unwrap_or(503) {
+        match last_status.unwrap_or(503) {
             0 => 503,
             s => s,
         }
@@ -1121,8 +1260,7 @@ where
     // Preserve upstream_body from the last error if available (H23).
     let final_upstream_body = last_error
         .as_ref()
-        .and_then(|e: &ComboAttemptError| e.upstream_body.clone())
-        .or_else(|| first_error.as_ref().and_then(|e| e.upstream_body.clone()));
+        .and_then(|e: &ComboAttemptError| e.upstream_body.clone());
 
     // 9router `lastHeaders` (src/sse/handlers/chat.js:384): the forwarded
     // rate-limit headers of the LAST failed attempt ride the final error.
@@ -1130,12 +1268,6 @@ where
         .as_ref()
         .map(|e| e.upstream_headers.clone())
         .filter(|h| !h.is_empty())
-        .or_else(|| {
-            first_error
-                .as_ref()
-                .map(|e| e.upstream_headers.clone())
-                .filter(|h| !h.is_empty())
-        })
         .unwrap_or_default();
 
     Err(ComboExecutionError {
@@ -1359,6 +1491,7 @@ mod tests {
                     Err::<String, _>(ComboAttemptError::new(429, "rate limited"))
                 }
             },
+            |result, _is_last| async move { ComboOkVerdict::Accept(result) },
         )
         .await;
         assert!(result.is_err(), "every member fails in this fixture");
@@ -1495,6 +1628,7 @@ mod tests {
                     Ok::<_, ComboAttemptError>(owned)
                 }
             },
+            |result, _is_last| async move { ComboOkVerdict::Accept(result) },
         )
         .await;
         assert!(result.is_ok(), "quality strategy should succeed");
@@ -1506,12 +1640,12 @@ mod tests {
         );
     }
 
-    // 9router errorConfig.js:59-76 + accountFallback.js:23-50. The whole
-    // table, pinned in one sweep: 401/402/403/404 take the 2-minute long
-    // cooldown, 429 escalates the backoff level, and everything else — a bare
-    // 400 included — lands on the 30 s transient default. Before this the
-    // unmatched 4xx tier handed out 120 s, so a single malformed request
-    // locked the account out of rotation four times longer than 9router does.
+    // 9router errorConfig.js:59-76 + accountFallback.js:23-50,61-74. The
+    // whole table, pinned in one sweep: 401/402/403/404 take the 2-minute
+    // long cooldown, 429 escalates the backoff level, and everything else
+    // credential-scoped — a bare 500 included — lands on the 30 s transient
+    // default. Unmatched 4xx are NOT in this table at all: they are
+    // request-scoped (see the dedicated test below).
     #[test]
     fn fallback_cooldowns_match_the_js_rule_table() {
         for (status, secs) in [
@@ -1519,35 +1653,69 @@ mod tests {
             (402, 120),
             (403, 120),
             (404, 120),
-            (400, 30),
-            (418, 30),
             (500, 30),
         ] {
-            let decision = check_fallback_error(status, "boom", 0);
+            let decision = check_fallback_error(status, "boom", 0, None);
             assert_eq!(
                 decision.cooldown,
                 Duration::from_secs(secs),
                 "status {status}"
             );
             assert!(decision.should_fallback, "9router always falls back");
+            assert!(
+                !decision.request_scoped,
+                "status {status} is account-scoped"
+            );
         }
+    }
+
+    // 9router accountFallback.js:48-61 + combo.js:580-634 (beads eidj.13 /
+    // 4d5h.17): an unmatched request-scoped 4xx must NOT cool the account
+    // down — `shouldFallback: false` keeps the inner account loop from
+    // locking the connection — while `requestScoped: true` still advances
+    // the combo to the next member.
+    #[test]
+    fn request_scoped_4xx_never_cools_the_account() {
+        for status in [400u16, 405, 418, 422, 499] {
+            let decision = check_fallback_error(status, "unsupported parameter", 0, None);
+            assert!(decision.request_scoped, "status {status} is request-scoped");
+            assert!(
+                !decision.should_fallback,
+                "status {status} must not fall back at the ACCOUNT level"
+            );
+            assert_eq!(
+                decision.cooldown,
+                Duration::ZERO,
+                "status {status} must not cool the account down"
+            );
+            assert_eq!(decision.new_backoff_level, None);
+        }
+        // Account-scoped statuses keep their rules and are never scoped.
+        for status in [401u16, 402, 403, 404, 429, 500] {
+            let decision = check_fallback_error(status, "boom", 0, None);
+            assert!(!decision.request_scoped, "status {status}");
+        }
+        // A text rule still wins: "rate limit" wording on a 400 backs off.
+        let rate_limited = check_fallback_error(400, "rate limit exceeded", 0, None);
+        assert!(!rate_limited.request_scoped);
+        assert!(rate_limited.should_fallback);
     }
 
     #[test]
     fn only_a_backoff_classification_advances_the_level() {
         assert_eq!(
-            check_fallback_error(429, "boom", 0).new_backoff_level,
+            check_fallback_error(429, "boom", 0, None).new_backoff_level,
             Some(1),
             "429 is the only status rule that bumps the level"
         );
         assert_eq!(
-            check_fallback_error(429, "rate limit", 0).new_backoff_level,
+            check_fallback_error(429, "rate limit", 0, None).new_backoff_level,
             Some(1),
             "so is the rate-limit text rule"
         );
         for status in [400u16, 401, 402, 403, 404, 500] {
             assert_eq!(
-                check_fallback_error(status, "boom", 7).new_backoff_level,
+                check_fallback_error(status, "boom", 7, None).new_backoff_level,
                 None,
                 "status {status} must leave the level alone"
             );
@@ -1555,13 +1723,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unmatched_400_locks_the_account_for_30s_not_two_minutes() {
-        let decision = check_fallback_error(400, "invalid request: tool schema too long", 0);
-        assert_eq!(
-            decision.cooldown, TRANSIENT_COOLDOWN,
-            "9router TRANSIENT_COOLDOWN_MS"
-        );
-        assert!(decision.should_fallback, "the next account is still tried");
+    fn an_unmatched_400_is_request_scoped_with_zero_cooldown() {
+        // 9router accountFallback.js:48-61 — supersedes the earlier
+        // "30 s transient" reading: a request-caused 4xx cools NOTHING down.
+        let decision = check_fallback_error(400, "invalid request: tool schema too long", 0, None);
+        assert!(decision.request_scoped);
+        assert!(!decision.should_fallback);
+        assert_eq!(decision.cooldown, Duration::ZERO);
     }
 
     #[test]
@@ -1569,11 +1737,11 @@ mod tests {
         // The ordered walk is intact: 400 has no status rule, so the message
         // is what decides — and 9router sends this one to the long cooldown.
         assert_eq!(
-            check_fallback_error(400, "improperly formed request", 0).cooldown,
+            check_fallback_error(400, "improperly formed request", 0, None).cooldown,
             Duration::from_secs(120)
         );
         assert_eq!(
-            check_fallback_error(400, "request not allowed", 0).cooldown,
+            check_fallback_error(400, "request not allowed", 0, None).cooldown,
             SHORT_COOLDOWN
         );
     }
@@ -1609,6 +1777,7 @@ mod tests {
                     }
                 }
             },
+            |result, _is_last| async move { ComboOkVerdict::Accept(result) },
         )
         .await
         .map(|_: String| ());
@@ -1885,10 +2054,14 @@ mod tests {
         };
 
         for (error, expect_retry) in [(header_only, false), (with_body, true)] {
-            let result = iterate_combo_models(&models, &mut |_: &str| {
-                let error = error.clone();
-                async move { Err::<String, _>(error) }
-            })
+            let result = iterate_combo_models(
+                &models,
+                &mut |_: &str| {
+                    let error = error.clone();
+                    async move { Err::<String, _>(error) }
+                },
+                &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+            )
             .await;
             let failure = result.expect_err("both members fail in this fixture");
             assert_eq!(
@@ -1897,5 +2070,272 @@ mod tests {
                 "a header-only retry signal must not become the combo's"
             );
         }
+    }
+
+    // --- Beads eidj.13 / 4d5h.17: request-scoped 4xx ---
+
+    fn scoped_error(status: u16, message: &str, body: &str) -> ComboAttemptError {
+        ComboAttemptError {
+            status,
+            message: message.to_string(),
+            retry_after: None,
+            upstream_body: Some(body.as_bytes().to_vec()),
+            upstream_headers: vec![("x-should-retry".to_string(), "false".to_string())],
+        }
+    }
+
+    #[tokio::test]
+    async fn request_scoped_4xx_advances_without_cooldown() {
+        // Member "a" rejects the REQUEST (context overflow); "b" serves it.
+        // The combo must try "b" — and "a"'s account was never cooled
+        // (decision.request_scoped → should_fallback: false upstream).
+        let models = vec!["a".to_string(), "b".to_string()];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let recorder = attempted.clone();
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let recorder = recorder.clone();
+                let owned = model.to_string();
+                async move {
+                    recorder.lock().push(owned.clone());
+                    if owned == "a" {
+                        Err(scoped_error(
+                            400,
+                            "context overflow: maximum context length",
+                            r#"{"error":{"message":"context overflow"}}"#,
+                        ))
+                    } else {
+                        Ok::<_, ComboAttemptError>(owned)
+                    }
+                }
+            },
+            &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+        )
+        .await;
+
+        assert_eq!(result, Ok("b".to_string()));
+        assert_eq!(attempted.lock().clone(), vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn all_members_failing_returns_first_scoped_verbatim() {
+        // 9router combo.js:617-627 — the FIRST request-scoped response is
+        // handed back verbatim (status + body), not the synthesized
+        // last-error envelope.
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move {
+                    match owned.as_str() {
+                        "a" => Err(scoped_error(
+                            400,
+                            "context overflow",
+                            r#"{"error":{"message":"context overflow: too long"}}"#,
+                        )),
+                        "b" => Err(ComboAttemptError::new(500, "upstream exploded")),
+                        _ => Err(scoped_error(
+                            422,
+                            "unsupported parameter",
+                            r#"{"error":{"message":"bad param"}}"#,
+                        )),
+                    }
+                }
+            },
+            &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+        )
+        .await
+        .expect_err("every member fails");
+
+        assert_eq!(result.status, 400, "first scoped status wins verbatim");
+        assert_eq!(result.message, "context overflow");
+        assert_eq!(
+            result.upstream_body.as_deref(),
+            Some(br#"{"error":{"message":"context overflow: too long"}}"#.as_slice()),
+            "the scoped member's own body is preserved verbatim"
+        );
+        assert_eq!(
+            result.upstream_headers,
+            vec![("x-should-retry".to_string(), "false".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_scoped_failures_still_synthesize_the_combo_error() {
+        // No request-scoped member → the ordinary synthesized error path is
+        // unchanged (first failure status + last failure message).
+        let models = vec!["a".to_string(), "b".to_string()];
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move {
+                    if owned == "a" {
+                        Err(ComboAttemptError::new(503, "rate limited"))
+                    } else {
+                        Err(ComboAttemptError::new(500, "upstream exploded"))
+                    }
+                }
+            },
+            &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+        )
+        .await
+        .expect_err("every member fails");
+
+        assert_eq!(result.status, 503, "first failure status is kept");
+        assert_eq!(result.message, "upstream exploded");
+    }
+
+    // --- Bead eidj.12 / 4d5h.16: zero-usable-content failover ---
+
+    #[tokio::test]
+    async fn empty_content_first_member_falls_through_to_second() {
+        // eidj.12's acceptance test: a combo whose first member returns an
+        // empty assistant message falls through to the second member.
+        let models = vec!["a".to_string(), "b".to_string()];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let recorder = attempted.clone();
+        let mut calls = 0usize;
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let recorder = recorder.clone();
+                let owned = model.to_string();
+                async move {
+                    recorder.lock().push(owned.clone());
+                    Ok::<_, ComboAttemptError>(owned)
+                }
+            },
+            &mut |result: String, is_last: bool| {
+                calls += 1;
+                let result = result.clone();
+                async move {
+                    if calls == 1 && !is_last {
+                        // First member: 200 with zero usable content.
+                        ComboOkVerdict::Empty {
+                            result,
+                            failure: ComboAttemptError::new(200, "Zero usable content"),
+                            finish_reason: None,
+                        }
+                    } else {
+                        ComboOkVerdict::Accept(result)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok("b".to_string()));
+        assert_eq!(attempted.lock().clone(), vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn empty_content_on_last_member_returns_as_is() {
+        // Upstream combo.js:536 — the LAST candidate's empty response is
+        // returned as-is rather than manufacturing a 5xx.
+        let models = vec!["a".to_string()];
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move { Ok::<_, ComboAttemptError>(owned) }
+            },
+            &mut |result: String, _is_last: bool| async move {
+                ComboOkVerdict::Empty {
+                    result,
+                    failure: ComboAttemptError::new(502, "empty generation (stop)"),
+                    finish_reason: Some("stop".to_string()),
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok("a".to_string()));
+    }
+
+    #[tokio::test]
+    async fn no_retry_finish_returns_empty_as_is() {
+        // content_filter is a legitimately-empty class — never retried,
+        // even on a non-last member (emptyFailover.js isNoRetryFinish).
+        let models = vec!["a".to_string(), "b".to_string()];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let recorder = attempted.clone();
+        let mut calls = 0usize;
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let recorder = recorder.clone();
+                let owned = model.to_string();
+                async move {
+                    recorder.lock().push(owned.clone());
+                    Ok::<_, ComboAttemptError>(owned)
+                }
+            },
+            &mut |result: String, _is_last: bool| {
+                calls += 1;
+                let result = result.clone();
+                async move {
+                    if calls == 1 {
+                        ComboOkVerdict::Empty {
+                            result,
+                            failure: ComboAttemptError::new(
+                                502,
+                                "empty generation (content_filter)",
+                            ),
+                            finish_reason: Some("content_filter".to_string()),
+                        }
+                    } else {
+                        ComboOkVerdict::Accept(result)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok("a".to_string()));
+        assert_eq!(
+            attempted.lock().clone(),
+            vec!["a"],
+            "no failover on content_filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_then_scoped_returns_scoped_verbatim() {
+        // Member "a" streams empty (synthetic 502 failure), member "b"
+        // rejects the request itself — the scoped response still wins
+        // verbatim, exactly like upstream's requestScopedResult precedence.
+        let models = vec!["a".to_string(), "b".to_string()];
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move {
+                    if owned == "a" {
+                        Ok::<_, ComboAttemptError>(owned)
+                    } else {
+                        Err(scoped_error(400, "context overflow", r#"{"e":1}"#))
+                    }
+                }
+            },
+            &mut |result: String, is_last: bool| async move {
+                if result == "a" && !is_last {
+                    ComboOkVerdict::Empty {
+                        result,
+                        failure: ComboAttemptError::new(502, "empty generation (stop)"),
+                        finish_reason: Some("stop".to_string()),
+                    }
+                } else {
+                    ComboOkVerdict::Accept(result)
+                }
+            },
+        )
+        .await
+        .expect_err("member b fails request-scoped");
+
+        assert_eq!(result.status, 400);
+        assert_eq!(result.message, "context overflow");
     }
 }

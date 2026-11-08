@@ -33,6 +33,7 @@ pub mod provider_filters;
 mod provider_model_tests;
 mod provider_models;
 pub mod provider_nodes;
+mod provider_overrides;
 mod provider_validate;
 pub mod providers;
 pub mod pxpipe;
@@ -41,6 +42,7 @@ pub mod sanitization;
 pub mod settings_payload_rules;
 pub mod shutdown;
 pub mod stt;
+pub mod stt_gemini_live;
 pub mod tags;
 pub mod translator;
 pub mod tunnel;
@@ -1609,7 +1611,31 @@ async fn list_combos_api(State(state): State<AppState>, headers: HeaderMap) -> R
     }
 
     let snapshot = state.db.snapshot();
-    Json(json!({ "combos": snapshot.combos.clone() })).into_response()
+    // 9router dashboard combos page resolves `aggregateComboCapabilities` per
+    // card client-side; OpenProxy computes it server-side so the Combos page
+    // can render the same capability envelope without a second lookup
+    // (capabilities.js:683-720, 5c217d3). `comboByName` covers every stored
+    // combo so nested bare-name seats resolve recursively.
+    let combo_lookup: std::collections::HashMap<String, Vec<String>> = snapshot
+        .combos
+        .iter()
+        .map(|combo| (combo.name.clone(), combo.models.clone()))
+        .collect();
+    let combos: Vec<serde_json::Value> = snapshot
+        .combos
+        .iter()
+        .map(|combo| {
+            let mut value = serde_json::to_value(combo).unwrap_or_default();
+            if let Some(caps) = crate::core::combo::capabilities::aggregate_combo_capabilities(
+                &combo.models,
+                Some(&combo_lookup),
+            ) {
+                value["capabilities"] = crate::core::combo::capabilities::capabilities_json(&caps);
+            }
+            value
+        })
+        .collect();
+    Json(json!({ "combos": combos })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1983,11 +2009,8 @@ async fn resolve_combo_preset_items(state: &AppState, source: &str) -> Vec<Combo
         _ => Vec::new(),
     };
     let snapshot = state.db.snapshot();
-    let existing: std::collections::HashSet<&str> = snapshot
-        .combos
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
+    let existing: std::collections::HashSet<&str> =
+        snapshot.combos.iter().map(|c| c.name.as_str()).collect();
     raw.into_iter()
         .map(|(name, models)| ComboPresetItem {
             exists: existing.contains(name.as_str()),
@@ -2227,11 +2250,7 @@ async fn create_key_api(
         Some(value) => match crate::core::key_access::validate_key_access_input(value) {
             Ok(access) => access,
             Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": error })),
-                )
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
             }
         },
         None => crate::types::KeyAccess::default(),
@@ -2322,11 +2341,7 @@ async fn update_key_api(
         Some(value) => match crate::core::key_access::validate_key_access_input(value) {
             Ok(access) => Some(access),
             Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": error })),
-                )
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
             }
         },
         None => None,
@@ -2790,6 +2805,7 @@ struct UpdateSettingsRequest {
     tunnel_provider: Option<String>,
     sticky_round_robin_limit: Option<u32>,
     provider_strategies: Option<BTreeMap<String, crate::types::ProviderStrategyEntry>>,
+    provider_overrides: Option<BTreeMap<String, crate::types::ProviderHeaderOverride>>,
     combo_strategy: Option<String>,
     combo_strategies: Option<BTreeMap<String, crate::types::ComboStrategyEntry>>,
     mitm_router_base_url: Option<String>,
@@ -2837,6 +2853,10 @@ struct UpdateSettingsRequest {
     headroom_kompress: Option<bool>,
     ponytail_enabled: Option<bool>,
     ponytail_level: Option<String>,
+    /// 9router's Token Saver "Custom system prompt" keys
+    /// (settingsRepo.js:62-63) — typed fields, not `extra`.
+    custom_prompt_enabled: Option<bool>,
+    custom_prompt: Option<String>,
     pxpipe_enabled: Option<bool>,
     pxpipe_auto_install: Option<bool>,
     pxpipe_min_chars: Option<u32>,
@@ -3024,6 +3044,9 @@ async fn update_settings_api(
             if let Some(v) = req.provider_strategies {
                 db.settings.provider_strategies = v;
             }
+            if let Some(v) = req.provider_overrides {
+                db.settings.provider_overrides = v;
+            }
             if let Some(v) = req.combo_strategy {
                 db.settings.combo_strategy = v;
             }
@@ -3161,6 +3184,12 @@ async fn update_settings_api(
             }
             if let Some(v) = req.ponytail_level {
                 db.settings.ponytail_level = v;
+            }
+            if let Some(v) = req.custom_prompt_enabled {
+                db.settings.custom_prompt_enabled = v;
+            }
+            if let Some(v) = req.custom_prompt {
+                db.settings.custom_prompt = v;
             }
             if let Some(v) = req.pxpipe_enabled {
                 db.settings.pxpipe_enabled = v;
@@ -3372,6 +3401,9 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     if source.tunnel_dashboard_access != target.tunnel_dashboard_access {
         target.tunnel_dashboard_access = source.tunnel_dashboard_access;
     }
+    if source.provider_overrides != target.provider_overrides {
+        target.provider_overrides = source.provider_overrides.clone();
+    }
     if source.provider_strategies != target.provider_strategies {
         target.provider_strategies = source.provider_strategies.clone();
     }
@@ -3469,6 +3501,12 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     }
     if source.ponytail_level != target.ponytail_level {
         target.ponytail_level = source.ponytail_level.clone();
+    }
+    if source.custom_prompt_enabled != target.custom_prompt_enabled {
+        target.custom_prompt_enabled = source.custom_prompt_enabled;
+    }
+    if source.custom_prompt != target.custom_prompt {
+        target.custom_prompt = source.custom_prompt.clone();
     }
     for (key, value) in &source.extra {
         target.extra.insert(key.clone(), value.clone());

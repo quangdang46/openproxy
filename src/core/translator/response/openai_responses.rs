@@ -211,6 +211,11 @@ fn close_reasoning(state: &mut serde_json::Map<String, Value>, events: &mut Vec<
                 "part": {"type": "summary_text", "text": reasoning_buf}
             }),
         );
+        let item = serde_json::json!({
+            "id": reasoning_id,
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": reasoning_buf}]
+        });
         emit(
             events,
             state,
@@ -218,13 +223,10 @@ fn close_reasoning(state: &mut serde_json::Map<String, Value>, events: &mut Vec<
             serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": reasoning_idx,
-                "item": {
-                    "id": reasoning_id,
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": reasoning_buf}]
-                }
+                "item": item
             }),
         );
+        record_completed_output_item(state, reasoning_idx, item);
     }
 }
 
@@ -284,6 +286,12 @@ fn close_message(
             "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}
         }),
     );
+    let item = serde_json::json!({
+        "id": msg_id,
+        "type": "message",
+        "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}],
+        "role": "assistant"
+    });
     emit(
         events,
         state,
@@ -291,14 +299,10 @@ fn close_message(
         serde_json::json!({
             "type": "response.output_item.done",
             "output_index": idx_num,
-            "item": {
-                "id": msg_id,
-                "type": "message",
-                "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}],
-                "role": "assistant"
-            }
+            "item": item
         }),
     );
+    record_completed_output_item(state, idx_num, item);
 }
 
 fn close_tool_call(
@@ -385,6 +389,23 @@ fn close_tool_call(
             }),
         );
     }
+    let item = if custom {
+        serde_json::json!({
+            "id": format!("ctc_{}", call_id),
+            "type": "custom_tool_call",
+            "input": extract_custom_tool_input(&args),
+            "call_id": call_id,
+            "name": name
+        })
+    } else {
+        serde_json::json!({
+            "id": format!("fc_{}", call_id),
+            "type": "function_call",
+            "arguments": args,
+            "call_id": call_id,
+            "name": name
+        })
+    };
     emit(
         events,
         state,
@@ -392,47 +413,155 @@ fn close_tool_call(
         serde_json::json!({
             "type": "response.output_item.done",
             "output_index": idx_num,
-            "item": if custom {
-                serde_json::json!({
-                    "id": format!("ctc_{}", call_id),
-                    "type": "custom_tool_call",
-                    "input": extract_custom_tool_input(&args),
-                    "call_id": call_id,
-                    "name": name
-                })
-            } else {
-                serde_json::json!({
-                    "id": format!("fc_{}", call_id),
-                    "type": "function_call",
-                    "arguments": args,
-                    "call_id": call_id,
-                    "name": name
-                })
-            }
+            "item": item
         }),
     );
+    record_completed_output_item(state, idx_num, item);
+}
+
+/// Upstream Chat Completions usage -> Responses API usage shape
+/// (9router open-sse/translator/response/openai-responses.js `toResponsesUsage`).
+///
+/// Stored under `state.responsesUsage`, NOT `state.usage`: `state.usage` is
+/// owned by the stream layer for logging/cost accounting. Returns `None` for
+/// missing usage AND for zeroed placeholders some upstreams attach to every
+/// chunk — `response.completed` must wait for the real usage trailer rather
+/// than freeze the placeholder (upstream da00465).
+fn to_responses_usage(usage: &Value) -> Option<Value> {
+    let u = usage.as_object()?;
+    let pick_u64 = |keys: &[&str]| -> Option<u64> {
+        keys.iter().find_map(|k| u.get(*k).and_then(Value::as_u64))
+    };
+    let input_tokens = pick_u64(&["input_tokens", "prompt_tokens"])?;
+    let output_tokens = pick_u64(&["output_tokens", "completion_tokens"])?;
+    if input_tokens + output_tokens == 0 {
+        return None;
+    }
+    let mut response_usage = serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    });
+    // cached_tokens / reasoning_tokens live under *_tokens_details on both
+    // the Responses and Chat Completions spellings.
+    let details_pick = |outer: &[&str], inner: &str| -> Option<u64> {
+        outer
+            .iter()
+            .find_map(|k| u.get(*k).and_then(|d| d.get(inner)).and_then(Value::as_u64))
+    };
+    if let Some(cached) = details_pick(
+        &["input_tokens_details", "prompt_tokens_details"],
+        "cached_tokens",
+    ) {
+        response_usage["input_tokens_details"] = serde_json::json!({"cached_tokens": cached});
+    }
+    if let Some(reasoning) = details_pick(
+        &["output_tokens_details", "completion_tokens_details"],
+        "reasoning_tokens",
+    ) {
+        response_usage["output_tokens_details"] =
+            serde_json::json!({"reasoning_tokens": reasoning});
+    }
+    Some(response_usage)
+}
+
+/// Record a finished output item for `response.completed.response.output`
+/// (9router `recordCompletedOutputItem`, openai-responses.js). Keyed by
+/// output_index so a repeated close overwrites rather than duplicating.
+fn record_completed_output_item(
+    state: &mut serde_json::Map<String, Value>,
+    output_index: u64,
+    item: Value,
+) {
+    let map = state
+        .entry("completedOutputItems".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let Some(obj) = map.as_object_mut() {
+        obj.insert(output_index.to_string(), item);
+    }
+}
+
+/// The finished items in output_index order (9router
+/// `collectCompletedOutputItems`).
+fn collect_completed_output_items(state: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let Some(obj) = state.get("completedOutputItems").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut keyed: Vec<(u64, Value)> = obj
+        .iter()
+        .filter_map(|(k, v)| k.parse::<u64>().ok().map(|n| (n, v.clone())))
+        .collect();
+    keyed.sort_by_key(|(n, _)| *n);
+    keyed.into_iter().map(|(_, v)| v).collect()
 }
 
 fn send_completed(state: &mut serde_json::Map<String, Value>, events: &mut Vec<Value>) {
     if state.get("completedSent").and_then(|v| v.as_bool()) != Some(true) {
         state.insert("completedSent".to_string(), Value::Bool(true));
+        // response.completed carries the finished Response object: it must
+        // repeat the items already delivered via response.output_item.done
+        // (clients that build the final result from the terminal event would
+        // otherwise see an empty turn — upstream issue #4307) and the usage
+        // captured from the trailer (upstream da00465/7111db3).
+        let mut response = serde_json::json!({
+            "id": state.get("responseId").and_then(|v| v.as_str()).unwrap_or(""),
+            "object": "response",
+            "created_at": state.get("created").and_then(|v| v.as_i64()).unwrap_or(0),
+            "status": "completed",
+            "background": false,
+            "error": null,
+            "output": collect_completed_output_items(state),
+        });
+        if let Some(usage) = state.get("responsesUsage") {
+            if usage.is_object() {
+                response["usage"] = usage.clone();
+            }
+        }
         emit(
             events,
             state,
             "response.completed",
             serde_json::json!({
                 "type": "response.completed",
-                "response": {
-                    "id": state.get("responseId").and_then(|v| v.as_str()).unwrap_or(""),
-                    "object": "response",
-                    "created_at": state.get("created").and_then(|v| v.as_i64()).unwrap_or(0),
-                    "status": "completed",
-                    "background": false,
-                    "error": null
-                }
+                "response": response,
             }),
         );
     }
+}
+
+/// Stream-end flush (9router `flushEvents`, openai-responses.js): close every
+/// still-open item, then send `response.completed`. This is also the deferred
+/// completion path — `completionPending` set at finish_reason is resolved here
+/// once the upstream stream has ended and every chunk (including the usage
+/// trailer) has been seen.
+fn flush_events(state: &mut serde_json::Map<String, Value>) -> Vec<Value> {
+    if state.get("completedSent").and_then(|v| v.as_bool()) == Some(true) {
+        return Vec::new();
+    }
+    let mut events: Vec<Value> = Vec::new();
+    if state.get("started").and_then(|v| v.as_bool()) != Some(true) {
+        return events;
+    }
+
+    let msg_keys: Vec<String> = state
+        .get("msgItemAdded")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for k in &msg_keys {
+        close_message(state, &mut events, k);
+    }
+    close_reasoning(state, &mut events);
+    let func_keys: Vec<String> = state
+        .get("funcCallIds")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for k in &func_keys {
+        close_tool_call(state, &mut events, k);
+    }
+    send_completed(state, &mut events);
+    events
 }
 
 /// Tool-call + finish_reason tail of `chat_to_responses_response`, shared by
@@ -630,18 +759,61 @@ fn emit_finish_block(state: &mut serde_json::Map<String, Value>, events: &mut Ve
     for k in &func_keys {
         close_tool_call(state, events, k);
     }
-    send_completed(state, events);
+
+    // Upstreams report usage either on the finish chunk itself or on a
+    // trailing chunk whose `choices` array is empty (OpenAI does the latter).
+    // Emitting response.completed here would freeze the payload before that
+    // trailing chunk is parsed, so when usage is not known yet we defer to
+    // flush_events(), which runs once the upstream stream ends — or to the
+    // usage-trailer branch in chat_to_responses_response.
+    //
+    // That only holds on the direct openai→openai-responses route: on the
+    // second hop of a pivot the terminal null chunk never reaches this
+    // transform, so deferring would swallow response.completed entirely.
+    // `targetFormat` is injected by the registry (the TRUE upstream format);
+    // absent/unknown means "do not defer" (upstream
+    // openai-responses.js finish_reason arm, flushReachesUs check).
+    let has_usage = state.get("responsesUsage").is_some();
+    let flush_reaches_us = state.get("targetFormat").and_then(Value::as_str) == Some("openai");
+    if has_usage || !flush_reaches_us {
+        send_completed(state, events);
+    } else {
+        state.insert("completionPending".to_string(), Value::Bool(true));
+    }
 }
 
 pub fn chat_to_responses_response(
     chunk: &Value,
     state: &mut serde_json::Map<String, Value>,
 ) -> Vec<Value> {
+    // Terminal null chunk = stream end (9router `if (!chunk)
+    // return flushEvents(state)`): close open items and emit the deferred
+    // response.completed.
+    if chunk.is_null() {
+        return flush_events(state);
+    }
+
+    // Capture usage BEFORE the choices guard: OpenAI may send it in a trailer
+    // whose choices array is empty. Zeroed placeholders are rejected inside
+    // to_responses_usage so they cannot freeze the count.
+    if let Some(usage) = chunk.get("usage") {
+        if let Some(response_usage) = to_responses_usage(usage) {
+            state.insert("responsesUsage".to_string(), response_usage);
+        }
+    }
+
     if chunk
         .get("choices")
         .and_then(|v| v.as_array())
         .is_none_or(|a| a.is_empty())
     {
+        // Usage trailer after a deferred finish_reason: emit the pending
+        // response.completed now that real counts are known.
+        if state.get("completionPending").and_then(|v| v.as_bool()) == Some(true)
+            && state.get("responsesUsage").is_some()
+        {
+            return flush_events(state);
+        }
         return vec![];
     }
 
@@ -1340,12 +1512,19 @@ pub fn chat_to_responses_streaming(
                 .unwrap_or(line)
         }
     };
-    if payload.is_empty() || payload == "[DONE]" {
+    if payload.is_empty() {
         return vec![];
     }
-    let val: Value = match serde_json::from_str(payload) {
-        Ok(v) => v,
-        Err(_) => return vec![],
+    // [DONE] ends the deferred-completion wait even if the upstream keeps the
+    // HTTP connection open (9router stream.js:341) — flush the pending
+    // response.completed now rather than at EOF.
+    let val: Value = if payload == "[DONE]" {
+        Value::Null
+    } else {
+        match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return vec![],
+        }
     };
     let inner = &mut state.responses.state;
     let events = chat_to_responses_response(&val, inner);
@@ -1777,5 +1956,169 @@ mod tests {
             "custom close: {s2}"
         );
         assert!(s2.contains("\"input\":\"ls\""), "unwrapped input: {s2}");
+    }
+
+    // ── Deferred response.completed (9router da00465/7111db3/273f0c3) ──
+
+    fn completed_events(events: &[Value]) -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|e| {
+                e.get("event").and_then(|v| v.as_str()) == Some("response.completed")
+                    || e.get("type").and_then(|v| v.as_str()) == Some("response.completed")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completed_carries_usage_and_output_items() {
+        // finish_reason chunk that already carries usage: response.completed
+        // must repeat the streamed output items AND the usage block.
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("openai".into()));
+        let content = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
+        });
+        let done = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+        let _ = chat_to_responses_response(&content, &mut state.responses.state);
+        let events = chat_to_responses_response(&done, &mut state.responses.state);
+        let completed = completed_events(&events);
+        assert_eq!(completed.len(), 1, "exactly one response.completed");
+        let response = &completed[0]["data"]["response"];
+        assert_eq!(response["usage"]["input_tokens"], 10);
+        assert_eq!(response["usage"]["output_tokens"], 5);
+        assert_eq!(response["usage"]["total_tokens"], 15);
+        let output = response["output"].as_array().expect("output array");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn finish_reason_without_usage_defers_until_usage_trailer() {
+        // OpenAI sends usage on a trailing chunk with an empty choices array.
+        // response.completed must wait for it instead of freezing empty usage.
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("openai".into()));
+        let content = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
+        });
+        let done = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        });
+        let trailer = json!({
+            "id": "x",
+            "choices": [],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3}
+        });
+        let _ = chat_to_responses_response(&content, &mut state.responses.state);
+        let events_done = chat_to_responses_response(&done, &mut state.responses.state);
+        assert!(
+            completed_events(&events_done).is_empty(),
+            "response.completed must be deferred until usage arrives"
+        );
+        assert_eq!(
+            state.responses.state.get("completionPending"),
+            Some(&Value::Bool(true))
+        );
+        let events_trailer = chat_to_responses_response(&trailer, &mut state.responses.state);
+        let completed = completed_events(&events_trailer);
+        assert_eq!(
+            completed.len(),
+            1,
+            "trailer resolves the pending completion"
+        );
+        let response = &completed[0]["data"]["response"];
+        assert_eq!(response["usage"]["input_tokens"], 7);
+        assert_eq!(response["usage"]["output_tokens"], 3);
+        assert_eq!(response["output"][0]["type"], "message");
+    }
+
+    #[test]
+    fn zeroed_placeholder_usage_does_not_freeze_completion() {
+        // Some upstreams attach {prompt_tokens:0, completion_tokens:0} to
+        // every chunk; it must not count as real usage.
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("openai".into()));
+        let content = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        });
+        let done = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}
+        });
+        let trailer = json!({
+            "id": "x",
+            "choices": [],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 6}
+        });
+        let _ = chat_to_responses_response(&content, &mut state.responses.state);
+        let events_done = chat_to_responses_response(&done, &mut state.responses.state);
+        assert!(completed_events(&events_done).is_empty());
+        let events_trailer = chat_to_responses_response(&trailer, &mut state.responses.state);
+        let completed = completed_events(&events_trailer);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["data"]["response"]["usage"]["input_tokens"], 4);
+    }
+
+    #[test]
+    fn null_chunk_flushes_deferred_completion() {
+        // Stream end without a usage trailer: the null-chunk flush (upstream
+        // flushEvents) still emits response.completed.
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("openai".into()));
+        let done = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]
+        });
+        let _ = chat_to_responses_response(&done, &mut state.responses.state);
+        assert!(state.responses.state.get("completionPending").is_some());
+        let events = chat_to_responses_response(&Value::Null, &mut state.responses.state);
+        let completed = completed_events(&events);
+        assert_eq!(completed.len(), 1, "flush emits the deferred completed");
+        // Idempotent: a second flush emits nothing.
+        let again = chat_to_responses_response(&Value::Null, &mut state.responses.state);
+        assert!(completed_events(&again).is_empty());
+    }
+
+    #[test]
+    fn pivot_target_does_not_defer() {
+        // Second hop of a pivot (targetFormat != openai): the null chunk never
+        // reaches this transform, so response.completed must be emitted at
+        // finish_reason as before.
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("targetFormat".to_string(), Value::String("claude".into()));
+        let done = json!({
+            "id": "x",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        });
+        let events = chat_to_responses_response(&done, &mut state.responses.state);
+        assert_eq!(completed_events(&events).len(), 1);
+        assert!(state.responses.state.get("completionPending").is_none());
     }
 }

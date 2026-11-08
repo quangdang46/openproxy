@@ -37,6 +37,11 @@ function parseLine(
   opts: { isCloudflareAi?: boolean } = {},
 ): ParsedBulkLine | null {
   const { isCloudflareAi = false } = opts;
+  // Muse Code subscription keys are opaque LLM|id|secret tokens — keep the
+  // whole line verbatim as the apiKey instead of pipe-splitting it.
+  if (!isCloudflareAi && /^LLM\|/i.test(line.trim())) {
+    return { baseName: "LLM", apiKey: line.trim() };
+  }
   const parts = line.split("|");
 
   if (isCloudflareAi && parts.length >= 3) {

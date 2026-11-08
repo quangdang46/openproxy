@@ -126,6 +126,11 @@ impl ProviderExecutor for CodeBuddyCNExecutor {
             HeaderValue::from_static("text/event-stream"),
         );
 
+        // 9router HEADER_HOOKS.codebuddyHeaders (default.js:53-60): the CN
+        // gateway's channel check rejects requests without the plugin's
+        // X-Request-ID / X-Conversation-* ids (400 / 11128 "request illegal").
+        super::default::apply_codebuddy_channel_headers(&mut headers);
+
         Ok(headers)
     }
 
@@ -463,6 +468,60 @@ mod tests {
                 .get(reqwest::header::ACCEPT)
                 .and_then(|v| v.to_str().ok()),
             Some("text/event-stream")
+        );
+    }
+
+    // --- openproxy-4d5h.43: channel-check identity headers ---
+
+    #[test]
+    fn test_build_headers_sends_codebuddy_channel_ids() {
+        let executor = CodeBuddyCNExecutor::new(Arc::new(ClientPool::new()), None);
+        let mut creds = ProviderConnection::default();
+        creds.access_token = Some("TESTTOKEN".to_string());
+        let headers = executor.build_headers(&creds, true).unwrap();
+
+        let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        for name in [
+            "x-request-id",
+            "x-conversation-id",
+            "x-conversation-request-id",
+            "x-conversation-message-id",
+        ] {
+            assert!(
+                get(name).is_some_and(|v| !v.is_empty()),
+                "codebuddy-cn must send {name}"
+            );
+        }
+        // One request id shared across the request/conversation pair;
+        // conversation id is distinct (upstream channel-headers test).
+        assert_eq!(get("x-request-id"), get("x-conversation-request-id"));
+        assert_eq!(get("x-request-id"), get("x-conversation-message-id"));
+        assert_ne!(get("x-conversation-id"), get("x-conversation-message-id"));
+        // Bearer auth still applied.
+        assert_eq!(
+            headers
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer TESTTOKEN")
+        );
+    }
+
+    #[test]
+    fn test_channel_ids_are_fresh_per_request() {
+        let executor = CodeBuddyCNExecutor::new(Arc::new(ClientPool::new()), None);
+        let mut creds = ProviderConnection::default();
+        creds.api_key = Some("sk-test".to_string());
+        let a = executor.build_headers(&creds, true).unwrap();
+        let b = executor.build_headers(&creds, true).unwrap();
+        assert_ne!(
+            a.get("x-request-id"),
+            b.get("x-request-id"),
+            "fresh request id per call"
+        );
+        assert_ne!(
+            a.get("x-conversation-id"),
+            b.get("x-conversation-id"),
+            "fresh conversation id per call"
         );
     }
 }

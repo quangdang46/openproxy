@@ -130,9 +130,62 @@ pub fn cloak_claude_tools(body: &Value) -> CloakedRequest {
     }
 }
 
+/// Claude Code's native tool names, exposed as decoys. Mirrors upstream
+/// `CC_DEFAULT_TOOLS` (`open-sse/config/appConstants.js`) — the same set
+/// backs both the injected decoy tools and the decloak suffix-strip
+/// guard (decoy names must reach the client unresolved).
+const CC_DEFAULT_TOOL_NAMES: &[&str] = &[
+    "Task",
+    "TaskOutput",
+    "TaskStop",
+    "TaskCreate",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskList",
+    "Bash",
+    "Glob",
+    "Grep",
+    "Read",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "AskUserQuestion",
+    "Skill",
+    "EnterPlanMode",
+    "ExitPlanMode",
+];
+
+fn is_cc_default_tool(name: &str) -> bool {
+    CC_DEFAULT_TOOL_NAMES.contains(&name)
+}
+
+/// Port of `stripCloakSuffix` (`open-sse/utils/claudeCloaking.js`): strip a
+/// trailing [`CLAUDE_TOOL_SUFFIX`] from a cloaked name as a last-resort
+/// fallback when the name isn't in `tool_name_map` (e.g. the map was lost
+/// across a retry/reconnect). Never strips decoy names — those are meant to
+/// reach the client unresolved so it can see "tool unavailable" instead of
+/// silently no-oping. Returns `None` when the name is not a cloak leftover.
+pub fn strip_cloak_suffix(name: &str) -> Option<String> {
+    if !name.ends_with(CLAUDE_TOOL_SUFFIX) || is_cc_default_tool(name) {
+        return None;
+    }
+    let original = &name[..name.len() - CLAUDE_TOOL_SUFFIX.len()];
+    if original.is_empty() {
+        None
+    } else {
+        Some(original.to_string())
+    }
+}
+
 /// Reverse the cloaking: walk a non-streaming Claude response body and
 /// strip the `_ide` suffix from every `tool_use` block whose name is in
 /// `tool_name_map`.
+///
+/// When the map has no entry for a name, falls back to
+/// [`strip_cloak_suffix`] rather than forwarding an unresolvable
+/// `<tool>_ide` name to the client (upstream `decloakToolNames`, b65d2d0).
 pub fn decloak_tool_names(body: &Value, tool_name_map: &BTreeMap<String, String>) -> Value {
     let Some(content) = body.get("content").and_then(|v| v.as_array()) else {
         return body.clone();
@@ -147,12 +200,16 @@ pub fn decloak_tool_names(body: &Value, tool_name_map: &BTreeMap<String, String>
             let Some(name) = block.get("name").and_then(|v| v.as_str()) else {
                 return block.clone();
             };
-            let Some(original) = tool_name_map.get(name) else {
+            let resolved = tool_name_map
+                .get(name)
+                .cloned()
+                .or_else(|| strip_cloak_suffix(name));
+            let Some(original) = resolved else {
                 return block.clone();
             };
             let mut updated = block.clone();
             if let Some(obj) = updated.as_object_mut() {
-                obj.insert("name".to_string(), Value::String(original.clone()));
+                obj.insert("name".to_string(), Value::String(original));
             }
             updated
         })
@@ -265,29 +322,7 @@ fn clean_session_id(s: &str) -> Option<String> {
 fn cc_decoy_tools() -> &'static [Value] {
     use once_cell::sync::Lazy;
     static DECOYS: Lazy<Vec<Value>> = Lazy::new(|| {
-        const NAMES: &[&str] = &[
-            "Task",
-            "TaskOutput",
-            "TaskStop",
-            "TaskCreate",
-            "TaskGet",
-            "TaskUpdate",
-            "TaskList",
-            "Bash",
-            "Glob",
-            "Grep",
-            "Read",
-            "Edit",
-            "Write",
-            "NotebookEdit",
-            "WebFetch",
-            "WebSearch",
-            "AskUserQuestion",
-            "Skill",
-            "EnterPlanMode",
-            "ExitPlanMode",
-        ];
-        NAMES
+        CC_DEFAULT_TOOL_NAMES
             .iter()
             .map(|n| {
                 json!({
@@ -352,6 +387,35 @@ mod tests {
         let res = decloak_tool_names(&body, &map);
         assert_eq!(res["content"][0]["name"], "WebSearch");
         assert_eq!(res["content"][1]["text"], "hello");
+    }
+
+    #[test]
+    fn decloak_falls_back_to_suffix_strip_when_map_misses() {
+        // Map lost across a retry: unmapped `something_ide` still decloaks.
+        let map = BTreeMap::new();
+        let body = json!({
+            "content": [
+                {"type": "tool_use", "name": "something_ide", "id": "x"},
+                {"type": "tool_use", "name": "plain_name", "id": "y"},
+                {"type": "tool_use", "name": "WebSearch", "id": "z"},
+            ]
+        });
+        let res = decloak_tool_names(&body, &map);
+        assert_eq!(res["content"][0]["name"], "something");
+        // No `_ide` suffix → untouched.
+        assert_eq!(res["content"][1]["name"], "plain_name");
+        // Decoy names are never suffixed, so they pass through as-is.
+        assert_eq!(res["content"][2]["name"], "WebSearch");
+    }
+
+    #[test]
+    fn strip_cloak_suffix_guards() {
+        assert_eq!(strip_cloak_suffix("foo_ide").as_deref(), Some("foo"));
+        assert_eq!(strip_cloak_suffix("foo").as_deref(), None);
+        assert_eq!(strip_cloak_suffix("_ide").as_deref(), None);
+        // A decoy name can never carry the suffix, but the guard mirrors
+        // upstream `CC_DEFAULT_TOOLS.has(name)` verbatim.
+        assert_eq!(strip_cloak_suffix("WebSearch").as_deref(), None);
     }
 
     #[test]

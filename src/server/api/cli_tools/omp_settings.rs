@@ -40,7 +40,10 @@ struct SaveOmpSettingsRequest {
     api_key: Option<String>,
 }
 
-pub(super) async fn get_omp_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn get_omp_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(response) = super::super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
@@ -72,7 +75,11 @@ async fn save_omp_settings(
         return response;
     }
 
-    let Some(base_url) = body.base_url.filter(|value| !value.trim().is_empty()) else {
+    let Some(base_url) = body
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "baseUrl is required" })),
@@ -80,7 +87,7 @@ async fn save_omp_settings(
             .into_response();
     };
 
-    match write_omp_settings(&state, &body, &base_url).await {
+    match write_omp_settings(&state, &body, base_url).await {
         Ok(config_path) => Json(json!({
             "success": true,
             "message": "Oh My Pi settings applied! Run 'omp' and all 9Router models appear under 9router in /model.",

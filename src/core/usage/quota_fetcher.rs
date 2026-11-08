@@ -3658,10 +3658,92 @@ pub fn ollama_ratio_quota(usage_ratio: f64) -> Value {
     })
 }
 
+/// Ollama Cloud `/api/balance` quota rows (9router v0.5.109 #5026,
+/// `services/usage/misc.js` balance fallback). Used only when `/api/usage`
+/// reports no `limits` quotas. Parses four credit buckets:
+///
+/// * `included.session` / `included.weekly` → `remaining_percent` +
+///   `resets_at` → "Session (5h)" / "Weekly (7d)" bars.
+/// * `included.allowance_usd` + `included.balance_usd` → "Allowance ($)".
+/// * `purchased.balance_usd > 0` → "Purchased Credits".
+///
+/// Split out as a pure function for unit tests.
+pub fn ollama_balance_quotas(balance: &Value) -> serde_json::Map<String, Value> {
+    let mut quotas = serde_json::Map::new();
+    let inc = balance.get("included").filter(|v| v.is_object());
+
+    let mut pct_quota = |bucket: &Value, label: &str| {
+        let rem = bucket.get("remaining_percent").and_then(Value::as_f64);
+        let rem_pct = rem.map(|r| r.clamp(0.0, 100.0)).unwrap_or(100.0);
+        let used = ((100.0 - rem_pct) * 100.0).round() / 100.0;
+        quotas.insert(
+            label.to_string(),
+            json!({
+                "used": used,
+                "total": 100,
+                "remainingPercentage": rem_pct,
+                "resetAt": bucket.get("resets_at").cloned().unwrap_or(Value::Null),
+                "unlimited": false,
+            }),
+        );
+    };
+
+    if let Some(session) = inc.and_then(|i| i.get("session")).filter(|v| v.is_object()) {
+        pct_quota(session, "Session (5h)");
+    }
+    if let Some(weekly) = inc.and_then(|i| i.get("weekly")).filter(|v| v.is_object()) {
+        pct_quota(weekly, "Weekly (7d)");
+    }
+    if let Some(inc) = inc {
+        let allowance = inc.get("allowance_usd").and_then(Value::as_f64);
+        let balance_usd = inc.get("balance_usd").and_then(Value::as_f64);
+        if let (Some(allowance), Some(balance_usd)) = (allowance, balance_usd) {
+            let allowance = allowance.max(0.0);
+            let balance_usd = balance_usd.max(0.0);
+            let used = ((allowance - balance_usd) * 100.0).round().max(0.0) / 100.0;
+            let rem_pct = if allowance > 0.0 {
+                ((balance_usd / allowance) * 10000.0).round() / 100.0
+            } else {
+                0.0
+            };
+            quotas.insert(
+                "Allowance ($)".to_string(),
+                json!({
+                    "used": used,
+                    "total": allowance,
+                    "remainingPercentage": rem_pct,
+                    "resetAt": inc.pointer("/period/until").cloned().unwrap_or(Value::Null),
+                    "unlimited": false,
+                    "unit": "USD",
+                }),
+            );
+        }
+    }
+    let purchased = balance
+        .pointer("/purchased/balance_usd")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if purchased > 0.0 {
+        quotas.insert(
+            "Purchased Credits".to_string(),
+            json!({
+                "used": 0,
+                "total": purchased,
+                "remainingPercentage": 100,
+                "isCreditBalance": true,
+                "currency": "$",
+            }),
+        );
+    }
+    quotas
+}
+
 /// Live Ollama Cloud quota (9router usage/misc.js getOllamaUsage).
 /// GET `https://ollama.com/api/usage` + best-effort POST `/api/me` for the
 /// plan label. `data.limits.{session,weekly}.usage` are 0..1 ratios →
 /// `{used, total:100, remainingPercentage, resetAt:null, unlimited:false}`.
+/// When `/api/usage` reports no quotas, falls back to GET `/api/balance`
+/// (session 5h / weekly 7d resets, allowance + purchased credits).
 pub async fn fetch_ollama_quota(api_key: &str) -> Value {
     if api_key.is_empty() {
         return json!({ "message": "Ollama Cloud API key not available." });
@@ -3738,22 +3820,41 @@ pub async fn fetch_ollama_quota(api_key: &str) -> Value {
 
     let ratio_quota = |usage_ratio: f64| -> Value { ollama_ratio_quota(usage_ratio) };
 
-    match (session_raw, weekly_raw) {
-        (None, None) => json!({
+    let mut quotas = serde_json::Map::new();
+    if let Some(s) = session_raw {
+        quotas.insert("Session (5h)".to_string(), ratio_quota(s));
+    }
+    if let Some(w) = weekly_raw {
+        quotas.insert("Weekly (7d)".to_string(), ratio_quota(w));
+    }
+
+    // Modern Ollama Cloud API reports limits and remaining credits via
+    // /api/balance — used only when /api/usage yielded no quotas
+    // (9router v0.5.109 #5026).
+    if quotas.is_empty() {
+        if let Ok(resp) = client
+            .get("https://ollama.com/api/balance")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(balance) = resp.json::<Value>().await {
+                    quotas = ollama_balance_quotas(&balance);
+                }
+            }
+        }
+    }
+
+    if quotas.is_empty() {
+        json!({
             "plan": plan,
             "message": "Ollama Cloud connected. No usage limits reported.",
             "quotas": Value::Object(serde_json::Map::new()),
-        }),
-        _ => {
-            let mut quotas = serde_json::Map::new();
-            if let Some(s) = session_raw {
-                quotas.insert("Session (5h)".to_string(), ratio_quota(s));
-            }
-            if let Some(w) = weekly_raw {
-                quotas.insert("Weekly (7d)".to_string(), ratio_quota(w));
-            }
-            json!({ "plan": plan, "quotas": Value::Object(quotas) })
-        }
+        })
+    } else {
+        json!({ "plan": plan, "quotas": Value::Object(quotas) })
     }
 }
 
@@ -4217,6 +4318,258 @@ pub async fn fetch_zed_quota(
     parse_zed_user_usage(&user_info)
 }
 
+// ─── Command Code (openproxy-4d5h.44) ─────────────────────────────────────
+//
+// Port of 9router `open-sse/services/usage/commandcode.js` (v0.5.111):
+// whoami → org.id, then billing/credits + billing/subscriptions in
+// parallel. Short plan ids ("go", "pro", …) normalize to the
+// `individual-*` ids and carry a fixed credit cap.
+
+/// Plan display names (commandcode.js PLAN_NAMES).
+fn commandcode_plan_name(plan_id: &str) -> Option<&'static str> {
+    Some(match plan_id {
+        "individual-go" | "individual-go-v1" => "Go",
+        "individual-goat" => "GOAT",
+        "individual-pro" | "individual-pro-v1" => "Pro",
+        "individual-provider" => "Provider",
+        "individual-max" => "Max",
+        "individual-ultra" => "Ultra",
+        "teams-pro" => "Teams Pro",
+        _ => return None,
+    })
+}
+
+/// Monthly credit caps per plan (commandcode.js PLAN_CAPS).
+fn commandcode_plan_cap(plan_id: &str) -> f64 {
+    match plan_id {
+        "individual-go" | "individual-go-v1" => 10.0,
+        "individual-goat" => 70.0,
+        "individual-pro" => 30.0,
+        "individual-pro-v1" => 80.0,
+        "individual-provider" => 15.0,
+        "individual-max" => 150.0,
+        "individual-ultra" => 300.0,
+        "teams-pro" => 40.0,
+        _ => 0.0,
+    }
+}
+
+/// Short plan-id aliases (commandcode.js PLAN_ID_ALIASES) — "go-v1" style
+/// ids the subscriptions endpoint returns for the short plans.
+fn normalize_commandcode_plan_id(plan_id: &str) -> String {
+    let normalized = plan_id.trim().to_lowercase();
+    match normalized.as_str() {
+        "go" => "individual-go".to_string(),
+        "go-v1" => "individual-go-v1".to_string(),
+        "goat" => "individual-goat".to_string(),
+        "pro" => "individual-pro".to_string(),
+        "provider" => "individual-provider".to_string(),
+        "max" => "individual-max".to_string(),
+        "ultra" => "individual-ultra".to_string(),
+        _ => normalized,
+    }
+}
+
+/// One rate-limit window row (commandcode.js windowQuota). Emits the JS
+/// field set verbatim (percentage / colorPercentage / percentageIsUsed /
+/// emptyMessage) so the dashboard reads it identically.
+fn commandcode_window_quota(win: &Value) -> Option<Value> {
+    if !win.is_object() {
+        return None;
+    }
+    let used = to_finite_number(win.get("used").unwrap_or(&Value::Null), 0.0);
+    let total = to_finite_number(win.get("cap").unwrap_or(&Value::Null), 0.0);
+    if total <= 0.0 && used <= 0.0 {
+        return None;
+    }
+    let pct = if total > 0.0 {
+        ((used / total) * 100.0).round()
+    } else {
+        0.0
+    };
+    let color_pct = if total > 0.0 {
+        (((total - used) / total) * 100.0).round()
+    } else {
+        100.0
+    };
+    let has_reset = win.get("resetAt").map(|v| !v.is_null()).unwrap_or(false);
+    Some(json!({
+        "used": used,
+        "total": total,
+        "percentage": pct,
+        "colorPercentage": color_pct,
+        "percentageIsUsed": true,
+        "remaining": (total - used).max(0.0),
+        "unlimited": false,
+        "resetAt": parse_reset_time(win.get("resetAt").unwrap_or(&Value::Null)),
+        "emptyMessage": if used == 0.0 && !has_reset {
+            Value::String("No usage in this window".to_string())
+        } else {
+            Value::Null
+        },
+    }))
+}
+
+/// Build the Command Code quota payload from whoami/credits/subscriptions
+/// response bodies — pure so tests exercise the plan/cap math without
+/// network. `org_id` may be null (whoami without org).
+fn commandcode_quota_rows(credits_body: &Value, subs_body: &Value) -> Value {
+    let raw_plan_id = subs_body
+        .pointer("/data/planId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let plan_id = raw_plan_id
+        .as_deref()
+        .map(normalize_commandcode_plan_id)
+        .filter(|s| !s.is_empty());
+    let plan = plan_id
+        .as_deref()
+        .and_then(commandcode_plan_name)
+        .map(str::to_string)
+        .or(raw_plan_id.clone())
+        .unwrap_or_else(|| "Command Code".to_string());
+    let cap = plan_id.as_deref().map(commandcode_plan_cap).unwrap_or(0.0);
+
+    let credits = credits_body
+        .get("credits")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let remaining = to_finite_number(credits.get("monthlyCredits").unwrap_or(&Value::Null), 0.0)
+        + to_finite_number(credits.get("purchasedCredits").unwrap_or(&Value::Null), 0.0)
+        + to_finite_number(credits.get("freeCredits").unwrap_or(&Value::Null), 0.0);
+    let used = if cap > 0.0 {
+        (cap - remaining).max(0.0)
+    } else {
+        0.0
+    };
+    let total = if cap > 0.0 { cap } else { remaining };
+
+    let mut quotas = serde_json::Map::new();
+    quotas.insert(
+        "Credits".to_string(),
+        json!({
+            "name": "Monthly",
+            "used": used,
+            "total": total,
+            "percentage": if cap > 0.0 { ((used / cap) * 100.0).round() } else { 0.0 },
+            "colorPercentage": if cap > 0.0 { (remaining / cap * 100.0).round() } else { 100.0 },
+            "percentageIsUsed": true,
+            "remaining": remaining,
+            "unlimited": cap <= 0.0,
+            "resetAt": parse_reset_time(
+                subs_body.pointer("/data/currentPeriodEnd").unwrap_or(&Value::Null)
+            ),
+        }),
+    );
+
+    if let Some(win) = credits_body
+        .pointer("/windowLimits/fiveHour")
+        .and_then(|w| commandcode_window_quota(w))
+    {
+        let mut row = win;
+        row["name"] = Value::String("5-hour limit".to_string());
+        quotas.insert("Session (5h)".to_string(), row);
+    }
+    if let Some(win) = credits_body
+        .pointer("/windowLimits/weekly")
+        .and_then(|w| commandcode_window_quota(w))
+    {
+        let mut row = win;
+        row["name"] = Value::String("Weekly limit".to_string());
+        quotas.insert("Weekly".to_string(), row);
+    }
+
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+
+/// Command Code usage — GET /alpha/whoami?limits=1 then
+/// /alpha/billing/credits + /alpha/billing/subscriptions (Bearer user_… key,
+/// official-CLI header set). Port of 9router getCommandCodeUsage.
+pub async fn fetch_commandcode_quota(api_key: &str) -> Value {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return json!({ "message": "Command Code API key not available. Add a key to view usage." });
+    }
+    let base = std::env::var("COMMAND_CODE_API_BASE_URL")
+        .unwrap_or_else(|_| "https://api.commandcode.ai".to_string());
+    let base = base.trim_end_matches('/');
+
+    // buildCommandCodeHeaders({apiKey, accept:"application/json"}) — the
+    // usage probe speaks JSON, not the NDJSON chat stream.
+    let mut headers = crate::core::executor::build_command_code_headers(Some(key), false, None);
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    let client = http_client();
+    let whoami = match client
+        .get(format!("{base}/alpha/whoami"))
+        .query(&[("limits", "1")])
+        .headers(headers.clone())
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("Command Code error: {e}") });
+        }
+    };
+    let status = whoami.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "plan": "Command Code", "message": "Command Code authentication failed. Check the API key." });
+    }
+    if !(200..300).contains(&status) {
+        return json!({ "plan": "Command Code", "message": format!("Command Code usage API error ({status})") });
+    }
+    let whoami_body: Value = whoami.json().await.unwrap_or_else(|_| json!({}));
+    let org_id = whoami_body
+        .pointer("/org/id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // qs() drops null params — orgId is only sent when whoami returned one.
+    let org_query: Vec<(&str, &str)> = org_id
+        .as_deref()
+        .map(|id| vec![("orgId", id)])
+        .unwrap_or_default();
+    let credits_fut = client
+        .get(format!("{base}/alpha/billing/credits"))
+        .query(&org_query)
+        .headers(headers.clone())
+        .send();
+    let subs_fut = client
+        .get(format!("{base}/alpha/billing/subscriptions"))
+        .query(&org_query)
+        .headers(headers.clone())
+        .send();
+    let (credits_res, subs_res) = tokio::join!(credits_fut, subs_fut);
+
+    let auth_failed = |r: &reqwest::Result<reqwest::Response>| matches!(r, Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403);
+    if auth_failed(&credits_res) || auth_failed(&subs_res) {
+        return json!({ "plan": "Command Code", "message": "Command Code authentication failed. Check the API key." });
+    }
+    let credits_res = match credits_res {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Command Code error: {e}") }),
+    };
+    let subs_res = match subs_res {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Command Code error: {e}") }),
+    };
+    let credits_status = credits_res.status().as_u16();
+    let subs_status = subs_res.status().as_u16();
+    if !(200..300).contains(&credits_status) {
+        return json!({ "plan": "Command Code", "message": format!("Command Code credits API error ({credits_status})") });
+    }
+    if !(200..300).contains(&subs_status) {
+        return json!({ "plan": "Command Code", "message": format!("Command Code subscriptions API error ({subs_status})") });
+    }
+    let credits_body: Value = credits_res.json().await.unwrap_or_else(|_| json!({}));
+    let subs_body: Value = subs_res.json().await.unwrap_or_else(|_| json!({}));
+
+    commandcode_quota_rows(&credits_body, &subs_body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4463,6 +4816,65 @@ mod tests {
         assert_eq!(ollama_ratio_quota(0.5)["total"], json!(100));
         assert!(ollama_ratio_quota(0.5)["resetAt"].is_null());
         assert_eq!(ollama_ratio_quota(0.5)["unlimited"], json!(false));
+    }
+
+    // 9router v0.5.109 #5026: /api/balance fallback parses the four credit
+    // buckets — session/weekly remaining_percent, USD allowance, purchased.
+    #[test]
+    fn ollama_balance_quotas_parses_all_buckets() {
+        let balance = json!({
+            "included": {
+                "session": {"remaining_percent": 40.0, "resets_at": "2026-01-01T05:00:00Z"},
+                "weekly": {"remaining_percent": 80.5, "resets_at": "2026-01-08T00:00:00Z"},
+                "allowance_usd": 20.0,
+                "balance_usd": 12.5,
+                "period": {"until": "2026-02-01T00:00:00Z"},
+            },
+            "purchased": {"balance_usd": 5.0},
+        });
+        let quotas = ollama_balance_quotas(&balance);
+
+        let session = &quotas["Session (5h)"];
+        assert_eq!(session["remainingPercentage"], json!(40.0));
+        assert_eq!(session["used"], json!(60.0));
+        assert_eq!(session["resetAt"], json!("2026-01-01T05:00:00Z"));
+        assert_eq!(session["total"], json!(100));
+
+        let weekly = &quotas["Weekly (7d)"];
+        assert_eq!(weekly["remainingPercentage"], json!(80.5));
+        assert_eq!(weekly["used"], json!(19.5));
+
+        let allowance = &quotas["Allowance ($)"];
+        assert_eq!(allowance["total"], json!(20.0));
+        assert_eq!(allowance["used"], json!(7.5));
+        assert_eq!(allowance["remainingPercentage"], json!(62.5));
+        assert_eq!(allowance["resetAt"], json!("2026-02-01T00:00:00Z"));
+        assert_eq!(allowance["unit"], json!("USD"));
+
+        let purchased = &quotas["Purchased Credits"];
+        assert_eq!(purchased["total"], json!(5.0));
+        assert_eq!(purchased["remainingPercentage"], json!(100));
+        assert_eq!(purchased["isCreditBalance"], json!(true));
+        assert_eq!(purchased["currency"], json!("$"));
+    }
+
+    #[test]
+    fn ollama_balance_quotas_handles_missing_and_zero_buckets() {
+        // Empty object → no quotas.
+        assert!(ollama_balance_quotas(&json!({})).is_empty());
+        // Zero purchased balance → no Purchased Credits row.
+        let balance = json!({
+            "included": {"session": {"remaining_percent": 100.0}},
+            "purchased": {"balance_usd": 0},
+        });
+        let quotas = ollama_balance_quotas(&balance);
+        assert!(quotas.contains_key("Session (5h)"));
+        assert!(!quotas.contains_key("Purchased Credits"));
+        assert!(!quotas.contains_key("Weekly (7d)"));
+        // remaining_percent missing → defaults to 100% remaining.
+        let balance = json!({"included": {"weekly": {}}});
+        let quotas = ollama_balance_quotas(&balance);
+        assert_eq!(quotas["Weekly (7d)"]["remainingPercentage"], json!(100.0));
     }
 
     // 9router e3bf94ee (antigravity-weekly.js parseWeeklyQuotaSummary):
@@ -4871,5 +5283,74 @@ mod tests {
         assert!(quotas.contains_key("spark_weekly"));
         assert_eq!(quotas["spark_session"]["used"], json!(12.0));
         assert_eq!(quotas["spark_weekly"]["used"], json!(25.0));
+    }
+
+    // --- openproxy-4d5h.44: commandcode /alpha/whoami usage ---
+
+    #[test]
+    fn commandcode_short_plan_ids_normalize_and_cap() {
+        // "go-v1" is the short id for individual-go-v1 (10-credit cap).
+        let subs = json!({"data": {"planId": "go-v1", "currentPeriodEnd": "2026-12-01T00:00:00Z"}});
+        let credits =
+            json!({"credits": {"monthlyCredits": 4, "purchasedCredits": 1, "freeCredits": 0}});
+        let out = commandcode_quota_rows(&credits, &subs);
+        assert_eq!(out["plan"], json!("Go"));
+        // remaining = 5 → used = 10 - 5 = 5 of cap 10.
+        assert_eq!(out["quotas"]["Credits"]["used"], json!(5.0));
+        assert_eq!(out["quotas"]["Credits"]["total"], json!(10.0));
+        assert_eq!(out["quotas"]["Credits"]["remaining"], json!(5.0));
+        assert_eq!(out["quotas"]["Credits"]["percentage"], json!(50.0));
+        assert_eq!(out["quotas"]["Credits"]["percentageIsUsed"], json!(true));
+        assert!(out["quotas"]["Credits"]["resetAt"].is_string());
+    }
+
+    #[test]
+    fn commandcode_uncapped_plan_uses_remaining_as_total() {
+        let subs = json!({"data": {"planId": "teams-pro"}});
+        let credits = json!({"credits": {"monthlyCredits": 12}});
+        let out = commandcode_quota_rows(&credits, &subs);
+        assert_eq!(out["plan"], json!("Teams Pro"));
+        // teams-pro cap is 40 → used = 28.
+        assert_eq!(out["quotas"]["Credits"]["used"], json!(28.0));
+        assert_eq!(out["quotas"]["Credits"]["total"], json!(40.0));
+        // Unknown plan → no cap: total falls back to remaining, unlimited.
+        let subs2 = json!({"data": {"planId": "mystery-plan"}});
+        let out2 = commandcode_quota_rows(&credits, &subs2);
+        assert_eq!(out2["plan"], json!("mystery-plan"));
+        assert_eq!(out2["quotas"]["Credits"]["total"], json!(12.0));
+        assert_eq!(out2["quotas"]["Credits"]["unlimited"], json!(true));
+    }
+
+    #[test]
+    fn commandcode_window_limits_emit_js_shape() {
+        let credits = json!({
+            "credits": {"monthlyCredits": 10},
+            "windowLimits": {
+                "fiveHour": {"used": 30, "cap": 100, "resetAt": "2026-08-22T05:00:00Z"},
+                "weekly": {"used": 0, "cap": 0}
+            }
+        });
+        let subs = json!({"data": {"planId": "pro"}});
+        let out = commandcode_quota_rows(&credits, &subs);
+        let five = &out["quotas"]["Session (5h)"];
+        assert_eq!(five["name"], json!("5-hour limit"));
+        assert_eq!(five["used"], json!(30.0));
+        assert_eq!(five["total"], json!(100.0));
+        assert_eq!(five["percentage"], json!(30.0));
+        assert_eq!(five["colorPercentage"], json!(70.0));
+        // weekly window is empty (cap=used=0) → omitted entirely.
+        assert!(out["quotas"].get("Weekly").is_none());
+    }
+
+    #[test]
+    fn commandcode_plan_id_alias_table() {
+        assert_eq!(normalize_commandcode_plan_id("GO-V1"), "individual-go-v1");
+        assert_eq!(normalize_commandcode_plan_id(" Pro "), "individual-pro");
+        assert_eq!(
+            normalize_commandcode_plan_id("individual-ultra"),
+            "individual-ultra"
+        );
+        assert_eq!(commandcode_plan_cap("individual-go-v1"), 10.0);
+        assert_eq!(commandcode_plan_name("individual-goat"), Some("GOAT"));
     }
 }

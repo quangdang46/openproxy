@@ -6,6 +6,7 @@
 pub mod bypass_handler;
 pub mod claude_cloaking;
 pub mod client_detector;
+pub mod command_code_identity;
 pub mod cursor_checksum;
 pub mod error;
 pub mod kiro_session_replay;

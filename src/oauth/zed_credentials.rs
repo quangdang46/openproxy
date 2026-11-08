@@ -164,7 +164,9 @@ fn query_kv_store(db_path: &PathBuf, key: &str) -> Option<String> {
     match value {
         rusqlite::types::Value::Text(s) => Some(s),
         rusqlite::types::Value::Blob(b) => String::from_utf8(b).ok(),
-        other => Some(other.to_string()),
+        rusqlite::types::Value::Integer(i) => Some(i.to_string()),
+        rusqlite::types::Value::Real(f) => Some(f.to_string()),
+        other => Some(format!("{other:?}")),
     }
 }
 
@@ -485,12 +487,7 @@ Write-Output $r
     );
     let output = run_command(
         "powershell.exe",
-        &[
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &script,
-        ],
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
         POWERSHELL_TIMEOUT_MS,
     );
     if !output.ran {

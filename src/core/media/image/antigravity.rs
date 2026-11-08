@@ -20,12 +20,30 @@ use crate::core::executor::antigravity::ANTIGRAVITY_BASE_URL;
 pub struct AntigravityAdapter;
 pub static ADAPTER: AntigravityAdapter = AntigravityAdapter;
 
-/// JS resolveImageInput: data-URI or raw base64 → inlineData part.
-/// HTTP(S) URLs are not supported by the executor envelope.
-fn resolve_image_input(input: &str) -> Option<Value> {
+/// Antigravity accepts up to 10 reference images per request (upstream
+/// `MAX_REFERENCE_IMAGES`).
+const MAX_REFERENCE_IMAGES: usize = 10;
+
+/// JS `resolveImageInput`: accepts a string or an object carrying
+/// `image_url.url` / `url` / `data` / `b64_json`. Data-URI or raw base64 →
+/// inlineData part. HTTP(S) URLs are not supported by the executor envelope.
+fn resolve_image_input(input: &Value) -> Option<Value> {
+    let input = if input.is_object() {
+        input
+            .pointer("/image_url/url")
+            .or_else(|| input.get("url"))
+            .or_else(|| input.get("data"))
+            .or_else(|| input.get("b64_json"))
+            .and_then(Value::as_str)?
+    } else {
+        input.as_str()?
+    };
     if let Some(rest) = input.strip_prefix("data:") {
         let (mime, data) = rest.split_once(";base64,")?;
-        return Some(json!({"inlineData": {"mimeType": mime, "data": data}}));
+        if mime.starts_with("image/") && !data.is_empty() {
+            return Some(json!({"inlineData": {"mimeType": mime, "data": data}}));
+        }
+        return None;
     }
     // Raw base64 heuristic (JS: /^[A-Za-z0-9+/]/ && len > 100 && !http).
     if input.len() > 100
@@ -34,11 +52,28 @@ fn resolve_image_input(input: &str) -> Option<Value> {
             .chars()
             .take_while(|c| !c.is_whitespace())
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-        && !input.is_empty()
     {
         return Some(json!({"inlineData": {"mimeType": "image/png", "data": input}}));
     }
     None
+}
+
+/// JS `collectImageInputs`: accepted request field shapes
+/// (`reference_images`, `images`, `reference_image`, `image`), arrays
+/// flattened, capped at [`MAX_REFERENCE_IMAGES`].
+fn collect_image_inputs<'a>(body: &'a Value) -> Vec<&'a Value> {
+    ["reference_images", "images", "reference_image", "image"]
+        .iter()
+        .filter_map(|key| body.get(*key))
+        .flat_map(|v| {
+            if let Some(arr) = v.as_array() {
+                arr.iter().collect::<Vec<_>>()
+            } else {
+                vec![v]
+            }
+        })
+        .take(MAX_REFERENCE_IMAGES)
+        .collect()
 }
 
 #[async_trait]
@@ -81,26 +116,28 @@ impl ImageAdapter for AntigravityAdapter {
     }
 
     async fn build_body(&self, request: &ImageRequest<'_>) -> Result<Value, String> {
-        let prompt = request
+        // Gemini image models have no negative prompt param — fold it into
+        // the prompt text (upstream `executeViaExecutor`).
+        let mut prompt = request
             .prompt()
-            .ok_or_else(|| "Missing required field: prompt".to_string())?;
-
-        // parts: [inlineData?, text] — the image goes FIRST (JS unshift).
-        let mut parts: Vec<Value> = Vec::new();
-        let image_input = request
+            .ok_or_else(|| "Missing required field: prompt".to_string())?
+            .to_string();
+        if let Some(negative) = request
             .body
-            .get("image")
+            .get("negative_prompt")
             .and_then(Value::as_str)
-            .or_else(|| {
-                request
-                    .body
-                    .get("images")
-                    .and_then(Value::as_array)
-                    .and_then(|arr| arr.first())
-                    .and_then(Value::as_str)
-            });
-        if let Some(input) = image_input.and_then(resolve_image_input) {
-            parts.push(input);
+            .filter(|s| !s.is_empty())
+        {
+            prompt.push_str(&format!("\n\nNegative prompt: {negative}"));
+        }
+
+        // parts: [inlineData…, text] — reference images go FIRST (JS pushes
+        // them before the text part).
+        let mut parts: Vec<Value> = Vec::new();
+        for image_input in collect_image_inputs(request.body) {
+            if let Some(part) = resolve_image_input(image_input) {
+                parts.push(part);
+            }
         }
         parts.push(json!({"text": prompt}));
 
@@ -145,7 +182,7 @@ mod tests {
 
     #[test]
     fn data_uri_becomes_inline_data() {
-        let part = resolve_image_input("data:image/png;base64,AAAA").unwrap();
+        let part = resolve_image_input(&json!("data:image/png;base64,AAAA")).unwrap();
         assert_eq!(part["inlineData"]["mimeType"], "image/png");
         assert_eq!(part["inlineData"]["data"], "AAAA");
     }
@@ -153,10 +190,40 @@ mod tests {
     #[test]
     fn raw_base64_assumes_png_http_rejected() {
         let long_b64 = "A".repeat(120);
-        let part = resolve_image_input(&long_b64).unwrap();
+        let part = resolve_image_input(&json!(long_b64)).unwrap();
         assert_eq!(part["inlineData"]["mimeType"], "image/png");
-        assert!(resolve_image_input("https://example.com/x.png").is_none());
-        assert!(resolve_image_input("short").is_none());
+        assert!(resolve_image_input(&json!("https://example.com/x.png")).is_none());
+        assert!(resolve_image_input(&json!("short")).is_none());
+    }
+
+    #[test]
+    fn object_shapes_resolve() {
+        for input in [
+            json!({"image_url": {"url": "data:image/webp;base64,QUJD"}}),
+            json!({"url": "data:image/png;base64,QUJD"}),
+            json!({"data": "data:image/png;base64,QUJD"}),
+            json!({"b64_json": "data:image/png;base64,QUJD"}),
+        ] {
+            let part = resolve_image_input(&input).unwrap();
+            assert_eq!(part["inlineData"]["data"], "QUJD");
+        }
+    }
+
+    #[test]
+    fn collect_image_inputs_covers_all_field_shapes_and_caps_at_ten() {
+        let body = json!({
+            "reference_images": ["data:image/png;base64,AA", "data:image/png;base64,BB"],
+            "images": "data:image/png;base64,CC",
+            "reference_image": {"b64_json": "data:image/png;base64,DD"},
+            "image": "data:image/png;base64,EE",
+        });
+        let inputs = collect_image_inputs(&body);
+        assert_eq!(inputs.len(), 5);
+
+        let many = json!({
+            "images": (0..15).map(|i| format!("data:image/png;base64,{i}")).collect::<Vec<_>>()
+        });
+        assert_eq!(collect_image_inputs(&many).len(), MAX_REFERENCE_IMAGES);
     }
 
     #[tokio::test]

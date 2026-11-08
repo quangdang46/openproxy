@@ -67,6 +67,14 @@ pub enum SttFormat {
     /// PCM16 WAV via ffmpeg before upload (upstream `codexStt.js` +
     /// `codexSttAudio.js`).
     CodexTranscribe,
+    /// ElevenLabs Scribe — multipart POST `/v1/speech-to-text` with
+    /// `xi-api-key` auth (upstream `sttCore.js` `transcribeElevenLabs`).
+    ElevenlabsStt,
+    /// Gemini Live API realtime STT over a `:bidiGenerateContent`
+    /// WebSocket. Never a provider default — reached only through the
+    /// model-level `transport: "gemini-live"` marker
+    /// (`stt_gemini_live.rs`, upstream `geminiLiveStt.js`).
+    GeminiLive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +82,8 @@ pub enum SttAuthHeader {
     Bearer,
     Token,
     XApiKey,
+    /// ElevenLabs `xi-api-key` header (upstream `authHeader: "xi-api-key"`).
+    XiApiKey,
     Key,
     None,
 }
@@ -147,6 +157,14 @@ pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
             // `ChatGPT-Account-Id` header; this value is unused for the format.
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::CodexTranscribe,
+        },
+        // Upstream `providers/registry/elevenlabs.js` sttConfig — Scribe
+        // speech-to-text, `xi-api-key` auth.
+        "elevenlabs" => SttProviderConfig {
+            base_url: "https://api.elevenlabs.io/v1/speech-to-text".to_string(),
+            auth_type_none: false,
+            auth_header: SttAuthHeader::XiApiKey,
+            format: SttFormat::ElevenlabsStt,
         },
         "selfhosted-stt" => SttProviderConfig {
             base_url: SELFHOSTED_STT_DEFAULT_URL.to_string(),
@@ -314,6 +332,10 @@ struct SttRequest {
     /// Deepgram-only: `punctuate` query parameter override.
     /// `None` = use default (currently hardcoded to `true`, see TODO).
     deepgram_punctuate: Option<String>,
+    /// Provider-specific extra form fields the parsers don't name
+    /// individually (ElevenLabs Scribe knobs, Gemini Live lifecycle
+    /// overrides, …). Mirrors the upstream `formData.get(k)` pass-through.
+    extra_fields: std::collections::BTreeMap<String, String>,
 }
 
 struct RequestError {
@@ -328,6 +350,18 @@ fn req_err(status: StatusCode, message: impl Into<String>) -> RequestError {
     }
 }
 
+/// Extra multipart/JSON fields forwarded to provider-specific transports
+/// (upstream reads them straight off `formData`). Anything else is dropped.
+const STT_EXTRA_FIELDS: &[&str] = &[
+    "timestamps_granularity",
+    "tag_audio_events",
+    "diarize",
+    "num_speakers",
+    "system_instruction",
+    "setup_timeout_ms",
+    "turn_timeout_ms",
+];
+
 async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, RequestError> {
     let mut model: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -339,6 +373,8 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
     let mut temperature: Option<String> = None;
     let mut deepgram_smart_format: Option<String> = None;
     let mut deepgram_punctuate: Option<String> = None;
+    let mut extra_fields: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
 
     while let Some(field) = mp
         .next_field()
@@ -370,8 +406,18 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
                 deepgram_punctuate = Some(read_text_field(field).await?);
             }
             _ => {
-                // Drop unknown fields silently to keep parity with upstream behavior.
-                let _ = field.bytes().await;
+                // Keep provider-specific extras (ElevenLabs Scribe knobs,
+                // Gemini Live lifecycle fields); drop everything else.
+                if STT_EXTRA_FIELDS.contains(&name.as_str()) {
+                    if let Ok(text) = read_text_field(field).await {
+                        let trimmed = text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            extra_fields.insert(name, trimmed);
+                        }
+                    }
+                } else {
+                    let _ = field.bytes().await;
+                }
             }
         }
     }
@@ -395,6 +441,7 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
         temperature: trim_opt(temperature),
         deepgram_smart_format: trim_opt(deepgram_smart_format),
         deepgram_punctuate: trim_opt(deepgram_punctuate),
+        extra_fields,
     })
 }
 
@@ -467,6 +514,21 @@ fn parse_json_request(bytes: &[u8]) -> Result<SttRequest, RequestError> {
             .and_then(Value::as_str)
             .map(str::to_string)
             .and_then(non_empty),
+        extra_fields: STT_EXTRA_FIELDS
+            .iter()
+            .filter_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .or_else(|| Some(v.to_string()))
+                    })
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (key.to_string(), s))
+            })
+            .collect(),
     })
 }
 
@@ -486,6 +548,43 @@ fn non_empty(s: String) -> Option<String> {
 // Provider dispatch + fallback loop.
 // ---------------------------------------------------------------------------
 
+/// Resolve the model-level STT transport marker (upstream `sttCore.js`
+/// `resolveModelTransport` + caller-supplied `transport` override).
+///
+/// A custom model's stored `transport` (in its `extra` blob) wins over the
+/// registry marker; the registry entry is the catalog's `kind:"stt"` model
+/// carrying `transport` (e.g. gemini's `gemini-live`). Returns the trimmed
+/// marker or `None` — dispatch then falls back to `sttConfig.format`.
+fn resolve_stt_transport(provider: &str, model: &str, snapshot: &AppDb) -> Option<String> {
+    for custom in &snapshot.custom_models {
+        if custom.id == model
+            && crate::core::model::resolve_provider_alias(&custom.provider_alias) == provider
+        {
+            if let Some(marker) = custom
+                .extra
+                .get("transport")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(marker.to_string());
+            }
+        }
+    }
+    crate::core::model::catalog::provider_catalog()
+        .stt_transport(provider, model)
+        .map(str::to_string)
+}
+
+/// Map a transport marker onto the dispatch format. Unknown markers fall
+/// through to the provider's `sttConfig.format` (upstream switch default).
+fn format_for_transport(cfg_format: SttFormat, transport: Option<&str>) -> SttFormat {
+    match transport {
+        Some("gemini-live") => SttFormat::GeminiLive,
+        _ => cfg_format,
+    }
+}
+
 async fn dispatch_with_fallback(
     state: &AppState,
     snapshot: &AppDb,
@@ -499,9 +598,21 @@ async fn dispatch_with_fallback(
             &format!("Provider '{}' does not support STT", provider),
         );
     };
+    let transport = resolve_stt_transport(provider, model, snapshot);
 
     if cfg.auth_type_none {
-        match transcribe(state, provider, &cfg, model, req, None, None).await {
+        match transcribe(
+            state,
+            provider,
+            &cfg,
+            model,
+            req,
+            None,
+            None,
+            transport.as_deref(),
+        )
+        .await
+        {
             DispatchResult::Ok(resp) => return resp,
             DispatchResult::Err { status, message } => {
                 return json_error(status, &message);
@@ -557,6 +668,7 @@ async fn dispatch_with_fallback(
             req,
             token_ref,
             Some(&connection),
+            transport.as_deref(),
         )
         .await
         {
@@ -644,6 +756,7 @@ async fn transcribe(
     req: &SttRequest,
     token: Option<&str>,
     connection: Option<&ProviderConnection>,
+    transport: Option<&str>,
 ) -> DispatchResult {
     if !cfg.auth_type_none && token.is_none() {
         return DispatchResult::Err {
@@ -662,13 +775,19 @@ async fn transcribe(
         }
     };
 
-    match cfg.format {
+    // Format-switch extension (upstream sttCore.js:301-329): an explicit
+    // caller/registry transport marker wins over the provider-default
+    // `sttConfig.format`; with neither, the format applies.
+    let format = format_for_transport(cfg.format, transport);
+    match format {
         SttFormat::OpenaiCompatible => transcribe_openai(&client, cfg, model, req, token).await,
         SttFormat::Deepgram => transcribe_deepgram(&client, cfg, model, req, token).await,
         SttFormat::AssemblyAi => transcribe_assemblyai(&client, cfg, model, req, token).await,
         SttFormat::NvidiaAsr => transcribe_nvidia(&client, cfg, model, req, token).await,
         SttFormat::HuggingfaceAsr => transcribe_huggingface(&client, cfg, model, req, token).await,
         SttFormat::GeminiStt => transcribe_gemini(&client, cfg, model, req, token).await,
+        SttFormat::ElevenlabsStt => transcribe_elevenlabs(&client, cfg, model, req, token).await,
+        SttFormat::GeminiLive => transcribe_gemini_live(cfg, model, req, token).await,
         SttFormat::CodexTranscribe => match connection {
             Some(conn) => transcribe_codex(&client, cfg, model, req, conn).await,
             None => DispatchResult::Err {
@@ -685,6 +804,7 @@ fn build_auth_header(cfg: &SttProviderConfig, token: Option<&str>) -> Option<(St
         SttAuthHeader::Bearer => Some(("Authorization".into(), format!("Bearer {}", token))),
         SttAuthHeader::Token => Some(("Authorization".into(), format!("Token {}", token))),
         SttAuthHeader::XApiKey => Some(("x-api-key".into(), token.to_string())),
+        SttAuthHeader::XiApiKey => Some(("xi-api-key".into(), token.to_string())),
         SttAuthHeader::Key => Some(("Authorization".into(), format!("Key {}", token))),
         SttAuthHeader::None => None,
     }
@@ -1233,6 +1353,246 @@ async fn transcribe_gemini(
     ok_json(json!({ "text": text }))
 }
 
+// --- elevenlabs-stt (Scribe; multipart POST /v1/speech-to-text) ---
+//
+// Port of upstream `sttCore.js` `transcribeElevenLabs` +
+// `extractAdditionalFormat`. Optional renderings (srt/vtt/seg_json) come
+// back as `additional_formats`; the requested one is served verbatim
+// instead of being fabricated from the JSON body.
+
+/// Upstream `responseFormats` map (`providers/registry/elevenlabs.js`
+/// sttConfig): OpenAI `response_format` → Scribe `additional_formats[].format`.
+const ELEVENLABS_FORMAT_SEGMENTS: &str = "seg_json";
+const ELEVENLABS_FORMAT_SUBTITLES: &str = "srt";
+const ELEVENLABS_FORMAT_CAPTIONS: &str = "vtt";
+
+/// Upstream `extractAdditionalFormat`: find the requested render in
+/// `additional_formats`. `seg_json` content is a JSON *string* holding the
+/// segment render; other formats are plain strings. Returns `None` when the
+/// render is absent or unparseable so callers fall back rather than guess.
+fn extract_elevenlabs_format(data: &Value, format: Option<&str>) -> Option<Value> {
+    let format = format?;
+    let content = data
+        .get("additional_formats")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|f| f.get("format").and_then(Value::as_str) == Some(format))
+        .and_then(|f| f.get("content"))
+        .and_then(Value::as_str)?;
+    if format != ELEVENLABS_FORMAT_SEGMENTS {
+        return Some(Value::String(content.to_string()));
+    }
+    serde_json::from_str(content).ok()
+}
+
+fn elevenlabs_extra_format(response_format: &str) -> Option<&'static str> {
+    match response_format {
+        // subtitle/caption formats are returned as raw text, not JSON
+        "srt" => Some(ELEVENLABS_FORMAT_SUBTITLES),
+        "vtt" => Some(ELEVENLABS_FORMAT_CAPTIONS),
+        "verbose_json" => Some(ELEVENLABS_FORMAT_SEGMENTS),
+        _ => None,
+    }
+}
+
+async fn transcribe_elevenlabs(
+    client: &reqwest::Client,
+    cfg: &SttProviderConfig,
+    model: &str,
+    req: &SttRequest,
+    token: Option<&str>,
+) -> DispatchResult {
+    let extra = |key: &str| -> Option<&str> { req.extra_fields.get(key).map(String::as_str) };
+    let field = |key: &str| -> String { extra(key).unwrap_or("").trim().to_string() };
+
+    let mut form = reqwest::multipart::Form::new()
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(req.file_bytes.clone())
+                .file_name(req.file_name.clone())
+                .mime_str(&audio_mime_for(req))
+                .unwrap_or_else(|_| {
+                    reqwest::multipart::Part::bytes(req.file_bytes.clone())
+                        .file_name(req.file_name.clone())
+                }),
+        )
+        .text("model_id", model.to_string());
+
+    // Blank language_code → upstream auto-detect, so the field is omitted.
+    // Upstream reads the standard `language` form field (`formData.get`).
+    let language = req.language.clone().unwrap_or_default();
+    if !language.trim().is_empty() {
+        form = form.text("language_code", language.trim().to_string());
+    }
+
+    let granularity = field("timestamps_granularity");
+    if matches!(granularity.as_str(), "word" | "character" | "none") {
+        form = form.text("timestamps_granularity", granularity);
+    }
+    if field("tag_audio_events") == "true" {
+        form = form.text("tag_audio_events", "true".to_string());
+    }
+
+    // diarize and num_speakers are mutually exclusive upstream; diarize wins
+    // when both are sent so the request stays valid instead of erroring.
+    if field("diarize") == "true" {
+        form = form.text("diarize", "true".to_string());
+    } else {
+        let num = field("num_speakers").parse::<i64>().unwrap_or(0);
+        if (1..=32).contains(&num) {
+            form = form.text("num_speakers", num.to_string());
+        }
+    }
+
+    let fmt = req
+        .response_format
+        .as_deref()
+        .unwrap_or("json")
+        .trim()
+        .to_lowercase();
+    let fmt = if fmt.is_empty() {
+        "json".to_string()
+    } else {
+        fmt
+    };
+    let extra_format = elevenlabs_extra_format(&fmt);
+    if let Some(ef) = extra_format {
+        form = form.text("additional_formats", json!([{ "format": ef }]).to_string());
+    }
+
+    let mut request = client.post(&cfg.base_url).multipart(form);
+    if let Some((k, v)) = build_auth_header(cfg, token) {
+        request = request.header(k, v);
+    }
+    let res = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return DispatchResult::Err {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("Request failed: {}", e),
+            };
+        }
+    };
+    if !res.status().is_success() {
+        return upstream_error(res).await;
+    }
+    let data: Value = match res.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return DispatchResult::Err {
+                status: StatusCode::BAD_GATEWAY,
+                message: format!("Failed parsing ElevenLabs response: {}", e),
+            };
+        }
+    };
+
+    let text = data
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let segments = extract_elevenlabs_format(&data, extra_format);
+
+    // subtitle/caption formats are served as raw text, not a JSON envelope.
+    if matches!(fmt.as_str(), "srt" | "vtt") {
+        let body = match &segments {
+            Some(Value::String(s)) => s.clone(),
+            _ => text.clone(),
+        };
+        return ok_passthrough(Some("text/plain; charset=utf-8".to_string()), body);
+    }
+    if fmt == "verbose_json" {
+        let mut out = json!({
+            "text": text,
+            "language": data.get("language_code").cloned().unwrap_or(Value::Null),
+        });
+        if let Some(v) = data.get("language_probability") {
+            out["language_probability"] = v.clone();
+        }
+        if let Some(w) = data.get("words").filter(|w| w.is_array()) {
+            out["words"] = w.clone();
+        }
+        if let Some(n) = data.get("num_speakers") {
+            out["num_speakers"] = n.clone();
+        }
+        // Real segments only when the upstream render was requested — never
+        // synthesized, so transports diffed by clients don't show invented
+        // timings.
+        if let Some(seg) = segments {
+            out["segments"] = seg;
+        }
+        return ok_json(out);
+    }
+    if fmt == "text" {
+        return ok_passthrough(Some("text/plain; charset=utf-8".to_string()), text);
+    }
+    ok_json(json!({ "text": text }))
+}
+
+// --- gemini-live (Live API WebSocket realtime STT) ---
+//
+// Port of upstream `geminiLiveStt.js` — see `stt_gemini_live.rs` for the
+// socket lifecycle. Reached only via the `transport: "gemini-live"` model
+// marker, never the provider default.
+
+async fn transcribe_gemini_live(
+    cfg: &SttProviderConfig,
+    model: &str,
+    req: &SttRequest,
+    token: Option<&str>,
+) -> DispatchResult {
+    let token = match token {
+        Some(t) => t,
+        None => {
+            return DispatchResult::Err {
+                status: StatusCode::UNAUTHORIZED,
+                message: "Gemini Live transcription requires an API key".to_string(),
+            };
+        }
+    };
+    let mime = audio_mime_for(req);
+    match super::stt_gemini_live::transcribe_gemini_live(
+        &cfg.base_url,
+        model,
+        token,
+        &req.file_bytes,
+        &mime,
+        &req.extra_fields,
+    )
+    .await
+    {
+        Ok(live) => {
+            // response_format parity with the OpenAI-compatible transport:
+            // default envelope stays {text}; verbose_json adds segments
+            // mapped from the Live API's incremental inputTranscription
+            // deltas. Those frames carry NO timestamps, so segments expose
+            // {id,text} only (id = delta order, Whisper-compatible 0-based)
+            // — start/end/duration are deliberately absent rather than
+            // fabricated as zeros.
+            let verbose = req
+                .response_format
+                .as_deref()
+                .map(|s| s.trim().eq_ignore_ascii_case("verbose_json"))
+                .unwrap_or(false);
+            if verbose {
+                let segments: Vec<Value> = live
+                    .chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(id, seg_text)| json!({ "id": id, "text": seg_text }))
+                    .collect();
+                ok_json(json!({ "text": live.text, "segments": segments }))
+            } else {
+                ok_json(json!({ "text": live.text }))
+            }
+        }
+        Err(e) => DispatchResult::Err {
+            status: e.status,
+            message: e.message,
+        },
+    }
+}
+
 // --- codex (ChatGPT backend transcription; OAuth + ffmpeg → 24 kHz WAV) ---
 //
 // Port of upstream `open-sse/handlers/codexStt.js` + `codexSttAudio.js`
@@ -1724,11 +2084,99 @@ mod tests {
             "assemblyai",
             "huggingface",
             "gemini",
+            "elevenlabs",
         ] {
             assert!(stt_config(p).is_some(), "{} should have STT config", p);
         }
         assert!(stt_config("anthropic").is_none());
         assert!(stt_config("nonexistent").is_none());
+    }
+
+    #[test]
+    fn elevenlabs_config_uses_scribe_endpoint_and_xi_api_key() {
+        let cfg = stt_config("elevenlabs").unwrap();
+        assert_eq!(cfg.base_url, "https://api.elevenlabs.io/v1/speech-to-text");
+        assert_eq!(cfg.format, SttFormat::ElevenlabsStt);
+        assert_eq!(cfg.auth_header, SttAuthHeader::XiApiKey);
+    }
+
+    #[test]
+    fn elevenlabs_extra_format_maps_openai_response_formats() {
+        assert_eq!(elevenlabs_extra_format("srt"), Some("srt"));
+        assert_eq!(elevenlabs_extra_format("vtt"), Some("vtt"));
+        assert_eq!(elevenlabs_extra_format("verbose_json"), Some("seg_json"));
+        assert_eq!(elevenlabs_extra_format("json"), None);
+        assert_eq!(elevenlabs_extra_format("text"), None);
+    }
+
+    #[test]
+    fn extract_elevenlabs_format_returns_string_and_parses_seg_json() {
+        let data = json!({
+            "text": "hello",
+            "additional_formats": [
+                {"format": "srt", "content": "1\n00:00:00,000 --> 00:00:01,000\nhello"},
+                {"format": "seg_json", "content": "[{\"text\":\"hello\",\"start\":0,\"end\":1}]"},
+            ]
+        });
+        assert_eq!(
+            extract_elevenlabs_format(&data, Some("srt")),
+            Some(Value::String(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello".into()
+            ))
+        );
+        let seg = extract_elevenlabs_format(&data, Some("seg_json")).unwrap();
+        assert_eq!(seg[0]["text"], "hello");
+        assert!(extract_elevenlabs_format(&data, Some("vtt")).is_none());
+        assert!(extract_elevenlabs_format(&json!({}), Some("srt")).is_none());
+    }
+
+    #[test]
+    fn gemini_live_transport_marker_resolves_from_catalog() {
+        let db = AppDb::default();
+        // Registry marker on the gemini catalog entry.
+        assert_eq!(
+            resolve_stt_transport("gemini", "gemini-2.5-flash-native-audio-preview-09-17", &db)
+                .as_deref(),
+            Some("gemini-live")
+        );
+        // A normal gemini STT model carries no marker → provider format wins.
+        assert_eq!(
+            resolve_stt_transport("gemini", "gemini-2.5-flash", &db),
+            None
+        );
+        // Marker maps onto the live format; everything else keeps cfg.format.
+        assert_eq!(
+            format_for_transport(SttFormat::GeminiStt, Some("gemini-live")),
+            SttFormat::GeminiLive
+        );
+        assert_eq!(
+            format_for_transport(SttFormat::GeminiStt, Some("unknown-marker")),
+            SttFormat::GeminiStt
+        );
+        assert_eq!(
+            format_for_transport(SttFormat::OpenaiCompatible, None),
+            SttFormat::OpenaiCompatible
+        );
+    }
+
+    #[test]
+    fn custom_model_transport_overrides_registry() {
+        let mut db = AppDb::default();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("transport".to_string(), json!("gemini-live"));
+        db.custom_models.push(crate::types::CustomModel {
+            provider_alias: "gemini".to_string(),
+            id: "my-live-stt".to_string(),
+            r#type: "stt".to_string(),
+            name: None,
+            extra,
+        });
+        assert_eq!(
+            resolve_stt_transport("gemini", "my-live-stt", &db).as_deref(),
+            Some("gemini-live")
+        );
+        // Same id on a different provider does not claim the marker.
+        assert_eq!(resolve_stt_transport("openai", "my-live-stt", &db), None);
     }
 
     #[test]
@@ -2090,6 +2538,7 @@ mod tests {
             temperature: None,
             deepgram_smart_format: None,
             deepgram_punctuate: None,
+            extra_fields: std::collections::BTreeMap::new(),
         }
     }
 

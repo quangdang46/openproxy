@@ -275,6 +275,136 @@ pub fn fix_missing_tool_responses(body: &mut Value) {
     }
 }
 
+/// 9router `fallbackToolCallId` (open-sse/translator/concerns/toolCall.js:9-11):
+/// `call_<index>_<ts>` when the fragment carries an index, `call_<ts>` otherwise.
+fn fallback_tool_call_id(index: Option<i64>) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match index {
+        Some(i) => format!("call_{i}_{now}"),
+        None => format!("call_{now}"),
+    }
+}
+
+/// Extract the numeric `index` of a streamed tool-call fragment.
+fn tool_call_index(tc: &serde_json::Map<String, Value>) -> Option<i64> {
+    tc.get("index").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_u64().and_then(|u| i64::try_from(u).ok()))
+    })
+}
+
+/// 9router `ensureStreamToolCallIds` (open-sse/utils/streamHelpers.js:84-111).
+///
+/// OpenAI's streaming contract: the id and function.name arrive on the FIRST
+/// fragment of a tool call; later fragments carry only `index` + argument
+/// deltas. Some providers instead open a brand-new `index` in a late fragment
+/// and omit the id entirely. Strict OpenAI-compatible clients
+/// (@ai-sdk/openai-compatible) then throw
+/// "AI_InvalidResponseDataError: Expected 'id' to be a string." and abort the
+/// whole turn.
+///
+/// Remember the id per tool-call index and mint one when a fragment opens an
+/// index the client has not seen yet. The id must be stable for the rest of
+/// the call, so a later fragment with the same index reuses it. A fragment
+/// with no `index` gets a fresh minted id but is NOT recorded (upstream only
+/// stores when `tc.index !== undefined`).
+///
+/// Returns true when the chunk was modified.
+pub fn ensure_stream_tool_call_ids(
+    chunk: &mut Value,
+    seen_ids: &mut std::collections::HashMap<i64, String>,
+) -> bool {
+    let Some(choices) = chunk.get_mut("choices").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for choice in choices.iter_mut() {
+        let Some(calls) = choice
+            .get_mut("delta")
+            .and_then(|d| d.get_mut("tool_calls"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tc in calls.iter_mut() {
+            let Some(obj) = tc.as_object_mut() else {
+                continue;
+            };
+            let has_id = obj
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            let index = tool_call_index(obj);
+            if has_id {
+                if let (Some(i), Some(id)) = (index, obj.get("id").and_then(Value::as_str)) {
+                    seen_ids.insert(i, id.to_string());
+                }
+                continue;
+            }
+            let id = index
+                .and_then(|i| seen_ids.get(&i).cloned())
+                .unwrap_or_else(|| fallback_tool_call_id(index));
+            obj.insert("id".into(), Value::String(id.clone()));
+            if let Some(i) = index {
+                seen_ids.insert(i, id);
+            }
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Apply [`ensure_stream_tool_call_ids`] to every `data:` JSON line inside an
+/// SSE text chunk, leaving all other lines (and unparseable payloads)
+/// byte-identical. Used by the same-format translate path
+/// (9router translator/index.js:192-195), where the chunk arrives as raw SSE
+/// text rather than a parsed object.
+pub fn ensure_stream_tool_call_ids_in_sse(
+    text: &str,
+    seen_ids: &mut std::collections::HashMap<i64, String>,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    for segment in text.split_inclusive('\n') {
+        let (line, newline) = match segment.strip_suffix('\n') {
+            Some(l) => (l, "\n"),
+            None => (segment, ""),
+        };
+        let (line, cr) = match line.strip_suffix('\r') {
+            Some(l) => (l, "\r"),
+            None => (line, ""),
+        };
+        let rewritten = line
+            .strip_prefix("data:")
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && *p != "[DONE]")
+            .and_then(|p| serde_json::from_str::<Value>(p).ok())
+            .filter(|v| v.is_object())
+            .and_then(|mut v| {
+                if ensure_stream_tool_call_ids(&mut v, seen_ids) {
+                    Some(format!(
+                        "data: {}",
+                        serde_json::to_string(&v).unwrap_or_default()
+                    ))
+                } else {
+                    None
+                }
+            });
+        match rewritten {
+            Some(r) => {
+                out.push_str(&r);
+                out.push_str(cr);
+                out.push_str(newline);
+            }
+            None => out.push_str(segment),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +508,113 @@ mod tests {
         ]});
         let ids = get_tool_call_ids(&assistant);
         assert!(has_tool_results(&user_with_result, &ids));
+    }
+
+    // ---- openproxy-4d5h.20: ensureStreamToolCallIds ----
+
+    fn chunk_with_calls(calls: Value) -> Value {
+        json!({"id": "chatcmpl-x", "choices": [{"delta": {"tool_calls": calls}}]})
+    }
+
+    #[test]
+    fn stream_ids_minted_for_idless_fragment_and_reused_per_index() {
+        let mut seen = std::collections::HashMap::new();
+        let mut c1 = chunk_with_calls(json!([{"index": 0, "function": {"arguments": "{\"a\""}}]));
+        assert!(ensure_stream_tool_call_ids(&mut c1, &mut seen));
+        let minted = c1["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(minted.starts_with("call_0_"), "minted id: {minted}");
+
+        // A later fragment on the same index reuses the minted id.
+        let mut c2 = chunk_with_calls(json!([{"index": 0, "function": {"arguments": "1}"}}]));
+        assert!(ensure_stream_tool_call_ids(&mut c2, &mut seen));
+        assert_eq!(
+            c2["choices"][0]["delta"]["tool_calls"][0]["id"],
+            minted.as_str()
+        );
+
+        // A different index mints a different id.
+        let mut c3 = chunk_with_calls(json!([{"index": 1, "function": {"name": "f"}}]));
+        ensure_stream_tool_call_ids(&mut c3, &mut seen);
+        let other = c3["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(other, minted);
+        assert!(other.starts_with("call_1_"));
+    }
+
+    #[test]
+    fn stream_ids_records_explicit_id_for_later_fragments() {
+        let mut seen = std::collections::HashMap::new();
+        let mut first = chunk_with_calls(
+            json!([{"index": 2, "id": "call_real", "function": {"name": "f", "arguments": ""}}]),
+        );
+        assert!(!ensure_stream_tool_call_ids(&mut first, &mut seen));
+        // Later fragment omits the id — reuses the recorded one.
+        let mut later = chunk_with_calls(json!([{"index": 2, "function": {"arguments": "x"}}]));
+        ensure_stream_tool_call_ids(&mut later, &mut seen);
+        assert_eq!(
+            later["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "call_real"
+        );
+    }
+
+    #[test]
+    fn stream_ids_no_index_gets_fresh_unrecorded_id() {
+        let mut seen = std::collections::HashMap::new();
+        let mut c = chunk_with_calls(json!([{"function": {"arguments": "x"}}]));
+        ensure_stream_tool_call_ids(&mut c, &mut seen);
+        let id = c["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(id.starts_with("call_"), "{id}");
+        // `call_<ts>` — exactly one underscore (no index segment).
+        assert_eq!(id.matches('_').count(), 1, "{id}");
+        // Not recorded: seen map stays empty.
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn stream_ids_noop_without_tool_calls() {
+        let mut seen = std::collections::HashMap::new();
+        let mut c = json!({"id": "x", "choices": [{"delta": {"content": "hi"}}]});
+        assert!(!ensure_stream_tool_call_ids(&mut c, &mut seen));
+        let mut no_choices = json!({"id": "x"});
+        assert!(!ensure_stream_tool_call_ids(&mut no_choices, &mut seen));
+    }
+
+    #[test]
+    fn stream_ids_in_sse_rewrites_only_data_json_lines() {
+        let mut seen = std::collections::HashMap::new();
+        let text = concat!(
+            "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\"}}]}}]}\n",
+            "\n",
+            "event: ping\n",
+            "data: not json\n",
+            "data: [DONE]\n"
+        );
+        let out = ensure_stream_tool_call_ids_in_sse(text, &mut seen);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains("\"id\":\"call_0_"), "{}", lines[0]);
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "event: ping");
+        assert_eq!(lines[3], "data: not json");
+        assert_eq!(lines[4], "data: [DONE]");
+        // Second frame reuses the same minted id.
+        let text2 = "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1\"}}]}}]}";
+        let out2 = ensure_stream_tool_call_ids_in_sse(text2, &mut seen);
+        assert!(out2.contains(&format!("\"id\":\"{}\"", {
+            // extract minted id from first line
+            let first = &out.lines().next().unwrap();
+            let v: Value = serde_json::from_str(first.trim_start_matches("data: ").trim()).unwrap();
+            v["choices"][0]["delta"]["tool_calls"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })));
     }
 }

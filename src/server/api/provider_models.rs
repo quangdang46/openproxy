@@ -383,6 +383,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "nscale"
                 | "baseten"
                 | "runcrate"
+                | "sensenova"
                 | "nous"
                 | "nous-research"
                 | "glhf"
@@ -719,6 +720,15 @@ async fn fetch_provider_models_response(
         "sambanova" => {
             fetch_first_party_openai_style_models(connection, "https://api.sambanova.ai/v1/models")
                 .await
+        }
+        // 9router registry/sensenova.js:21 — validateUrl is the standard
+        // OpenAI-style /v1/models listing.
+        "sensenova" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://token.sensenova.cn/v1/models",
+            )
+            .await
         }
         "nscale" => {
             fetch_first_party_openai_style_models(
@@ -1438,9 +1448,11 @@ async fn fetch_github_models(
         .get("https://api.githubcopilot.com/models")
         .header(CONTENT_TYPE, "application/json")
         .header("Copilot-Integration-Id", "vscode-chat")
-        .header("editor-version", "vscode/1.107.1")
-        .header("editor-plugin-version", "copilot-chat/0.26.7")
-        .header("user-agent", "GitHubCopilotChat/0.26.7")
+        // 9router v0.5.112 executors/github.js + copilotModels.js — keep in
+        // step with GITHUB_COPILOT_* in src/core/executor/github.rs.
+        .header("editor-version", "vscode/1.110.0")
+        .header("editor-plugin-version", "copilot-chat/0.38.0")
+        .header("user-agent", "GitHubCopilotChat/0.38.0")
         .header(AUTHORIZATION, format!("Bearer {token}"));
     let payload = fetch_json(request)
         .await
@@ -1455,14 +1467,13 @@ async fn fetch_github_models(
             if capabilities.get("type").and_then(Value::as_str) != Some("chat") {
                 return None;
             }
-            if item
-                .get("policy")
-                .and_then(Value::as_object)
-                .and_then(|policy| policy.get("state"))
-                .and_then(Value::as_str)
-                == Some("disabled")
-            {
-                return None;
+            // 9router copilotModels.js: `policy.state !== "enabled"` drops the
+            // model — a present policy object without an explicit "enabled"
+            // state is filtered out; a missing policy passes.
+            if let Some(policy) = item.get("policy").and_then(Value::as_object) {
+                if policy.get("state").and_then(Value::as_str) != Some("enabled") {
+                    return None;
+                }
             }
 
             let id = item.get("id").and_then(Value::as_str)?.trim();
@@ -1688,12 +1699,24 @@ async fn fetch_kiro_models(
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            let id = item.get("modelId").and_then(Value::as_str)?.trim();
-            if id.is_empty() {
+            let raw_id = item.get("modelId").and_then(Value::as_str)?.trim();
+            if raw_id.is_empty() {
                 return None;
             }
+            // Bead openproxy-4d5h.46: discovery surfaces Kiro's canonical
+            // upstream ids (snapshot dates / dashed spellings normalize the
+            // same way the request path does). The raw upstream id is kept
+            // in extra.upstreamModelId when it differs, mirroring upstream
+            // kiroModels.js which always carries upstreamModelId.
+            let id = crate::core::config::kiro_constants::normalize_kiro_upstream_model_id(raw_id);
 
             let mut extra = BTreeMap::new();
+            if id != raw_id {
+                extra.insert(
+                    "upstreamModelId".to_string(),
+                    Value::String(raw_id.to_string()),
+                );
+            }
             if let Some(description) = item.get("description") {
                 extra.insert("description".to_string(), description.clone());
             }
@@ -1712,13 +1735,13 @@ async fn fetch_kiro_models(
             }
 
             Some(ProviderModel {
-                id: id.to_string(),
+                id: id.clone(),
                 name: item
                     .get("modelName")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|name| !name.is_empty())
-                    .unwrap_or(id)
+                    .unwrap_or(id.as_str())
                     .to_string(),
                 extra,
             })
