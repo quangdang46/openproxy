@@ -246,6 +246,21 @@ pub async fn audio_speech(
     // 9router tts.js:31 — `?response_format=json` returns the base64 JSON
     // envelope; anything else (default) streams raw audio bytes.
     let response_format = query.get("response_format").cloned().unwrap_or_default();
+    // tts.js:32 resolves `response_format` as `query || body || "mp3"` and
+    // hands the same value to the provider adapter (ollama-local maps it to
+    // the upstream `wav`|`pcm` choice). The query value therefore has to
+    // reach `tts::dispatch`, which only reads the JSON body — so the query
+    // value is copied into the body (and wins over it, matching `query ||
+    // body` upstream).
+    let body = match body {
+        Ok(Json(mut value)) => {
+            if let (Some(qf), Some(obj)) = (query.get("response_format"), value.as_object_mut()) {
+                obj.insert("response_format".to_string(), json!(qf));
+            }
+            Ok(Json(value))
+        }
+        other => other,
+    };
     let response = generic_media_handler(state, headers, body, "audio/speech").await;
     with_cors_response(tts_binary_or_json(response, response_format).await)
 }
@@ -993,6 +1008,36 @@ async fn execute_media_provider(
 
     let connections = select_media_connections(&snapshot, provider);
     if connections.is_empty() {
+        // 9router tts.js:99-106 — `ollama-local` synthesizes with
+        // `credentials: null` when no connection is stored: the daemon is
+        // local and API-key auth is optional, so requiring a stored
+        // credential would make the provider unusable out of the box.
+        // A stored connection is reused even though it carries no
+        // credential — its `providerSpecificData.baseUrl` still selects
+        // the right daemon; only when none exists do we synthesise a
+        // default one pointing at http://localhost:11434.
+        if provider == "ollama-local" && route_kind == "audio/speech" {
+            let creds = snapshot
+                .provider_connections
+                .iter()
+                .find(|c| c.provider == provider && c.is_active())
+                .cloned()
+                .unwrap_or_else(|| crate::types::ProviderConnection {
+                    id: "ollama-local".to_string(),
+                    provider: "ollama-local".to_string(),
+                    auth_type: "apikey".to_string(),
+                    ..Default::default()
+                });
+            return execute_media_provider_on_connection(
+                state,
+                request_body,
+                provider,
+                model,
+                route_kind,
+                &creds,
+            )
+            .await;
+        }
         return json_error_response(
             StatusCode::BAD_REQUEST,
             &format!("No credentials for provider: {}", provider),

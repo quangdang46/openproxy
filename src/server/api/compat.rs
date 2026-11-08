@@ -542,6 +542,8 @@ struct ResponsesSseState {
     reasoning_done: bool,
     reasoning_item_added: bool,
     reasoning_content_added: bool,
+    reasoning_part_id: Option<String>,
+    reasoning_part_index: usize,
     // Global state
     completed_sent: bool,
 }
@@ -565,15 +567,50 @@ impl ResponsesSseState {
             reasoning_done: false,
             reasoning_item_added: false,
             reasoning_content_added: false,
+            reasoning_part_id: None,
+            reasoning_part_index: 0,
             completed_sent: false,
         }
     }
 }
 
-/// Flush any incomplete event state and emit `response.completed` if it
-/// hasn't been sent yet.  Returns SSE event frames that should be yielded
-/// to the client.  Matching 9router's `responsesTransformer.js` `flush()`.
 impl ResponsesSseState {
+    /// Emit the reasoning done frames (`reasoning_summary_text.done` +
+    /// `content_part.done`) once. Called when answer text begins (upstream
+    /// responsesTransformer.js closes reasoning when content starts, not only
+    /// at finish_reason), at finish_reason, and at flush.
+    fn push_reasoning_done_frames(&mut self, frames: &mut Vec<Vec<u8>>, part_index: usize) {
+        if self.reasoning_done || !self.reasoning_item_added {
+            return;
+        }
+        let reasoning_text = self.reasoning_buf.as_deref().unwrap_or("").to_string();
+        self.reasoning_done = true;
+        self.seq += 1;
+        frames.push(format_sse_event(
+            "response.reasoning_summary_text.done",
+            &json!({
+                "type": "response.reasoning_summary_text.done",
+                "part_index": part_index,
+                "text": reasoning_text,
+            }),
+        ));
+        self.seq += 1;
+        frames.push(format_sse_event(
+            "response.content_part.done",
+            &json!({
+                "type": "response.content_part.done",
+                "part_index": part_index,
+                "part": {
+                    "id": self.reasoning_part_id.as_deref().unwrap_or(""),
+                    "type": "summary_text",
+                },
+            }),
+        ));
+    }
+
+    /// Flush any incomplete event state and emit `response.completed` if it
+    /// hasn't been sent yet.  Returns SSE event frames that should be yielded
+    /// to the client.  Matching 9router's `responsesTransformer.js` `flush()`.
     fn flush_frames(&mut self) -> Vec<Vec<u8>> {
         let mut frames: Vec<Vec<u8>> = Vec::new();
         if self.completed_sent {
@@ -654,28 +691,8 @@ impl ResponsesSseState {
 
         // Close reasoning if still open
         if !self.reasoning_done && self.reasoning_item_added {
-            let reasoning_text = self.reasoning_buf.as_deref().unwrap_or("");
-            self.reasoning_done = true;
-
-            self.seq += 1;
-            frames.push(format_sse_event(
-                "response.reasoning_summary_text.done",
-                &json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "text": reasoning_text,
-                }),
-            ));
-
-            self.seq += 1;
-            frames.push(format_sse_event(
-                "response.content_part.done",
-                &json!({
-                    "type": "response.content_part.done",
-                    "part": {
-                        "type": "summary_text",
-                    },
-                }),
-            ));
+            let idx = self.reasoning_part_index;
+            self.push_reasoning_done_frames(&mut frames, idx);
         }
 
         // Emit response.completed (matching 9router's sendCompleted())
@@ -850,6 +867,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         {
             if !state.reasoning_item_added {
                 state.reasoning_item_added = true;
+                state.reasoning_part_index = index;
                 let rid = generate_response_id();
                 state.reasoning_id = Some(rid.clone());
                 state.seq += 1;
@@ -870,6 +888,8 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
 
             if !state.reasoning_content_added {
                 state.reasoning_content_added = true;
+                let part_id = format!("reasoning_part_{}", state.seq + 1);
+                state.reasoning_part_id = Some(part_id.clone());
                 state.seq += 1;
                 frames.push(format_sse_event(
                     "response.reasoning_summary_part.added",
@@ -877,7 +897,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
                         "type": "response.reasoning_summary_part.added",
                         "part_index": index,
                         "part": {
-                            "id": format!("reasoning_part_{}", state.seq),
+                            "id": part_id,
                             "type": "summary_text",
                         },
                     }),
@@ -900,6 +920,12 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
 
         // ── Regular text content ─────────────────────────────────────
         if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+            // The answer starts, so thinking is over — close the reasoning
+            // item before the message item (upstream responsesTransformer.js:
+            // reasoning ends when text begins, not only at finish_reason).
+            if !content.is_empty() {
+                state.push_reasoning_done_frames(&mut frames, index);
+            }
             if !state.msg_item_added.contains_key(&index) || !state.msg_item_added[&index] {
                 state.msg_item_added.insert(index, true);
                 let item_id = generate_response_id();
@@ -963,35 +989,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         // ── Finish reason ────────────────────────────────────────────
         if let Some(_reason) = finish_reason {
             // Close reasoning if we actually emitted reasoning events
-            if !state.reasoning_done && state.reasoning_item_added {
-                let reasoning_text = state.reasoning_buf.as_deref().unwrap_or("");
-                state.reasoning_done = true;
-                state.seq += 1;
-                frames.push(format_sse_event(
-                    "response.reasoning_summary_text.done",
-                    &json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "part_index": index,
-                        "text": reasoning_text,
-                    }),
-                ));
-                state.seq += 1;
-                frames.push(format_sse_event(
-                    "response.content_part.done",
-                    &json!({
-                        "type": "response.content_part.done",
-                        "part_index": index,
-                        "part": {
-                            "id": state
-                                .added_content_part_id_map
-                                .get(&index)
-                                .map(|s| s.as_str())
-                                .unwrap_or(""),
-                            "type": "summary_text",
-                        },
-                    }),
-                ));
-            }
+            state.push_reasoning_done_frames(&mut frames, index);
 
             // Close message text
             if !state.msg_item_done.contains_key(&index) || !state.msg_item_done[&index] {
@@ -1329,6 +1327,8 @@ fn stop_reason_map(finish_reason: Option<&str>) -> Value {
         Some("stop") => json!("end_turn"),
         Some("length") => json!("max_tokens"),
         Some("tool_calls") => json!("tool_use"),
+        // Upstream fromOpenAIFinish: content_filter → refusal.
+        Some("content_filter") => json!("refusal"),
         Some(other) => json!(other),
         None => Value::Null,
     }
@@ -2588,6 +2588,8 @@ fn claude_body_to_chat_completion(body: &Value) -> Value {
     let finish_reason = match stop_reason {
         "end_turn" => "stop",
         "tool_use" => "tool_calls",
+        // Upstream toOpenAIFinish: refusal → content_filter.
+        "refusal" => "content_filter",
         other => other,
     };
 
@@ -3033,6 +3035,57 @@ mod tests {
         assert!(
             sse.contains("\"delta\":\"Let me think...\""),
             "reasoning delta content"
+        );
+    }
+
+    #[test]
+    fn openai_chunk_to_responses_closes_reasoning_when_text_begins() {
+        // Upstream responsesTransformer.js: reasoning ends when answer text
+        // starts, not only at finish_reason — otherwise the sections interleave.
+        let mut state = ResponsesSseState::new();
+        let think = json!({
+            "id": "chatcmpl-r1",
+            "choices": [{
+                "index": 0,
+                "delta": { "reasoning_content": "thinking..." },
+                "finish_reason": null
+            }]
+        });
+        let text = json!({
+            "id": "chatcmpl-r1",
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "answer" },
+                "finish_reason": null
+            }]
+        });
+
+        let _ = openai_chunk_to_responses(&mut state, &think);
+        let frames = openai_chunk_to_responses(&mut state, &text);
+        let joined = frames.concat();
+        let sse = String::from_utf8_lossy(&joined);
+
+        let done_pos = sse.find("response.reasoning_summary_text.done");
+        let msg_pos = sse.find("\"type\": \"message\"");
+        assert!(
+            done_pos.is_some(),
+            "reasoning must close when text begins: {sse}"
+        );
+        assert!(
+            msg_pos.map(|p| done_pos.unwrap() < p).unwrap_or(false),
+            "reasoning done must precede the message item: {sse}"
+        );
+        // finish_reason must not emit a second reasoning close.
+        let fin = json!({
+            "id": "chatcmpl-r1",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        });
+        let frames2 = openai_chunk_to_responses(&mut state, &fin);
+        let joined2 = frames2.concat();
+        let sse2 = String::from_utf8_lossy(&joined2);
+        assert!(
+            !sse2.contains("response.reasoning_summary_text.done"),
+            "reasoning closed only once: {sse2}"
         );
     }
 

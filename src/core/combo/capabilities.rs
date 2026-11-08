@@ -167,6 +167,19 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("deepseek-ai/deepseek-v4-flash", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 65536 })),
         ]));
         table.insert("codex", HashMap::from([
+            // Upstream v0.5.112 codex block: per-model Codex OAuth windows
+            // (lower than the OpenAI API's 1.05M). gpt-6.1-terra is the only
+            // 500k entry — codex-rs/models-manager/models.json reports
+            // context_window 500000 for it on Codex.
+            ("gpt-6-astra", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
+            ("gpt-6-sol", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
+            ("gpt-6.1-sol", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
+            ("gpt-6.1-terra", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 128000 })),
+            ("gpt-6-luna", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
+            // CODEX_EXTENDED_CAPS = CODEX_GPT_56_DEFAULT_CAPS @ 872000.
+            ("gpt-6-astra[1m]", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 872000, "maxOutput": 128000 })),
+            ("gpt-6-sol[1m]", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 872000, "maxOutput": 128000 })),
+            ("gpt-6-luna[1m]", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 872000, "maxOutput": 128000 })),
             ("gpt-5.6-sol", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 372000, "maxOutput": 128000 })),
             ("gpt-5.6-sol-review", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 372000, "maxOutput": 128000 })),
             ("gpt-5.6-terra", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
@@ -365,6 +378,19 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
             "*claude*sonnet-4.7*",
             serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
         ),
+        // Haiku 5.5 is adaptive-only (upstream v0.5.111 #5183 / v0.5.112 —
+        // GitHub Copilot's Anthropic-native /v1/messages shim 400s on the
+        // budget shape `*claude*haiku*` sends). Must precede the generic
+        // haiku rule; dotted (Copilot `claude-haiku-5.5`) and dashed
+        // (OpenCode Go `claude-haiku-5-5`) spellings both covered.
+        (
+            "*claude*haiku-5.5*",
+            serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "*claude*haiku-5-5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
         (
             "*claude*haiku*",
             serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
@@ -421,6 +447,15 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         (
             "*nanobanana*",
             serde_json::json!({ "vision": true, "imageOutput": true }),
+        ),
+        ("*gpt-6*image*", serde_json::json!({ "imageOutput": true })),
+        // 1.05M is the API window for the whole gpt-6 family; gateway-specific
+        // overrides (codex OAuth 272k/372k/500k, kiro 272k) live in
+        // PROVIDER_CAPABILITIES and win over this pattern (upstream
+        // capabilities.js PATTERN_CAPABILITIES).
+        (
+            "*gpt-6*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 1050000, "maxOutput": 128000 }),
         ),
         ("*gpt-5*image*", serde_json::json!({ "imageOutput": true })),
         (
@@ -1001,6 +1036,62 @@ mod tests {
         assert_eq!(sol.context_window, 372_000);
         let terra = get_capabilities_for_model("codex", "gpt-5.6-terra");
         assert_eq!(terra.context_window, 272_000);
+    }
+
+    #[test]
+    fn codex_gpt_6_1_terra_capabilities() {
+        // Upstream v0.5.112: gpt-6.1-terra is the 500k Codex OAuth window
+        // (codex-rs models-manager context_window 500000), maxOutput 128k.
+        let caps = get_capabilities_for_model("codex", "gpt-6.1-terra");
+        assert_eq!(caps.context_window, 500_000);
+        assert_eq!(caps.max_output, 128_000);
+        assert!(caps.vision && caps.reasoning && caps.search);
+        assert_eq!(caps.thinking_format, Some("openai"));
+
+        // Sibling gpt-6.x rows + [1m] extended caps.
+        for (model, window) in [
+            ("gpt-6-astra", 272_000),
+            ("gpt-6-sol", 272_000),
+            ("gpt-6.1-sol", 272_000),
+            ("gpt-6-luna", 272_000),
+            ("gpt-6-astra[1m]", 872_000),
+            ("gpt-6-sol[1m]", 872_000),
+            ("gpt-6-luna[1m]", 872_000),
+        ] {
+            let caps = get_capabilities_for_model("codex", model);
+            assert_eq!(caps.context_window, window, "{model}");
+        }
+
+        // Generic *gpt-6* pattern: 1.05M API window off the codex provider.
+        let other = get_capabilities_for_model("openai", "gpt-6.1-terra");
+        assert_eq!(other.context_window, 1_050_000);
+        assert!(other.vision && other.reasoning);
+    }
+
+    #[test]
+    fn haiku_5_5_resolves_adaptive_before_generic_haiku() {
+        // #5183 / v0.5.112: claude-haiku-5.5 is adaptive-only — the dotted
+        // (Copilot) and dashed (OpenCode Go) spellings must beat the generic
+        // *claude*haiku* → claude-budget rule.
+        for model in [
+            "claude-haiku-5.5",
+            "claude-haiku-5-5",
+            "github/claude-haiku-5.5",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.thinking_format, Some("claude-adaptive"), "{model}");
+            assert!(caps.vision, "{model}");
+            assert!(caps.reasoning, "{model}");
+        }
+        // Older/unversioned haiku still resolves budget.
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku",
+            "claude-sonnet-haiku-4.7",
+        ] {
+            let caps = get_capabilities_for_model("", model);
+            assert_eq!(caps.thinking_format, Some("claude-budget"), "{model}");
+        }
     }
 
     #[test]

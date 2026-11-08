@@ -637,6 +637,7 @@ async fn chat_completions_impl(
                         },
                         earliest_retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     });
                 }
 
@@ -800,6 +801,7 @@ async fn chat_completions_impl(
                                     message: error.message,
                                     earliest_retry_after: None,
                                     upstream_body: None,
+                                    upstream_headers: error.upstream_headers,
                                 }),
                             };
                         }
@@ -825,6 +827,7 @@ async fn chat_completions_impl(
                             message: e.message,
                             earliest_retry_after: None,
                             upstream_body: None,
+                            upstream_headers: Vec::new(),
                         })
                     }
                 }
@@ -1015,6 +1018,7 @@ async fn chat_completions_impl(
                         message: "no capacity adapter candidate succeeded".to_string(),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     },
                 )),
             }
@@ -1325,6 +1329,7 @@ async fn execute_single_model(
             message: "Request body must be a JSON object".into(),
             retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
     }
 
@@ -1898,6 +1903,7 @@ async fn forward_with_provider_fallback(
                 ),
                 retry_after,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             }));
         }
         attempts += 1;
@@ -1979,6 +1985,7 @@ async fn forward_with_provider_fallback(
                     message: format!("[{provider}/{model}] {last_error}"),
                     retry_after: Some(until),
                     upstream_body: None,
+                    upstream_headers: Vec::new(),
                 });
             }
 
@@ -1988,6 +1995,7 @@ async fn forward_with_provider_fallback(
                     message: format!("No active credentials for provider: {provider}"),
                     retry_after: None,
                     upstream_body: None,
+                    upstream_headers: Vec::new(),
                 });
             }
 
@@ -1996,6 +2004,7 @@ async fn forward_with_provider_fallback(
                 message: format!("All accounts for {provider}/{model} are unavailable"),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             });
         };
 
@@ -2122,6 +2131,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Kiro executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 executor
                     .execute_request(KiroExecutionRequest {
@@ -2137,6 +2147,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Kiro execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })
             } else if provider == "vertex" || provider == "vertex-partner" || provider == "vxp" {
                 let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
@@ -2145,6 +2156,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Vertex executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(VertexExecutionRequest {
@@ -2160,6 +2172,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Vertex execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2175,6 +2188,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Codex executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute(CodexExecutionRequest {
@@ -2190,6 +2204,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Codex execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2205,6 +2220,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Cursor executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute(CursorExecutionRequest {
@@ -2220,6 +2236,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Cursor execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2235,6 +2252,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Github executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(GithubExecutionRequest {
@@ -2250,6 +2268,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Github execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2265,6 +2284,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Azure executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(AzureExecutionRequest {
@@ -2280,6 +2300,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Azure execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2300,6 +2321,7 @@ async fn forward_with_provider_fallback(
                             message: format!("Xai executor creation failed: {}", e),
                             retry_after: None,
                             upstream_body: None,
+                            upstream_headers: Vec::new(),
                         }
                     })?;
                 let result = executor
@@ -2316,6 +2338,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Xai execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2331,6 +2354,7 @@ async fn forward_with_provider_fallback(
                         message: format!("IFlow executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(IFlowExecutionRequest {
@@ -2346,6 +2370,7 @@ async fn forward_with_provider_fallback(
                         message: format!("IFlow execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2361,6 +2386,7 @@ async fn forward_with_provider_fallback(
                         message: format!("GeminiCli executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(GeminiCliExecutionRequest {
@@ -2376,6 +2402,7 @@ async fn forward_with_provider_fallback(
                         message: format!("GeminiCli execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2391,6 +2418,7 @@ async fn forward_with_provider_fallback(
                         message: format!("OpenCode executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(OpenCodeExecutionRequest {
@@ -2407,6 +2435,7 @@ async fn forward_with_provider_fallback(
                         message: format!("OpenCode execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2422,6 +2451,7 @@ async fn forward_with_provider_fallback(
                         message: format!("OpenCodeGo executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(OpenCodeGoExecutionRequest {
@@ -2438,6 +2468,7 @@ async fn forward_with_provider_fallback(
                         message: format!("OpenCodeGo execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2453,6 +2484,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Qoder executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(QoderExecutionRequest {
@@ -2468,6 +2500,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Qoder execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2483,6 +2516,7 @@ async fn forward_with_provider_fallback(
                     message: format!("CommandCode executor creation failed: {}", e),
                     retry_after: None,
                     upstream_body: None,
+                    upstream_headers: Vec::new(),
                 })?;
                 let result = executor
                     .execute_request(CommandCodeExecutionRequest {
@@ -2498,6 +2532,7 @@ async fn forward_with_provider_fallback(
                         message: format!("CommandCode execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2513,6 +2548,7 @@ async fn forward_with_provider_fallback(
                     message: format!("Antigravity executor creation failed: {}", e),
                     retry_after: None,
                     upstream_body: None,
+                    upstream_headers: Vec::new(),
                 })?;
                 let result = executor
                     .execute_request(AntigravityExecutionRequest {
@@ -2528,6 +2564,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Antigravity execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2552,6 +2589,7 @@ async fn forward_with_provider_fallback(
                         message: format!("GrokWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2576,6 +2614,7 @@ async fn forward_with_provider_fallback(
                         message: format!("PerplexityWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2601,6 +2640,7 @@ async fn forward_with_provider_fallback(
                         message: format!("DeepSeekWeb execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2625,6 +2665,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Windsurf execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2651,6 +2692,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Zed execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2675,6 +2717,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Trae execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2693,6 +2736,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Devin executor init failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     }
                 })?;
                 let result = executor
@@ -2707,6 +2751,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Devin execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2734,6 +2779,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Kimchi execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2763,6 +2809,7 @@ async fn forward_with_provider_fallback(
                         message: format!("CodeBuddy CN execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2792,6 +2839,7 @@ async fn forward_with_provider_fallback(
                         message: format!("CodeBuddy intl execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2817,6 +2865,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Ollama execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2842,6 +2891,7 @@ async fn forward_with_provider_fallback(
                         message: format!("MimoFree execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2862,6 +2912,7 @@ async fn forward_with_provider_fallback(
                         message: format!("GrokCli executor creation failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 let result = executor
                     .execute_request(GrokCliExecutionRequest {
@@ -2877,6 +2928,7 @@ async fn forward_with_provider_fallback(
                         message: format!("GrokCli execution failed: {}", e),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -2901,6 +2953,7 @@ async fn forward_with_provider_fallback(
                         message: format!("[502]: no upstream configured for provider {name}"),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     },
                     // Unreachable today — `DefaultExecutor::new` returns nothing
                     // but the variant above. A 500 still reads as a server
@@ -2910,6 +2963,7 @@ async fn forward_with_provider_fallback(
                         message: format!("Default executor creation failed: {other:?}"),
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     },
                 })?;
                 let result = executor
@@ -3053,6 +3107,11 @@ async fn forward_with_provider_fallback(
                 // OR the error JSON body (errorBody.retryAfter). Header wins; the
                 // body is the fallback when a provider returns it only in JSON.
                 let header_retry_after = retry_after_from_headers(result.response.headers());
+                // 9router upstreamResponseHeaders: the whitelisted rate-limit
+                // headers (retry-after / x-should-retry / anthropic-ratelimit-*)
+                // ride the error response to the client — captured BEFORE the
+                // body is consumed below.
+                let upstream_headers = forwarded_upstream_headers(result.response.headers());
                 let (message, raw_body, body_retry_after) =
                     extract_error_message_and_retry_after_with_body(result.response).await;
                 let retry_after = header_retry_after.or(body_retry_after);
@@ -3075,6 +3134,7 @@ async fn forward_with_provider_fallback(
                     // FreeTierError/insufficient_quota text is lost and the
                     // client sees only "Internal server error".
                     upstream_body: raw_body,
+                    upstream_headers,
                 });
 
                 // Token refresh: on 401/403, try to refresh the access token
@@ -3846,10 +3906,11 @@ async fn clear_connection_error_for_model(
 ///
 /// The upstream always speaks Responses when this runs, so the collapse is not
 /// a single answer — 9router branches on the client's own format
-/// (sseToJsonHandler.js:226-282) and hands a Responses client the Responses
-/// object, a Gemini-family client the `candidates` envelope, and everyone else
-/// a `chat.completion`. Collapsing unconditionally to `chat.completion` gave
-/// the first two clients an object whose fields they do not read.
+/// (sseToJsonHandler.js:226-282, 291-293, 369-373) and hands a Responses client
+/// the Responses object, a Gemini-family client the `candidates` envelope, a
+/// Claude client the Messages-API `message`, and everyone else a
+/// `chat.completion`. Collapsing unconditionally to `chat.completion` gave the
+/// first three clients an object whose fields they do not read.
 async fn proxy_sse_to_json_response(
     response: UpstreamResponse,
     state: &AppState,
@@ -3872,8 +3933,48 @@ async fn proxy_sse_to_json_response(
         Format::Gemini | Format::GeminiCli | Format::Antigravity => {
             collapse::responses_stream_to_gemini(&body_bytes, Some(model))
         }
+        // Claude client → collapse to chat.completion first, then render the
+        // Messages-API `message` (sseToJsonHandler.js:291-293, 371-372 +
+        // concerns/claudeMessage.js). A `/v1/messages` client cannot parse a
+        // `choices[]` body.
+        Format::Claude => collapse::sse_stream_to_json(&body_bytes, Some(model)).map(|completion| {
+            crate::core::translator::concerns::claude_message::openai_completion_to_claude_message(
+                &completion,
+            )
+        }),
         _ => collapse::sse_stream_to_json(&body_bytes, Some(model)),
     };
+
+    // 9router sseToJsonHandler.js:307-320 — an upstream SSE `error` frame is
+    // a real upstream failure, not a completion: answer with the upstream
+    // status (integer 400-599 preserved, anything else → 502) and its message
+    // instead of emitting the collapsed marker at the upstream HTTP status
+    // (which is 200 for an SSE response).
+    if let Some(err) = collapsed.as_ref().and_then(collapse::sse_error_frame) {
+        let status_code = collapse::sse_error_status(err);
+        let message = collapse::sse_error_message(err);
+        // Upstream returns before saveUsageStats/onRequestSuccess
+        // (sseToJsonHandler.js:320-322) — no usage is recorded for the
+        // failed stream; only the live-request slot is released.
+        state
+            .usage_live
+            .finish_request(model, provider, connection_id, false)
+            .await;
+        let body = crate::core::utils::error::build_error_body(status_code, Some(&message));
+        let out = Bytes::from(serde_json::to_vec(&body).unwrap_or_default());
+        let resp = Response::builder()
+            .status(status_code)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(out))
+            .unwrap_or_else(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to build response",
+                )
+                    .into_response()
+            });
+        return with_cors_response(resp);
+    }
 
     let mut json_body = collapsed.unwrap_or_else(|| {
         // Fallback: try parse as JSON already, else wrap error
@@ -5453,6 +5554,12 @@ fn build_dashboard_sse_response(
         }
     }
 
+    // 9router parity: the dashboard chat path runs the same chatCore
+    // streaming handler, so upstreamResponseHeaders applies there too —
+    // retry-after / x-should-retry / anthropic-ratelimit-* must not be
+    // dropped by the dashboard header filter.
+    insert_forwarded_upstream_headers(&mut response, &forwarded_upstream_headers(headers));
+
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
@@ -6419,6 +6526,48 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<DateTime<Utc>> {
     None
 }
 
+/// 9router `upstreamResponseHeaders` (open-sse/utils/upstreamHeaders.js): the
+/// ONLY upstream headers forwarded to the client on the chat paths —
+/// `retry-after`, `x-should-retry`, and every `anthropic-ratelimit-*`, all
+/// lower-cased. Returns `(name, value)` pairs in upstream order; duplicate
+/// names are kept (last-write-wins on insert, matching the JS `out[key] =
+/// value`). Non-UTF8 values are dropped, as `Headers.forEach` only yields
+/// valid header strings anyway.
+fn forwarded_upstream_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            name == "retry-after"
+                || name == "x-should-retry"
+                || name.starts_with("anthropic-ratelimit-")
+        })
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// Insert the whitelisted upstream rate-limit headers into a client
+/// response. Invalid pairs are skipped — they were parsed out of a live
+/// `HeaderMap`, so this is belt-and-braces only.
+fn insert_forwarded_upstream_headers(
+    response: &mut Response,
+    upstream_headers: &[(String, String)],
+) {
+    for (name, value) in upstream_headers {
+        if let (Ok(name), Ok(value)) = (
+            name.parse::<header::HeaderName>(),
+            value.parse::<header::HeaderValue>(),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+}
+
 fn is_hop_by_hop_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -6490,6 +6639,7 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
         message: error.message,
         retry_after: error.earliest_retry_after,
         upstream_body: error.upstream_body,
+        upstream_headers: error.upstream_headers,
     }))
 }
 
@@ -6516,6 +6666,11 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
             body_bytes,
         )
             .into_response();
+        // 9router errorResponse/unavailableResponse merge
+        // upstreamResponseHeaders(providerResponse.headers) into the error
+        // response; inserted BEFORE the computed retry-after so the
+        // unavailableResponse ordering (extraHeaders, then retry-after) holds.
+        insert_forwarded_upstream_headers(&mut response, &error.upstream_headers);
         if let Some(retry_after) = error.retry_after {
             let seconds = (retry_after - Utc::now()).num_seconds().max(1).to_string();
             if let Ok(value) = seconds.parse() {
@@ -6533,6 +6688,8 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
     let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), &message);
     let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
     let mut response = (status, Json(body)).into_response();
+
+    insert_forwarded_upstream_headers(&mut response, &error.upstream_headers);
 
     if let Some(retry_after) = error.retry_after {
         let seconds = (retry_after - Utc::now()).num_seconds().max(1).to_string();
@@ -6681,7 +6838,8 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::sync::Arc;
 
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use bytes::Bytes;
     use chrono::{Duration as ChronoDuration, Utc};
     use http_body_util::BodyExt;
@@ -7468,6 +7626,7 @@ mod tests {
             message: "OpenCode's free tier can only be used from within OpenCode".to_string(),
             retry_after: None,
             upstream_body: Some(raw.to_vec()),
+            upstream_headers: Vec::new(),
         };
         let resp = attempt_error_response(err);
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
@@ -7478,9 +7637,106 @@ mod tests {
             message: "error code: 1010".to_string(),
             retry_after: None,
             upstream_body: Some(raw2.to_vec()),
+            upstream_headers: Vec::new(),
         };
         let resp2 = attempt_error_response(err2);
         assert_eq!(resp2.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    // Bead openproxy-9router-parity-v5104-sync-eidj.37: 9router
+    // upstreamResponseHeaders (open-sse/utils/upstreamHeaders.js) forwards
+    // `retry-after`, `x-should-retry` and every `anthropic-ratelimit-*` header
+    // to the client; everything else stays upstream.
+    #[test]
+    fn forwarded_upstream_headers_whitelists_rate_limit_headers() {
+        use super::forwarded_upstream_headers;
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("17"));
+        headers.insert("x-should-retry", HeaderValue::from_static("true"));
+        headers.insert(
+            "anthropic-ratelimit-requests-limit",
+            HeaderValue::from_static("1000"),
+        );
+        headers.insert(
+            "anthropic-ratelimit-requests-remaining",
+            HeaderValue::from_static("999"),
+        );
+        headers.insert("x-request-id", HeaderValue::from_static("req-1"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let forwarded = forwarded_upstream_headers(&headers);
+        let names: Vec<&str> = forwarded.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"retry-after"));
+        assert!(names.contains(&"x-should-retry"));
+        assert!(names.contains(&"anthropic-ratelimit-requests-limit"));
+        assert!(names.contains(&"anthropic-ratelimit-requests-remaining"));
+        assert!(!names.contains(&"x-request-id"));
+        assert!(!names.contains(&"content-type"));
+        assert_eq!(forwarded.len(), 4);
+    }
+
+    // The error path: a 429 whose upstream headers were captured on the
+    // ComboAttemptError must surface them verbatim on the client response
+    // (9router createErrorResult → errorResponse extraHeaders merge).
+    #[test]
+    fn attempt_error_response_surfaces_forwarded_rate_limit_headers() {
+        use super::attempt_error_response;
+        use crate::core::combo::ComboAttemptError;
+        let err = ComboAttemptError {
+            status: 429,
+            message: "rate limited".into(),
+            retry_after: None,
+            upstream_body: None,
+            upstream_headers: vec![
+                (
+                    "anthropic-ratelimit-requests-remaining".to_string(),
+                    "0".to_string(),
+                ),
+                ("retry-after".to_string(), "42".to_string()),
+            ],
+        };
+        let resp = attempt_error_response(err);
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get("anthropic-ratelimit-requests-remaining")
+                .and_then(|v| v.to_str().ok()),
+            Some("0")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("42")
+        );
+    }
+
+    // The success paths (streaming SSE and non-streaming JSON) build their
+    // client response through build_proxied_response, which copies every
+    // non-hop-by-hop upstream header — pin that the Anthropic rate-limit
+    // headers are among them.
+    #[test]
+    fn proxied_response_forwards_upstream_rate_limit_headers() {
+        use super::build_proxied_response;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-ratelimit-tokens-remaining",
+            HeaderValue::from_static("250000"),
+        );
+        headers.insert("x-should-retry", HeaderValue::from_static("false"));
+        let resp = build_proxied_response(StatusCode::OK, &headers, Body::empty());
+        assert_eq!(
+            resp.headers()
+                .get("anthropic-ratelimit-tokens-remaining")
+                .and_then(|v| v.to_str().ok()),
+            Some("250000")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("false")
+        );
     }
 
     // 9router error.js:27-35 hands the status it was given to the response
@@ -7717,6 +7973,7 @@ mod tests {
             message: "That adapter is not supported by this endpoint".to_string(),
             retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
@@ -7735,6 +7992,7 @@ mod tests {
             message: "upstream failed".to_string(),
             retry_after: None,
             upstream_body: Some(b"<html>oops</html>".to_vec()),
+            upstream_headers: Vec::new(),
         });
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
         assert_eq!(
@@ -7756,6 +8014,7 @@ mod tests {
             message: "All models failed".to_string(),
             earliest_retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
         assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
@@ -7788,6 +8047,7 @@ mod tests {
             message: "[openai/gpt-4o] Rate limit reached for gpt-4o".to_string(),
             retry_after: Some(Utc::now() + ChronoDuration::seconds(150)),
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
         assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(resp.headers().contains_key("retry-after"));
@@ -7819,6 +8079,7 @@ mod tests {
             message: "No active credentials for provider: openai".to_string(),
             retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await

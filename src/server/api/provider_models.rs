@@ -382,6 +382,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "sambanova"
                 | "nscale"
                 | "baseten"
+                | "nous"
                 | "nous-research"
                 | "glhf"
                 | "kilocode"
@@ -732,13 +733,7 @@ async fn fetch_provider_models_response(
             )
             .await
         }
-        "nous-research" => {
-            fetch_first_party_openai_style_models(
-                connection,
-                "https://inference-api.nousresearch.com/v1/models",
-            )
-            .await
-        }
+        "nous" | "nous-research" => fetch_nous_models(connection).await,
         "glhf" => {
             fetch_first_party_openai_style_models(
                 connection,
@@ -757,9 +752,70 @@ async fn fetch_provider_models_response(
             )
             .await
         }
+        // Cursor's catalog is account-scoped: AgentService GetUsableModels
+        // over HTTP/2 protobuf (9router cursorModels.js resolveCursorModels,
+        // forceRefresh like the upstream provider-models route). Failure or
+        // an empty catalog falls back to the static registry list with a
+        // warning — never a silent zero list.
+        "cursor" => fetch_cursor_models(state, connection).await,
         other => Err(RouteError::bad_request(format!(
             "Provider {other} does not support models listing"
         ))),
+    }
+}
+
+/// Live Cursor model catalog for the Providers page (bead 4d5h.34).
+///
+/// Port of the `cursor:` customResolver in 9router
+/// `src/app/api/providers/[id]/models/route.js:346-358`: resolve the live
+/// GetUsableModels catalog with `forceRefresh`, return `{id, name}` rows;
+/// on failure fall back to the static `cu` catalog with a warning.
+async fn fetch_cursor_models(
+    state: &AppState,
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let fallback = || {
+        let models = crate::core::model::catalog::provider_catalog()
+            .models_for_alias("cu")
+            .unwrap_or(&[])
+            .iter()
+            .map(|m| ProviderModel {
+                id: m.id.clone(),
+                name: m.name.clone().unwrap_or_else(|| m.id.clone()),
+                extra: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        response_with_models(
+            connection,
+            models,
+            Some("Cursor returned no live models; falling back to static catalog.".to_string()),
+        )
+    };
+
+    let client = match state.client_pool.get_hyper_direct("cursor") {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!("CURSOR_MODELS: h2 client unavailable: {error}");
+            return Ok(fallback());
+        }
+    };
+
+    match crate::core::executor::resolve_cursor_models_for_connection(&client, connection, true)
+        .await
+    {
+        Some(models) if !models.is_empty() => Ok(response_with_models(
+            connection,
+            models
+                .iter()
+                .map(|m| ProviderModel {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    extra: BTreeMap::new(),
+                })
+                .collect(),
+            None,
+        )),
+        _ => Ok(fallback()),
     }
 }
 
@@ -859,6 +915,130 @@ async fn fetch_first_party_openai_style_models(
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token, false).await
+}
+
+fn positive_u64(value: Option<&Value>) -> Option<u64> {
+    match value {
+        Some(Value::Number(number)) => number.as_u64().filter(|n| *n > 0),
+        Some(Value::String(text)) => text.trim().parse::<u64>().ok().filter(|n| *n > 0),
+        _ => None,
+    }
+}
+
+fn zero_price(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Number(number)) => number.as_f64() == Some(0.0),
+        Some(Value::String(text)) => text.trim().parse::<f64>() == Ok(0.0),
+        _ => false,
+    }
+}
+
+fn nous_context_length(model: &Value) -> Option<u64> {
+    positive_u64(model.get("context_length")).or_else(|| {
+        positive_u64(
+            model
+                .get("top_provider")
+                .and_then(|provider| provider.get("context_length")),
+        )
+    })
+}
+
+fn nous_text_capable(model: &Value) -> bool {
+    match model
+        .get("architecture")
+        .and_then(|architecture| architecture.get("output_modalities"))
+        .and_then(Value::as_array)
+    {
+        Some(modalities) => {
+            modalities.is_empty()
+                || modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("text"))
+        }
+        None => true,
+    }
+}
+
+/// Nous `/v1/models` discovery — upstream `modelsFetcher.type: "nous-free"`
+/// (`open-sse/services/nous.js normalizeNousFreeModels`): text-capable models
+/// with zero prompt/completion pricing and at least a 200k context window,
+/// sorted by context length descending.
+async fn fetch_nous_models(
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let token = primary_token(connection)
+        .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
+    let client = http_client()?;
+    let payload = fetch_json(
+        client
+            .get(crate::oauth::nous::MODELS_URL)
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {token}")),
+    )
+    .await
+    .map_err(map_upstream_route_error)?;
+
+    let raw_models = payload
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            payload
+                .get("data")
+                .or_else(|| payload.get("models"))
+                .or_else(|| payload.get("results"))
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+
+    let mut models: Vec<(u64, ProviderModel)> = raw_models
+        .iter()
+        .filter(|model| nous_text_capable(model))
+        .filter(|model| {
+            let pricing = model.get("pricing");
+            zero_price(pricing.and_then(|p| p.get("prompt")))
+                && zero_price(pricing.and_then(|p| p.get("completion")))
+        })
+        .filter_map(|model| {
+            let id = model.get("id").and_then(Value::as_str)?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let context_length = nous_context_length(model).unwrap_or(0);
+            if context_length < 200_000 {
+                return None;
+            }
+            let mut extra = BTreeMap::new();
+            extra.insert("contextLength".to_string(), json!(context_length));
+            if let Some(max_output) = model
+                .get("top_provider")
+                .and_then(|provider| provider.get("max_completion_tokens"))
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+            {
+                extra.insert("maxOutputTokens".to_string(), json!(max_output));
+            }
+            Some((
+                context_length,
+                ProviderModel {
+                    id: id.to_string(),
+                    name: model
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_string(),
+                    extra,
+                },
+            ))
+        })
+        .collect();
+
+    models.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(response_with_models(
+        connection,
+        models.into_iter().map(|(_, model)| model).collect(),
+        None,
+    ))
 }
 
 /// Static model list for deepseek-web (OmniRoute

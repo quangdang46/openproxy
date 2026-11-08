@@ -146,11 +146,6 @@ pub static NEBIUS: OpenAiCompatAdapter = OpenAiCompatAdapter {
     endpoint: "https://api.tokenfactory.nebius.com/v1/embeddings",
     include_referer: false,
 };
-pub static GITHUB: OpenAiCompatAdapter = OpenAiCompatAdapter {
-    provider_id: "github",
-    endpoint: "https://models.github.ai/inference/embeddings",
-    include_referer: false,
-};
 pub static NVIDIA: OpenAiCompatAdapter = OpenAiCompatAdapter {
     provider_id: "nvidia",
     endpoint: "https://integrate.api.nvidia.com/v1/embeddings",
@@ -257,6 +252,87 @@ impl EmbeddingAdapter for OpenAiCompatAdapter {
             }
         }
         Ok(body)
+    }
+}
+
+// ─── GitHub Copilot embeddings (dedicated adapter) ───────────────────────
+// 9router `open-sse/handlers/embeddingProviders/github.js`: the GitHub
+// Models inference API (models.github.ai) was retired; Copilot embeddings
+// live at `api.githubcopilot.com/embeddings` (registry
+// `embeddingConfig.baseUrl`) and authenticate with the short-lived Copilot
+// token plus the IDE-identifying headers the chat executor already sends —
+// a subset: no `openai-intent`, `x-request-id`, `X-Initiator`, or
+// `anthropic-version`. Upstream's `buildUrl` ignores per-connection
+// `baseUrl` (the registry value is the source of truth), so this adapter
+// returns the fixed endpoint too. `buildBody`/`normalize` are inherited
+// from the OpenAI-compatible adapter unchanged.
+//
+// The Copilot header constants mirror `executor/github.rs` (itself a port
+// of the registry `transport.copilot` block); they are duplicated here
+// because that module is private to `core::executor`.
+
+const GITHUB_EMBEDDINGS_URL: &str = "https://api.githubcopilot.com/embeddings";
+const GITHUB_COPILOT_VSCODE_VERSION: &str = "1.110.0";
+const GITHUB_COPILOT_CHAT_VERSION: &str = "0.38.0";
+const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.38.0";
+const GITHUB_COPILOT_API_VERSION: &str = "2025-04-01";
+
+pub struct GithubEmbeddingAdapter;
+pub static GITHUB: GithubEmbeddingAdapter = GithubEmbeddingAdapter;
+
+#[async_trait]
+impl EmbeddingAdapter for GithubEmbeddingAdapter {
+    fn build_url(&self, _request: &EmbeddingRequest<'_>) -> Result<String, String> {
+        Ok(GITHUB_EMBEDDINGS_URL.to_string())
+    }
+
+    fn build_headers(&self, request: &EmbeddingRequest<'_>) -> Result<HeaderMap, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        // 9router github.js: `creds.copilotToken || psd.copilotToken ||
+        // creds.accessToken` — no apiKey fallback (Copilot tokens are
+        // short-lived OAuth exchanges, not user API keys).
+        let token = request
+            .credentials
+            .provider_specific_data
+            .get("copilotToken")
+            .and_then(|v| v.as_str())
+            .or(request.credentials.access_token.as_deref())
+            .unwrap_or("");
+        if !token.is_empty() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|e| format!("auth header: {e}"))?,
+            );
+        }
+        headers.insert(
+            "copilot-integration-id",
+            HeaderValue::from_static("vscode-chat"),
+        );
+        headers.insert(
+            "editor-version",
+            HeaderValue::from_str(&format!("vscode/{GITHUB_COPILOT_VSCODE_VERSION}"))
+                .map_err(|e| format!("editor-version header: {e}"))?,
+        );
+        headers.insert(
+            "editor-plugin-version",
+            HeaderValue::from_str(&format!("copilot-chat/{GITHUB_COPILOT_CHAT_VERSION}"))
+                .map_err(|e| format!("editor-plugin-version header: {e}"))?,
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_static(GITHUB_COPILOT_USER_AGENT),
+        );
+        headers.insert(
+            "x-github-api-version",
+            HeaderValue::from_static(GITHUB_COPILOT_API_VERSION),
+        );
+        Ok(headers)
+    }
+
+    fn build_body(&self, request: &EmbeddingRequest<'_>) -> Result<Value, String> {
+        OPENAI.build_body(request)
     }
 }
 
@@ -447,6 +523,67 @@ impl EmbeddingAdapter for GeminiAdapter {
             "model": model,
             "usage": {"prompt_tokens": 0, "total_tokens": 0}
         })
+    }
+}
+
+// ─── Ollama Local embeddings (/v1/embeddings on the local daemon) ────────
+// 9router `open-sse/handlers/embeddingProviders/ollamaLocal.js` — the saved
+// host (`providerSpecificData.baseUrl`, default http://localhost:11434)
+// is normalised by stripping trailing slashes plus a `/v1/embeddings` or
+// `/v1` suffix before `/v1/embeddings` is re-appended. Bearer auth is sent
+// only when an API key is configured (`creds?.apiKey` — a local daemon
+// needs none). `buildBody`/`normalize` are the OpenAI-compatible shape:
+// `{model, input, encoding_format, dimensions?}` in, the response passes
+// through untouched.
+//
+// The Phonon TTS side lives in `core::media::tts::ollama_local`; the host
+// resolver is shared via `core::media::ollama_local::resolve_host`.
+
+pub struct OllamaLocalAdapter;
+pub static OLLAMA_LOCAL: OllamaLocalAdapter = OllamaLocalAdapter;
+
+/// Strip a saved endpoint suffix so `{host}/v1/embeddings` never doubles
+/// up — JS ollamaLocal.js buildUrl: trailing slashes, then
+/// `/v1/embeddings`, then `/v1`.
+fn ollama_local_embeddings_url(credentials: &ProviderConnection) -> String {
+    let mut host = crate::core::media::ollama_local::resolve_host(credentials);
+    if let Some(stripped) = host.strip_suffix("/v1/embeddings") {
+        host = stripped.trim_end_matches('/').to_string();
+    }
+    if let Some(stripped) = host.strip_suffix("/v1") {
+        host = stripped.trim_end_matches('/').to_string();
+    }
+    format!("{host}/v1/embeddings")
+}
+
+#[async_trait]
+impl EmbeddingAdapter for OllamaLocalAdapter {
+    fn build_url(&self, request: &EmbeddingRequest<'_>) -> Result<String, String> {
+        Ok(ollama_local_embeddings_url(request.credentials))
+    }
+
+    fn build_headers(&self, request: &EmbeddingRequest<'_>) -> Result<HeaderMap, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        // `creds?.apiKey` only — upstream does not fall back to the OAuth
+        // access token for this provider.
+        if let Some(key) = request
+            .credentials
+            .api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+        {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {key}"))
+                    .map_err(|e| format!("auth header: {e}"))?,
+            );
+        }
+        Ok(headers)
+    }
+
+    fn build_body(&self, request: &EmbeddingRequest<'_>) -> Result<Value, String> {
+        OPENAI.build_body(request)
     }
 }
 
@@ -841,6 +978,85 @@ mod tests {
         );
     }
 
+    /// 9router commit 51a1827e (`fix(github): route Copilot embeddings to
+    /// api.githubcopilot.com`): the GitHub Models inference API
+    /// (models.github.ai) was retired; embeddings now live on the Copilot
+    /// host with the Copilot token + IDE headers.
+    #[test]
+    fn github_embedding_resolves_to_copilot_endpoint() {
+        let body = json!({"input": "hello"});
+        let mut creds = ProviderConnection::default();
+        creds
+            .provider_specific_data
+            .insert("copilotToken".to_string(), json!("tid=copilot-token"));
+        creds.access_token = Some("gho-oauth".to_string());
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "text-embedding-ada-002",
+            credentials: &creds,
+        };
+        assert_eq!(
+            GITHUB.build_url(&req).unwrap(),
+            "https://api.githubcopilot.com/embeddings"
+        );
+        // Copilot token wins over the OAuth access token.
+        let headers = GITHUB.build_headers(&req).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer tid=copilot-token")
+        );
+        assert_eq!(
+            headers
+                .get("copilot-integration-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("vscode-chat")
+        );
+        assert_eq!(
+            headers.get("editor-version").and_then(|v| v.to_str().ok()),
+            Some("vscode/1.110.0")
+        );
+        assert_eq!(
+            headers
+                .get("editor-plugin-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("copilot-chat/0.38.0")
+        );
+        assert_eq!(
+            headers
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok()),
+            Some("GitHubCopilotChat/0.38.0")
+        );
+        assert_eq!(
+            headers
+                .get("x-github-api-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("2025-04-01")
+        );
+        // The model id passes through into the OpenAI-shaped body.
+        let built = GITHUB.build_body(&req).unwrap();
+        assert_eq!(built["model"], "text-embedding-ada-002");
+    }
+
+    /// With no copilotToken the adapter falls back to access_token, matching
+    /// upstream's `psd.copilotToken || creds.accessToken` tail.
+    #[test]
+    fn github_embedding_falls_back_to_access_token() {
+        let body = json!({"input": "hi"});
+        let mut creds = ProviderConnection::default();
+        creds.access_token = Some("gho-oauth".to_string());
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "text-embedding-ada-002",
+            credentials: &creds,
+        };
+        let headers = GITHUB.build_headers(&req).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer gho-oauth")
+        );
+    }
+
     #[test]
     fn jina_embedding_endpoint_matches() {
         // 9router embeddingProviders/openai.js ENDPOINTS: jina-ai →
@@ -858,5 +1074,89 @@ mod tests {
             JINA_AI.build_url(&req).unwrap(),
             "https://api.jina.ai/v1/embeddings"
         );
+    }
+
+    // ── ollama-local ────────────────────────────────────────────────────
+
+    fn ollama_req<'a>(body: &'a Value, creds: &'a ProviderConnection) -> EmbeddingRequest<'a> {
+        EmbeddingRequest {
+            body,
+            model: "nomic-embed-text",
+            credentials: creds,
+        }
+    }
+
+    #[test]
+    fn ollama_local_url_normalizes_saved_host_suffixes() {
+        // 9router tests/unit/ollama-local-embeddings.test.js — every saved
+        // host shape must collapse to {host}/v1/embeddings.
+        let body = json!({"input": "hi"});
+        for (saved, expected) in [
+            (None, "http://localhost:11434/v1/embeddings"),
+            (
+                Some("http://192.168.1.100:11434"),
+                "http://192.168.1.100:11434/v1/embeddings",
+            ),
+            (
+                Some("http://192.168.1.100:11434///"),
+                "http://192.168.1.100:11434/v1/embeddings",
+            ),
+            (
+                Some("http://192.168.1.100:11434/v1"),
+                "http://192.168.1.100:11434/v1/embeddings",
+            ),
+            (
+                Some("http://192.168.1.100:11434/v1/embeddings"),
+                "http://192.168.1.100:11434/v1/embeddings",
+            ),
+        ] {
+            let mut creds = ProviderConnection::default();
+            if let Some(url) = saved {
+                creds
+                    .provider_specific_data
+                    .insert("baseUrl".to_string(), json!(url));
+            }
+            let req = ollama_req(&body, &creds);
+            assert_eq!(OLLAMA_LOCAL.build_url(&req).unwrap(), expected, "{saved:?}");
+        }
+    }
+
+    #[test]
+    fn ollama_local_sends_bearer_only_when_api_key_set() {
+        let body = json!({"input": "hi"});
+
+        let creds = ProviderConnection::default();
+        let req = ollama_req(&body, &creds);
+        let headers = OLLAMA_LOCAL.build_headers(&req).unwrap();
+        assert!(headers.get(AUTHORIZATION).is_none());
+
+        let mut keyed = ProviderConnection::default();
+        keyed.api_key = Some("ollama-secret".into());
+        let req = ollama_req(&body, &keyed);
+        let headers = OLLAMA_LOCAL.build_headers(&req).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            Some("Bearer ollama-secret")
+        );
+
+        // Upstream reads `creds?.apiKey` only — an OAuth access token alone
+        // must NOT produce an Authorization header.
+        let mut token_only = ProviderConnection::default();
+        token_only.access_token = Some("oauth-token".into());
+        let req = ollama_req(&body, &token_only);
+        let headers = OLLAMA_LOCAL.build_headers(&req).unwrap();
+        assert!(headers.get(AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn ollama_local_body_forwards_model_input_encoding_and_dimensions() {
+        let body = json!({"input": "hi", "dimensions": 512});
+        let creds = ProviderConnection::default();
+        let req = ollama_req(&body, &creds);
+        let built = OLLAMA_LOCAL.build_body(&req).unwrap();
+        assert_eq!(built["model"], "nomic-embed-text");
+        assert_eq!(built["input"], "hi");
+        assert_eq!(built["encoding_format"], "float");
+        assert_eq!(built["dimensions"], 512);
     }
 }

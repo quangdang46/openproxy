@@ -4,7 +4,8 @@
 //! Each adapter implements the [`TtsAdapter`] trait. The
 //! [`get_tts_adapter`] registry returns a special-case adapter for
 //! providers with custom request shapes (OpenAI, OpenRouter, Gemini,
-//! ElevenLabs, MiniMax, Edge-TTS, Google-TTS, local-device). For
+//! ElevenLabs, MiniMax, Edge-TTS, Google-TTS, local-device, Ollama-Local
+//! Phonon). For
 //! everything else, [`synthesize_via_format`] dispatches by the upstream
 //! `ttsConfig.format` (hyperbolic, deepgram, nvidia, huggingface,
 //! inworld, cartesia, playht, coqui, tortoise, openai-compat).
@@ -19,6 +20,7 @@ mod google_tts;
 pub mod handler;
 mod local_device;
 mod minimax;
+mod ollama_local;
 mod openai;
 mod openrouter;
 mod selfhosted_tts;
@@ -55,6 +57,7 @@ pub async fn dispatch(
             credentials,
             language: body.get("language").and_then(|v| v.as_str()),
             style: body.get("style").and_then(|v| v.as_str()),
+            response_format: body.get("response_format").and_then(|v| v.as_str()),
         };
         return Some(
             adapter
@@ -102,6 +105,7 @@ pub fn get_tts_adapter(provider: &str) -> Option<&'static dyn TtsAdapter> {
         "aws-polly" | "polly" => Some(&aws_polly::ADAPTER),
         "xiaomi-mimo" => Some(&xiaomi_mimo::ADAPTER),
         "selfhosted-tts" => Some(&selfhosted_tts::ADAPTER),
+        "ollama-local" => Some(&ollama_local::ADAPTER),
         _ => None,
     }
 }
@@ -170,7 +174,10 @@ fn default_generic_base_url(provider: &str) -> &'static str {
         "hyperbolic" => "https://api.hyperbolic.xyz/v1/audio/generation",
         "deepgram" => "https://api.deepgram.com/v1/speak",
         "nvidia" => "https://integrate.api.nvidia.com/v1/audio/synthesis",
-        "huggingface" => "https://api-inference.huggingface.co/models",
+        // HF TTS rides the Inference Providers router's hf-inference
+        // endpoint (upstream retired api-inference.huggingface.co; the
+        // registry hides the tts kind, this is the best-effort route).
+        "huggingface" => "https://router.huggingface.co/hf-inference/models",
         "inworld" => "https://api.inworld.ai/tts/v1/voice",
         "cartesia" => "https://api.cartesia.ai/tts/bytes",
         "playht" => "https://api.play.ht/api/v2/tts/stream",
@@ -220,6 +227,7 @@ mod tests {
             "nvidia",
             "huggingface",
             "xiaomi-mimo",
+            "ollama-local",
             "fish-audio",
             "fish",
         ] {
@@ -264,6 +272,17 @@ mod tests {
         );
         assert!(is_tts_provider("fish-audio"));
         assert!(is_tts_provider("fish"));
+    }
+
+    #[test]
+    fn huggingface_tts_uses_router_hf_inference_route() {
+        // api-inference.huggingface.co is retired (9router cf663f5); the
+        // generic huggingface-tts handler posts {inputs: text} to
+        // {base}/{model}, so the base is the router's hf-inference path.
+        assert_eq!(
+            default_generic_base_url("huggingface"),
+            "https://router.huggingface.co/hf-inference/models"
+        );
     }
 
     #[test]

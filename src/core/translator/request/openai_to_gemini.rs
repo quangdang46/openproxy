@@ -449,14 +449,32 @@ fn flatten_type_arrays(obj: &mut Value) {
 
 /// Infer missing type=object when properties exist (Gemini requires explicit type).
 /// Mirrors ensureObjectType in open-sse/translator/formats/gemini.js.
+///
+/// The `properties` value is a *map of parameter name → schema*, not a schema
+/// node itself. Recursing into it as a node would treat a parameter literally
+/// named `properties` as a nested schema and corrupt the tool definition
+/// (upstream #4532-family fix). Instead, recurse into each *value* of the
+/// properties map.
 fn ensure_object_type(obj: &mut Value) {
     match obj {
         Value::Object(map) => {
             if map.contains_key("properties") && !map.contains_key("type") {
                 map.insert("type".to_string(), Value::String("object".to_string()));
             }
-            for (_key, val) in map.iter_mut() {
-                if val.is_object() || val.is_array() {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                let Some(val) = map.get_mut(&key) else {
+                    continue;
+                };
+                if key == "properties" {
+                    if let Value::Object(props) = val {
+                        for sub in props.values_mut() {
+                            ensure_object_type(sub);
+                        }
+                    } else {
+                        ensure_object_type(val);
+                    }
+                } else {
                     ensure_object_type(val);
                 }
             }
@@ -673,6 +691,251 @@ pub(crate) fn clean_json_schema(schema: &Value) -> Value {
     result
 }
 
+/// Gemini 4 (Argon) drops sampling params and requires functionResponse-last
+/// merged user turns. Mirrors `isGemini4Model` in
+/// `open-sse/providers/capabilities.js` — regex `/(?:^|\/)gemini-4(?:$|[-.])/i`.
+pub(crate) fn is_gemini4_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    for segment in m.split('/') {
+        if let Some(rest) = segment.strip_prefix("gemini-4") {
+            if rest.is_empty() || rest.starts_with('-') || rest.starts_with('.') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Rewrites duplicate tool_call_ids so every emitted functionCall id is unique.
+///
+/// Gemini validates functionCall id uniqueness across the WHOLE history and
+/// answers 400 INVALID_ARGUMENT otherwise, but an OpenAI tool_call_id is only
+/// unique within its own assistant turn — a long agent session can replay the
+/// same id in a later turn (#4532).
+///
+/// Uniqueness is per OCCURRENCE, not per id: two different calls that share an
+/// id must end up with different emitted ids, so the mapping is consumed in
+/// document order rather than memoized by id. Ids that were already unique are
+/// passed through untouched. Mirrors `createToolCallIdUniquifier` in
+/// `open-sse/translator/request/openai-to-gemini.js`.
+#[derive(Default)]
+struct ToolCallIdUniquifier {
+    used: std::collections::HashSet<String>,
+}
+
+impl ToolCallIdUniquifier {
+    fn next(&mut self, id: &str) -> String {
+        if id.is_empty() {
+            return id.to_string();
+        }
+        if !self.used.contains(id) {
+            self.used.insert(id.to_string());
+            return id.to_string();
+        }
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{id}-{n}");
+            if !self.used.contains(&candidate) {
+                self.used.insert(candidate.clone());
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+}
+
+/// Keys inside a `functionResponse.response` payload that Gemini / Cloud Code
+/// interpret as pointers into `functionResponse.parts`. Tool results carrying
+/// a JSON Schema / OpenAPI document (webfetch, read, MCP) legitimately contain
+/// `$ref` and would 400 with INVALID_ARGUMENT, so the key is renamed before
+/// sending. Mirrors `GEMINI_RESERVED_RESPONSE_KEYS` +
+/// `sanitizeFunctionResponsePayload` in
+/// `open-sse/translator/formats/gemini.js` (#4273 family).
+fn sanitize_function_response_payload(value: &Value) -> Value {
+    match value {
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(sanitize_function_response_payload).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, val) in map {
+                let renamed = if key == "$ref" { "_ref" } else { key.as_str() };
+                out.insert(renamed.to_string(), sanitize_function_response_payload(val));
+            }
+            Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Return the part with a sanitized `functionResponse.response` (cloned only
+/// when the payload actually needed rewriting). Mirrors
+/// `sanitizeFunctionResponsePart` in `open-sse/translator/formats/gemini.js`.
+fn sanitize_function_response_part(part: &Value) -> Value {
+    let response = part
+        .get("functionResponse")
+        .and_then(|fr| fr.get("response"));
+    match response {
+        Some(r) if r.is_object() || r.is_array() => {
+            let mut p = part.clone();
+            if let Some(fr) = p.get_mut("functionResponse") {
+                fr["response"] = sanitize_function_response_payload(r);
+            }
+            p
+        }
+        _ => part.clone(),
+    }
+}
+
+/// Gemini 4 rejects a merged user turn whose last part is not a
+/// functionResponse (#4802). Stable-partitions `parts` so every
+/// `functionResponse` part moves to the end, preserving relative order.
+/// Mirrors `moveFunctionResponsesLast` in
+/// `open-sse/translator/formats/gemini.js`.
+fn move_function_responses_last(parts: &mut Vec<Value>) {
+    let has_fr = |p: &Value| {
+        p.get("functionResponse")
+            .map(|v| v.is_object())
+            .unwrap_or(false)
+    };
+    if !parts.iter().any(has_fr) {
+        return;
+    }
+    let mut responses = Vec::new();
+    let mut others = Vec::new();
+    for p in parts.drain(..) {
+        if has_fr(&p) {
+            responses.push(p);
+        } else {
+            others.push(p);
+        }
+    }
+    others.extend(responses);
+    *parts = others;
+}
+
+/// Merge adjacent same-role messages, strip empty parts, sanitize
+/// functionResponse payloads, and guarantee initial + terminal user turns —
+/// answering unresponded `functionCall`s with a synthesized functionResponse
+/// turn (#4273 second half, #4802). Mirrors `normalizeGeminiContents` in
+/// `open-sse/translator/formats/gemini.js`.
+pub(crate) fn normalize_gemini_contents(contents: &[Value], model: &str) -> Vec<Value> {
+    let fr_last = is_gemini4_model(model);
+    let mut out: Vec<Value> = Vec::new();
+
+    for c in contents {
+        let Some(co) = c.as_object() else {
+            continue;
+        };
+        let Some(role) = co.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(parts_arr) = co.get("parts").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut parts: Vec<Value> = parts_arr
+            .iter()
+            .filter(|p| p.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+            .map(sanitize_function_response_part)
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let merge_into_last = out
+            .last()
+            .and_then(|l| l.get("role"))
+            .and_then(Value::as_str)
+            == Some(role);
+        if merge_into_last {
+            if let Some(last_parts) = out
+                .last_mut()
+                .and_then(|l| l.get_mut("parts"))
+                .and_then(Value::as_array_mut)
+            {
+                last_parts.append(&mut parts);
+                if fr_last {
+                    move_function_responses_last(last_parts);
+                }
+            }
+        } else {
+            let mut entry = c.clone();
+            if let Some(o) = entry.as_object_mut() {
+                o.insert("parts".to_string(), Value::Array(parts));
+            }
+            out.push(entry);
+        }
+    }
+
+    // Gemini requires the first turn to be a user turn.
+    if !out.is_empty() && out[0].get("role").and_then(Value::as_str) != Some("user") {
+        out.insert(0, json!({"role": "user", "parts": [{"text": "..."}]}));
+    }
+
+    // Gemini requires the last turn to be a user turn; answer any trailing
+    // functionCalls with a synthesized functionResponse (#4273).
+    if let Some(last) = out.last() {
+        if last.get("role").and_then(Value::as_str) == Some("model") {
+            let last_parts: Vec<Value> = last
+                .get("parts")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let fn_calls: Vec<&Value> = last_parts
+                .iter()
+                .filter(|p| {
+                    p.get("functionCall")
+                        .map(|v| v.is_object())
+                        .unwrap_or(false)
+                })
+                .collect();
+            let resp_parts: Vec<Value> = if !fn_calls.is_empty() {
+                fn_calls
+                    .iter()
+                    .map(|p| {
+                        let call = p.get("functionCall").cloned().unwrap_or(Value::Null);
+                        let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let mut fr = json!({
+                            "name": name,
+                            "response": {"result": "Continue."}
+                        });
+                        if let Some(id) = call.get("id").and_then(Value::as_str) {
+                            if !id.is_empty() {
+                                fr["id"] = json!(id);
+                            }
+                        }
+                        json!({"functionResponse": fr})
+                    })
+                    .collect()
+            } else {
+                vec![json!({"text": "Continue."})]
+            };
+            out.push(json!({"role": "user", "parts": resp_parts}));
+        }
+    }
+
+    out
+}
+
+/// Build the `response` payload for a Gemini `functionResponse` from a raw
+/// OpenAI tool message `content` value. Mirrors the parsing block in
+/// `openai-to-gemini.js`: strings are JSON-parsed (a failed parse wraps the
+/// raw string), non-strings pass through, objects/arrays are used directly,
+/// and anything else is double-wrapped in `{result: ...}`.
+fn tool_response_payload(resp: &Value) -> Value {
+    let parsed: Option<Value> = match resp {
+        Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+        other => Some(other.clone()),
+    };
+    let final_resp = match parsed {
+        // Parse failure (or literal null) → wrap the raw value.
+        None | Some(Value::Null) => json!({"result": resp}),
+        Some(v) if v.is_object() || v.is_array() => v,
+        Some(v) => json!({"result": v}),
+    };
+    json!({"result": final_resp})
+}
+
 /// Default thinking signature for antigravity (mirrors DEFAULT_THINKING_AG_SIGNATURE in JS).
 pub const DEFAULT_THINKING_AG_SIGNATURE: &str = "EuwGCukGAXLI2nxwZIq54WWSoL/YN0P3TsDZ7zRnLi8g0S4aVr2HUGxvaHKySuY6HAVzcE0GPGjXrytLIldxthSvfxgUlJh6Qa9Z+Oj5QZBlYdg6HaJ6yuY5R7waE6rdwBsRf7Ft2j3DJ9rMi9qhWFqApewYtPhls3VHtuvND3l8Rm09+lbAXQs6KKWEWrxNLKTBkfpMgXhRERc/TQRMZu1twAablm6/Zk1tsYRvfWKLsNbeKF+CCojJdXJKvnR/8Ouuoa+Y2Ti20hcW7aZIIjZDFYPU//k6Ybmhg69J/imbFai2ckhfLaisqdDkdoIiBJScTOUvYqP6AE9d4MsydSC+UlhIMk4hoP76R8vUSCZRMkjOaDXstf/QoVZKbt94wyRZgAJ1G0BqI8L5ow86kLpA4wJEtxsRGymOE4bKUvApveBakYDNM9APkf+LbtbzWSseGjoZcSlycF9iN8Q2XNYKRrHbv3Lr5Y8JjdH/5y/6SHkNehTEZugaeGnSPSyCTWto1kQgHpxdWmhkLfJGNUGLmue7Mesj4TSms4J33mRpYVhNB/J333FCqIP0hr/E7BkkjEn7yZ4X7SQlh+xKPurapsnHRwiKmtsilmEFrnTE9iQr+pMr6M29qqFNv1tr5yumbaJw8JW9sB15tNsRv+dW6BjNanbsKz7HCgKUBc8tGy+7YuhXzAfViyRefcjK7eZW0Fbyt7AbybJTKz78W8NH7ye6LAwzOebXpeZ4D43fNIt8bKh26qgduSQv/7o+pAflkuqHZ99YWgHQ8h8OkZFi3eOiSYjsjhdZ/czWOdoPI/OnqIldzMPF5YlrKBLFX8VhRKVmqgsmWf5PHGulHhMkVlS+XG2UIseGy69ARa93D78Gsa+1n1kJr7EEB7Rh+27vUMxVYLdz1yMSvE5nalTAlg/ZeG8+XQ0cHuAI3KbQpHW2Q++RdXfm5JzD5WdJZUU+Zn8t8UUn85BH4RxZLeE0qJikgSsKoYVBc6YhiMjhPgkR95ReimY4Z0xCJdRo1gjexOFeODZMpQF6Yxnoic7IrdgsFA3iePTbFnPp3IAM1fAThWhXJUn3QInUOTd5o1qmTmn6REbL15g/JQNl+dqUoPkhleeb2V3kjqp1okmO3wMZbPknR3S1LZNmlS72/iBQUm+n2b/RCn4PjmM2";
 
@@ -681,7 +944,6 @@ pub const DEFAULT_THINKING_GEMINI_CLI_SIGNATURE: &str = "CiQBjz1rX/AlslZWMe5RgBt
 
 /// Core: Convert OpenAI request to Gemini format.
 fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &str) -> Value {
-    let _ = model;
     let mut result = serde_json::json!({
         "contents": [],
         "generationConfig": {},
@@ -694,15 +956,20 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
         ]
     });
 
-    // Generation config
-    if let Some(temp) = body.get("temperature") {
-        result["generationConfig"]["temperature"] = temp.clone();
-    }
-    if let Some(top_p) = body.get("top_p") {
-        result["generationConfig"]["topP"] = top_p.clone();
-    }
-    if let Some(top_k) = body.get("top_k") {
-        result["generationConfig"]["topK"] = top_k.clone();
+    // Generation config — Gemini 4 removed the sampling params, forwarding
+    // them fails the request (#4802). Mirrors `allowSampling` in
+    // openai-to-gemini.js.
+    let allow_sampling = !is_gemini4_model(model);
+    if allow_sampling {
+        if let Some(temp) = body.get("temperature") {
+            result["generationConfig"]["temperature"] = temp.clone();
+        }
+        if let Some(top_p) = body.get("top_p") {
+            result["generationConfig"]["topP"] = top_p.clone();
+        }
+        if let Some(top_k) = body.get("top_k") {
+            result["generationConfig"]["topK"] = top_k.clone();
+        }
     }
     if let Some(max_tokens) = body.get("max_tokens") {
         result["generationConfig"]["maxOutputTokens"] = max_tokens.clone();
@@ -731,8 +998,12 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
         }
     }
 
-    // Build tool responses cache
-    let mut tool_responses: HashMap<String, String> = HashMap::new();
+    // Build tool responses cache — queued per id rather than a single value:
+    // an OpenAI tool_call_id is only unique within its own assistant turn, so
+    // a long agent session can reuse one id for two different tool results.
+    // Each functionCall consumes the oldest unconsumed result for its id.
+    // Mirrors `toolResponses` + `toolResponseCursor` in openai-to-gemini.js (#4273).
+    let mut tool_responses: HashMap<String, Vec<Value>> = HashMap::new();
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
         for msg in messages {
             if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
@@ -740,14 +1011,20 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
                     msg.get("tool_call_id").and_then(|v| v.as_str()),
                     msg.get("content"),
                 ) {
-                    tool_responses.insert(
-                        tool_call_id.to_string(),
-                        serde_json::to_string(content).unwrap_or_default(),
-                    );
+                    tool_responses
+                        .entry(tool_call_id.to_string())
+                        .or_default()
+                        .push(content.clone());
                 }
             }
         }
     }
+    let mut tool_response_cursor: HashMap<String, usize> = HashMap::new();
+
+    // Gemini validates that functionCall ids are unique across the WHOLE
+    // history; each emitted functionCall takes the next free id and its
+    // matching functionResponse reuses it (#4532).
+    let mut tool_call_id_uniquifier = ToolCallIdUniquifier::default();
 
     // Convert messages
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
@@ -809,7 +1086,11 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
 
                 // Tool calls
                 if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
-                    let mut tool_call_ids: Vec<String> = Vec::new();
+                    // (orig_id, emit_id, call_name) — the ORIGINAL id resolves
+                    // the queued tool result, the EMITTED id is uniquified, and
+                    // the NAME travels with the pair so a later call reusing
+                    // the id cannot rename this turn's response (#4273 #4532).
+                    let mut tool_call_ids: Vec<(String, String, String)> = Vec::new();
                     for tc in tool_calls {
                         if tc.get("type").and_then(|v| v.as_str()) != Some("function") {
                             continue;
@@ -820,19 +1101,21 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
                             .get("arguments")
                             .map(|v| try_parse_json(v.as_str().unwrap_or("{}")))
                             .unwrap_or(Value::Null);
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let orig_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let emit_id = tool_call_id_uniquifier.next(orig_id);
 
-                        parts.push(serde_json::json!({
+                        let mut call_part = serde_json::json!({
                             "thoughtSignature": signature,
                             "functionCall": {
-                                "id": id,
                                 "name": sanitize_gemini_function_name(name),
                                 "args": args
                             }
-                        }));
-                        if !id.is_empty() {
-                            tool_call_ids.push(id.to_string());
+                        });
+                        if !emit_id.is_empty() {
+                            call_part["functionCall"]["id"] = json!(emit_id);
                         }
+                        parts.push(call_part);
+                        tool_call_ids.push((orig_id.to_string(), emit_id, name.to_string()));
                     }
 
                     if !parts.is_empty() {
@@ -845,37 +1128,56 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
                             }));
                     }
 
-                    // Check if there are actual tool responses
-                    let has_actual_responses = tool_call_ids
-                        .iter()
-                        .any(|fid| tool_responses.contains_key(fid));
-                    if has_actual_responses {
+                    // Emit functionResponse parts whenever this isn't the last
+                    // message (intermediate turn) or actual tool results are
+                    // queued — matching upstream's `hasActualResponses ||
+                    // isIntermediate`. Each call consumes the oldest
+                    // unconsumed queued result for its ORIGINAL id; the
+                    // emitted id is the uniquified one (#4273 #4532).
+                    let is_intermediate = i + 1 < messages.len();
+                    let has_actual_responses = tool_call_ids.iter().any(|(orig_id, _, _)| {
+                        let cursor = tool_response_cursor.get(orig_id).copied().unwrap_or(0);
+                        let queued = tool_responses.get(orig_id).map(|q| q.len()).unwrap_or(0);
+                        cursor < queued
+                    });
+                    if has_actual_responses || is_intermediate {
                         let mut tool_parts = Vec::new();
-                        for fid in &tool_call_ids {
-                            if let Some(resp_str) = tool_responses.get(fid) {
-                                let name = tc_id_to_name.get(fid).cloned().unwrap_or_else(|| {
-                                    let id_parts: Vec<&str> = fid.split('-').collect();
+                        for (orig_id, emit_id, call_name) in &tool_call_ids {
+                            let queue = tool_responses.get(orig_id);
+                            let cursor = tool_response_cursor.get(orig_id).copied().unwrap_or(0);
+                            let resp = match queue {
+                                Some(q) if cursor < q.len() => {
+                                    let r = q[cursor].clone();
+                                    *tool_response_cursor.entry(orig_id.clone()).or_insert(0) += 1;
+                                    r
+                                }
+                                _ => Value::String(String::new()),
+                            };
+
+                            // Name comes from THIS call first; fall back to the
+                            // conversation-wide map, then the id heuristic.
+                            let name = if !call_name.is_empty() {
+                                call_name.clone()
+                            } else {
+                                tc_id_to_name.get(orig_id).cloned().unwrap_or_else(|| {
+                                    let id_parts: Vec<&str> = orig_id.split('-').collect();
                                     if id_parts.len() > 2 {
                                         id_parts[..id_parts.len() - 2].join("-")
                                     } else {
-                                        fid.clone()
+                                        orig_id.clone()
                                     }
-                                });
-                                let parsed_resp = try_parse_json(resp_str);
-                                let final_resp =
-                                    if parsed_resp.is_object() || parsed_resp.is_array() {
-                                        parsed_resp
-                                    } else {
-                                        serde_json::json!({"result": parsed_resp})
-                                    };
-                                tool_parts.push(serde_json::json!({
-                                    "functionResponse": {
-                                        "id": fid,
-                                        "name": sanitize_gemini_function_name(&name),
-                                        "response": {"result": final_resp}
-                                    }
-                                }));
+                                })
+                            };
+                            let mut fr = serde_json::json!({
+                                "name": sanitize_gemini_function_name(&name),
+                                "response": tool_response_payload(&resp)
+                            });
+                            if !emit_id.is_empty() {
+                                fr["id"] = json!(emit_id);
                             }
+                            tool_parts.push(serde_json::json!({
+                                "functionResponse": fr
+                            }));
                         }
                         if !tool_parts.is_empty() {
                             result["contents"]
@@ -942,6 +1244,14 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &st
         if !function_declarations.is_empty() {
             result["tools"] = serde_json::json!([{"functionDeclarations": function_declarations}]);
         }
+    }
+
+    // normalizeGeminiContents: merge adjacent same-role turns, strip empty
+    // parts, sanitize functionResponse payloads ($ref rename), order
+    // functionResponses last for Gemini 4, and guarantee initial/terminal
+    // user turns (#4273, #4802).
+    if let Some(contents) = result.get("contents").and_then(Value::as_array).cloned() {
+        result["contents"] = Value::Array(normalize_gemini_contents(&contents, model));
     }
 
     let _ = stream; // Gemini handles stream via URL path, not body param
@@ -1142,5 +1452,297 @@ mod tests {
 
         assert!(body.get("contents").is_some());
         assert!(body.get("generationConfig").is_some());
+    }
+
+    // ---- .4: `properties` map must not be treated as a schema node ----
+
+    #[test]
+    fn test_ensure_object_type_param_named_properties() {
+        // A tool parameter literally named `properties` must survive as a
+        // normal property — the properties MAP is not a schema node.
+        let mut schema: Value = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "properties": {"type": "string"},
+                "nested": {
+                    "properties": {"inner": {"type": "number"}}
+                }
+            }
+        });
+        clean_json_schema_for_antigravity(&mut schema);
+
+        let props = schema["properties"].as_object().unwrap();
+        // The `properties` param keeps its own schema untouched.
+        assert_eq!(props["properties"], json!({"type": "string"}));
+        // The nested object schema still gets type:"object" inferred.
+        assert_eq!(
+            props["nested"]["type"],
+            json!("object"),
+            "nested schema with properties must get type:object"
+        );
+        assert_eq!(
+            props["nested"]["properties"]["inner"],
+            json!({"type": "number"})
+        );
+    }
+
+    // ---- .5: uniquify duplicate tool_call_ids + per-id result queue ----
+
+    #[test]
+    fn test_duplicate_tool_call_ids_get_unique_emit_ids() {
+        let mut body: Value = serde_json::json!({
+            "model": "gemini-3-pro",
+            "messages": [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_a", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "first"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "tool_b", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "second"}
+            ]
+        });
+
+        openai_to_gemini_request("gemini-3-pro", &mut body, true, None);
+
+        let contents = body["contents"].as_array().unwrap();
+        let mut call_ids: Vec<String> = Vec::new();
+        let mut resp_ids: Vec<String> = Vec::new();
+        let mut resp_results: Vec<String> = Vec::new();
+        for c in contents {
+            for p in c["parts"].as_array().unwrap() {
+                if let Some(fc) = p.get("functionCall") {
+                    call_ids.push(fc["id"].as_str().unwrap().to_string());
+                }
+                if let Some(fr) = p.get("functionResponse") {
+                    resp_ids.push(fr["id"].as_str().unwrap().to_string());
+                    // response.result.result is the double-wrapped payload
+                    resp_results.push(
+                        fr["response"]["result"]["result"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        // Both functionCall ids must be unique across the whole history.
+        assert_eq!(call_ids, vec!["call_1", "call_1-2"]);
+        // Each functionResponse reuses its call's emitted id.
+        assert_eq!(resp_ids, vec!["call_1", "call_1-2"]);
+        // Oldest unconsumed result per id: first call gets "first", second "second".
+        assert_eq!(resp_results, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn test_tool_call_id_uniquifier() {
+        let mut u = ToolCallIdUniquifier::default();
+        assert_eq!(u.next("a"), "a");
+        assert_eq!(u.next("a"), "a-2");
+        assert_eq!(u.next("a"), "a-3");
+        assert_eq!(u.next("b"), "b");
+        // An id that already ends in -2 keeps counting.
+        u.next("x-2");
+        assert_eq!(u.next("x-2"), "x-2-2");
+    }
+
+    // ---- .6: Gemini 4 sampling params + normalize_gemini_contents ----
+
+    #[test]
+    fn test_gemini4_drops_sampling_params() {
+        let body_in = |model: &str| {
+            json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "top_k": 40,
+                "max_tokens": 100
+            })
+        };
+
+        let mut g4 = body_in("gemini-4-pro");
+        openai_to_gemini_request("gemini-4-pro", &mut g4, true, None);
+        let gc = &g4["generationConfig"];
+        assert!(gc.get("temperature").is_none());
+        assert!(gc.get("topP").is_none());
+        assert!(gc.get("topK").is_none());
+        // max_tokens is still forwarded.
+        assert_eq!(gc["maxOutputTokens"], json!(100));
+
+        // Prefixed model ids also match (upstream regex allows `provider/gemini-4...`).
+        let mut g4p = body_in("google/gemini-4.0-pro");
+        openai_to_gemini_request("google/gemini-4.0-pro", &mut g4p, true, None);
+        assert!(g4p["generationConfig"].get("temperature").is_none());
+
+        // Gemini 3 keeps sampling params.
+        let mut g3 = body_in("gemini-3-pro");
+        openai_to_gemini_request("gemini-3-pro", &mut g3, true, None);
+        let gc3 = &g3["generationConfig"];
+        assert_eq!(gc3["temperature"], json!(0.5));
+        assert_eq!(gc3["topP"], json!(0.9));
+        assert_eq!(gc3["topK"], json!(40));
+    }
+
+    #[test]
+    fn test_normalize_merges_adjacent_same_role() {
+        let contents = vec![
+            json!({"role": "user", "parts": [{"text": "a"}]}),
+            json!({"role": "user", "parts": [{"text": "b"}, {}]}),
+            json!({"role": "model", "parts": [{"text": "c"}]}),
+        ];
+        let out = normalize_gemini_contents(&contents, "gemini-3-pro");
+        assert_eq!(
+            out.len(),
+            3,
+            "merged user + model + synthetic user: {:?}",
+            out
+        );
+        assert_eq!(out[0]["role"], "user");
+        // Empty object part stripped; adjacent user turns merged.
+        assert_eq!(
+            out[0]["parts"].as_array().unwrap().len(),
+            2,
+            "merged user parts: {:?}",
+            out[0]["parts"]
+        );
+        // Terminal model turn answered with a synthetic user turn.
+        assert_eq!(out[1]["role"], "model");
+        assert_eq!(out[2]["role"], "user");
+        assert_eq!(out[2]["parts"][0]["text"], "Continue.");
+    }
+
+    #[test]
+    fn test_normalize_unresponded_function_call_answered() {
+        let contents = vec![
+            json!({"role": "user", "parts": [{"text": "hi"}]}),
+            json!({
+                "role": "model",
+                "parts": [{
+                    "functionCall": {"id": "call_9", "name": "my_tool", "args": {}}
+                }]
+            }),
+        ];
+        let out = normalize_gemini_contents(&contents, "gemini-3-pro");
+        assert_eq!(out.len(), 3);
+        let fr = &out[2]["parts"][0]["functionResponse"];
+        assert_eq!(fr["id"], "call_9");
+        assert_eq!(fr["name"], "my_tool");
+        assert_eq!(fr["response"]["result"], "Continue.");
+    }
+
+    #[test]
+    fn test_gemini4_function_response_ordered_last_on_merge() {
+        // Two adjacent user turns merge; for Gemini 4 the functionResponse
+        // part must end up last in the merged turn (#4802).
+        let contents = vec![
+            json!({"role": "user", "parts": [{"text": "a"}]}),
+            json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {"name": "t", "response": {"result": "ok"}}
+                }]
+            }),
+            json!({"role": "user", "parts": [{"text": "tail"}]}),
+        ];
+        let out = normalize_gemini_contents(&contents, "gemini-4-pro");
+        assert_eq!(out.len(), 1, "all user turns merged: {:?}", out);
+        let parts = out[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert!(
+            parts[2].get("functionResponse").is_some(),
+            "functionResponse must be last for gemini-4: {:?}",
+            parts
+        );
+    }
+
+    // ---- .7: $ref keys renamed inside functionResponse payloads ----
+
+    #[test]
+    fn test_sanitize_function_response_payload_renames_ref() {
+        let payload = json!({
+            "result": {
+                "schema": {
+                    "$ref": "#/$defs/Thing",
+                    "nested": [{"$ref": "#/other"}, {"keep": 1}]
+                },
+                "$ref": "top-level"
+            }
+        });
+        let out = sanitize_function_response_payload(&payload);
+        assert!(out["result"]["schema"].get("$ref").is_none());
+        assert_eq!(out["result"]["schema"]["_ref"], "#/$defs/Thing");
+        assert_eq!(out["result"]["schema"]["nested"][0]["_ref"], "#/other");
+        assert_eq!(out["result"]["schema"]["nested"][1]["keep"], 1);
+        assert_eq!(out["result"]["_ref"], "top-level");
+    }
+
+    #[test]
+    fn test_function_response_ref_renamed_end_to_end() {
+        let mut body: Value = serde_json::json!({
+            "model": "gemini-3-pro",
+            "messages": [
+                {"role": "user", "content": "fetch"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_ref",
+                        "type": "function",
+                        "function": {"name": "webfetch", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_ref",
+                    "content": "{\"$ref\": \"#/$defs/X\", \"url\": \"https://example.com\"}"
+                }
+            ]
+        });
+        openai_to_gemini_request("gemini-3-pro", &mut body, true, None);
+
+        let contents = body["contents"].as_array().unwrap();
+        let fr_part = contents
+            .iter()
+            .flat_map(|c| c["parts"].as_array().unwrap().iter())
+            .find(|p| p.get("functionResponse").is_some())
+            .expect("functionResponse part");
+        let response = &fr_part["functionResponse"]["response"];
+        // The parsed tool result object is placed under result; $ref renamed.
+        let result_obj = &response["result"];
+        assert!(
+            serde_json::to_string(result_obj).unwrap().contains("_ref"),
+            "expected _ref rename in {:?}",
+            result_obj
+        );
+        assert!(!serde_json::to_string(result_obj)
+            .unwrap()
+            .contains("\"$ref\""));
+    }
+
+    #[test]
+    fn test_is_gemini4_model() {
+        assert!(is_gemini4_model("gemini-4-pro"));
+        assert!(is_gemini4_model("gemini-4"));
+        assert!(is_gemini4_model("google/gemini-4.0-pro"));
+        assert!(is_gemini4_model("GEMINI-4-PRO"));
+        assert!(!is_gemini4_model("gemini-3-pro"));
+        assert!(!is_gemini4_model("gemini-4x"));
+        assert!(!is_gemini4_model("mygemini-4-pro"));
+        assert!(!is_gemini4_model(""));
     }
 }

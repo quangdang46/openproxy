@@ -269,14 +269,24 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                         escape_json_string(text)
                                     ));
                             }
-                            "thinking_delta" if !text.is_empty() => {
+                            "thinking_delta" => {
+                                // Thinking travels only in reasoning_content —
+                                // never as "[thinking] ... [/thinking]" markup in
+                                // the OpenAI content field (9router parity).
                                 self.state.in_thinking = true;
                                 self.state.current_thinking_index = Some(index);
-                                output_lines.push(format!(
-                                        r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                        index,
-                                        escape_json_string(text)
-                                    ));
+                                let thinking = delta
+                                    .get("thinking")
+                                    .and_then(|t| t.as_str())
+                                    .or_else(|| delta.get("text").and_then(|t| t.as_str()))
+                                    .unwrap_or("");
+                                if !thinking.is_empty() {
+                                    output_lines.push(format!(
+                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"reasoning_content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                            index,
+                                            escape_json_string(thinking)
+                                        ));
+                                }
                             }
                             "input_json_delta" => {
                                 // Tool call arguments — accumulate into buffer and emit
@@ -333,6 +343,8 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                             .map(|r| match r.as_str() {
                                 "end_turn" | "stop" => "stop".to_string(),
                                 "max_tokens" => "length".to_string(),
+                                // Upstream toOpenAIFinish: refusal → content_filter.
+                                "refusal" => "content_filter".to_string(),
                                 other => other.to_string(),
                             })
                             .unwrap_or_else(|| "stop".to_string());

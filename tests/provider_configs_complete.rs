@@ -37,6 +37,7 @@ const OAUTH_REGISTRY_IDS: &[&str] = &[
     "kimi",
     "kimi-coding",
     "kiro",
+    "nous",
     "openai-native",
     "qoder",
     "trae",
@@ -56,6 +57,7 @@ const DEVICE_CODE_IDS: &[&str] = &[
     "codebuddy-intl",
     "qoder",
     "grok-cli",
+    "nous",
 ];
 
 /// OAuth providers routed to a dedicated executor instead of `DefaultExecutor`.

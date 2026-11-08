@@ -21,6 +21,10 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
+/// Live model catalog (GetUsableModels) + Auto resolution — port of
+/// `open-sse/services/cursorModels.js`.
+pub(crate) mod catalog;
+
 /// 9router registry default baseUrl + chatPath.
 const CURSOR_API_ENDPOINT: &str =
     "https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
@@ -556,6 +560,10 @@ pub enum AgentEvent {
     /// The server asked for client context — respond with an empty
     /// RequestContext on the request half-stream (9router cursor.js:571-583).
     RequestContext,
+    /// Upstream produced activity that is not client-visible text (e.g. a
+    /// thinking delta, cursor.js field 4). Marks the turn as non-empty for
+    /// empty-turn recovery without leaking reasoning to the client.
+    Progress,
     Done,
     /// Upstream error. The bool marks `resource_exhausted` (gRPC code 8) —
     /// JS createErrorResponse maps it to HTTP 429 rate_limit_error so account
@@ -644,6 +652,16 @@ fn consume_agent_frames(
                         }
                     }
                 }
+                // Field 4 → thinking delta (cursor.js:604-617). Kept
+                // upstream-only, but it still counts as turn activity so a
+                // thinking-only response is not misread as an empty turn.
+                if let Some(thinking) = update_fields.get(&4) {
+                    for t in thinking {
+                        if !extract_agent_string(t, 1).is_empty() {
+                            events.push(AgentEvent::Progress);
+                        }
+                    }
+                }
                 // Field 14 → internal reasoning; upstream-only, end of turn.
                 if update_fields.contains_key(&14) {
                     *finished = true;
@@ -682,6 +700,11 @@ fn consume_agent_frames(
 /// the turn ends; a half-closed request stream before the server streams
 /// yields "No exec result" (see 9router openAgentHttp2Stream + shunt/agent.rs).
 /// Mirrors 9router executeAgent `consume` (cursor.js:539-591).
+/// Returns `(body, produced_output)`. `produced_output` is true once the
+/// turn emitted client-visible content (text deltas or an error envelope) —
+/// the empty-turn recovery policy (9router cursor.js `runWithRetry`) only
+/// retries when a long replay ends with zero deltas, never once real output
+/// has been produced.
 async fn consume_agent_stream(
     mut incoming: Incoming,
     response_id: &str,
@@ -689,9 +712,10 @@ async fn consume_agent_stream(
     model: &str,
     stream: bool,
     request_body: &Value,
-) -> Result<Vec<u8>, CursorExecutorError> {
+) -> Result<(Vec<u8>, bool), CursorExecutorError> {
     let mut pending = Vec::new();
     let mut finished = false;
+    let mut produced_output = false;
     let mut content = String::new();
     let mut chunks: Vec<String> = Vec::new();
     // Request-context handshake payloads the consumer must write back on the
@@ -719,6 +743,7 @@ async fn consume_agent_stream(
                 for event in events {
                     match event {
                         AgentEvent::Text(delta) => {
+                            produced_output = true;
                             content.push_str(&delta);
                             if stream {
                                 let sse = format_chat_chunk_sse(
@@ -734,6 +759,9 @@ async fn consume_agent_stream(
                         AgentEvent::RequestContext => {
                             context_responses.push(create_request_context_response());
                         }
+                        AgentEvent::Progress => {
+                            produced_output = true;
+                        }
                         AgentEvent::Done => {}
                         AgentEvent::Error(msg, is_rate_limit) => {
                             // JS createErrorResponse: resource_exhausted → 429
@@ -746,7 +774,7 @@ async fn consume_agent_stream(
                             if stream {
                                 chunks.push(format!("data: {error_json}\n\n"));
                                 chunks.push(SSE_DONE.to_string());
-                                return Ok(chunks.concat().into_bytes());
+                                return Ok((chunks.concat().into_bytes(), true));
                             }
                             // Non-streaming gets a clean JSON envelope, not an
                             // SSE body. The caller detects it and answers 400
@@ -754,7 +782,7 @@ async fn consume_agent_stream(
                             // cursor.js:756-767; returning `data: {...}\n\ndata:
                             // [DONE]` under a JSON content-type hands the client
                             // a stream it never asked for, as a 200.
-                            return Ok(serde_json::to_vec(&error_json)?);
+                            return Ok((serde_json::to_vec(&error_json)?, true));
                         }
                     }
                 }
@@ -772,10 +800,10 @@ async fn consume_agent_stream(
             Some("stop"),
         ));
         chunks.push(SSE_DONE.to_string());
-        Ok(chunks.concat().into_bytes())
+        Ok((chunks.concat().into_bytes(), produced_output))
     } else {
         let usage = cursor_estimate_usage(request_body, content.len());
-        Ok(serde_json::to_string(&serde_json::json!({
+        let body = serde_json::to_string(&serde_json::json!({
             "id": response_id,
             "object": "chat.completion",
             "created": created,
@@ -788,7 +816,8 @@ async fn consume_agent_stream(
             "usage": usage,
         }))
         .unwrap_or_default()
-        .into_bytes())
+        .into_bytes();
+        Ok((body, produced_output))
     }
 }
 
@@ -1948,6 +1977,104 @@ fn cursor_request_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(60))
 }
 
+// ==================== EMPTY-TURN RECOVERY ====================
+//
+// 9router cursor.js:380-405 — long-session empty-turn recovery. Cursor
+// occasionally answers a long history replay with HTTP 200 and zero deltas
+// (empty turn); one retry on a tail-only frame recovers the session instead
+// of failing the client turn. All three knobs are env-overridable exactly
+// like upstream.
+
+/// 9router `CURSOR_EMPTY_TURN_MAX_RETRIES` (default 1).
+fn cursor_empty_turn_max_retries() -> u32 {
+    std::env::var("CURSOR_EMPTY_TURN_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+/// 9router `CURSOR_TAIL_ONLY_THRESHOLD` (default 80): only sessions at or
+/// above this message count are eligible — a first-message empty turn is a
+/// protocol condition, not a wedged replay.
+fn cursor_tail_only_threshold() -> usize {
+    std::env::var("CURSOR_TAIL_ONLY_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(80)
+}
+
+/// 9router `CURSOR_EMPTY_TURN_RETRY_DELAY_MS` (default 400).
+fn cursor_empty_turn_retry_delay() -> Duration {
+    std::env::var("CURSOR_EMPTY_TURN_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(400))
+}
+
+fn message_role(message: &Value) -> &str {
+    message.get("role").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Minimal tail for wedged long sessions — drops bulk history and tool XML
+/// (9router `tailOnlyCursorMessages`, cursor.js:399-419). Keeps every system
+/// message except prior recovery notes, then appends the recovery note and
+/// the latest turn anchored on the last user/tool message (including the
+/// preceding assistant message when present).
+fn tail_only_cursor_messages(messages: &[Value]) -> Vec<Value> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+    let is_system = |m: &Value| message_role(m) == "system";
+    let system_messages: Vec<Value> = messages
+        .iter()
+        .filter(|m| {
+            is_system(m)
+                && !m
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .contains("[9router]")
+        })
+        .cloned()
+        .collect();
+    let chat_messages: Vec<&Value> = messages.iter().filter(|m| !is_system(m)).collect();
+
+    let mut anchor = chat_messages.len().saturating_sub(1);
+    for (i, message) in chat_messages.iter().enumerate().rev() {
+        let role = message_role(message);
+        if role == "user" || role == "tool" {
+            anchor = i;
+            break;
+        }
+    }
+    let tail_start = if anchor > 0 && message_role(chat_messages[anchor - 1]) == "assistant" {
+        anchor - 1
+    } else {
+        anchor
+    };
+    let mut tail: Vec<Value> = chat_messages
+        .get(tail_start..)
+        .unwrap_or(&[])
+        .iter()
+        .map(|m| (*m).clone())
+        .collect();
+
+    let note = json!({
+        "role": "system",
+        "content": format!(
+            "[9router] Long session: {} messages trimmed to the latest turn. Answer the current request; re-read files if needed.",
+            messages.len()
+        ),
+    });
+
+    let mut result = system_messages;
+    result.push(note);
+    result.append(&mut tail);
+    result
+}
+
 /// Detect a rate-limit error body produced by `build_cursor_error_body`.
 /// A hang timeout (`connection_error` / `HTTP/2 request timed out`) is NOT
 /// a rate limit — it must stay 500 so fallback retries a fresh attempt.
@@ -2165,7 +2292,6 @@ impl CursorExecutor {
             .unwrap_or(true);
 
         let messages = Self::extract_messages(&request.body)?;
-        let frame = build_agent_run_frame(&messages, &actual_model);
         let url = format!("{AGENT_BASE_URL}{AGENT_RUN_PATH}");
         let headers = build_cursor_headers(access_token, Some(machine_id), ghost_mode)?;
 
@@ -2174,91 +2300,171 @@ impl CursorExecutor {
         // keep the response side streaming and write the request-context
         // handshake back on the request half-stream as frames arrive.
         let client = self.pool.get_hyper_direct("cursor")?;
-        // 9router v0.5.50 agent path uses the same buildHeaders as the chat
-        // path (cursorChecksum.js buildCursorHeaders — x-cursor-client-type
-        // "ide", x-ghost-mode, checksum bundle), spread over the h2 request.
-        let request_builder = hyper::Request::builder()
-            .method(http::Method::POST)
-            .uri(url.clone())
-            .header(":authority", "agent.api5.cursor.sh")
-            .header(":scheme", "https")
-            .header("accept", "application/connect+proto, */*")
-            .header("content-type", "application/connect+proto")
-            .header("connect-accept-encoding", "gzip")
-            .header("connect-protocol-version", "1")
-            .header("user-agent", "connect-es/1.6.1")
-            .header("x-cursor-client-type", "ide")
-            .header("x-ghost-mode", if ghost_mode { "true" } else { "false" })
-            .header("x-request-id", uuid::Uuid::new_v4().to_string());
 
-        let mut request_builder = request_builder;
-        for (name, value) in headers.iter() {
-            request_builder = request_builder.header(name.as_str(), value.as_bytes());
-        }
-        let req = request_builder
-            .body(Full::new(bytes::Bytes::from(frame)))
-            .map_err(CursorExecutorError::InvalidRequest)?;
-        // Hang-timeout guard (cursor.js:349-351 `hangTimeout` — close the
-        // session if the server never responds). Maps to a `connection_error`
-        // 500 via `execute`, matching cursor.js `executeAgent` semantics.
-        let response = tokio::time::timeout(cursor_request_timeout(), client.request(req))
-            .await
-            .map_err(|_| CursorExecutorError::Timeout("HTTP/2 request timed out".to_string()))?
-            .map_err(CursorExecutorError::Hyper)?;
-
-        let status = response.status();
-        if status != 200 {
-            // Non-200: read the raw body and surface it as a JSON error
-            // (cursor.js:509-528 — errors are returned untransformed so
-            // account fallback can read the body).
-            let error_text = response
-                .into_body()
-                .collect()
-                .await
-                .map(|collected| collected.to_bytes().to_vec())
-                .unwrap_or_default();
-            let error_text = String::from_utf8_lossy(&error_text).to_string();
-            let error_body = serde_json::json!({
-                "error": {
-                    "message": format!(
-                        "Cursor AgentService {}: {}",
-                        status,
-                        if error_text.is_empty() {
-                            "request failed".to_string()
-                        } else {
-                            error_text
-                        }
-                    ),
-                    "type": "api_error",
+        // "Auto (Server Picks)" / "default" is a picker alias, not an
+        // AgentService model id — sending it verbatim yields an empty turn.
+        // Resolve it to the account's default agent-capable model from the
+        // live GetUsableModels catalog (9router cursor.js:664-670 +
+        // cursorModels.js resolveAutoModelSelection). Fail-open: any catalog
+        // problem leaves the alias untouched, matching upstream.
+        let mut run_model = actual_model.clone();
+        if catalog::is_auto_model_selection(&actual_model) {
+            if let Some(models) =
+                catalog::resolve_cursor_models_for_connection(&client, &request.credentials, false)
+                    .await
+            {
+                if let Some(selection) = catalog::resolve_auto_model_selection(&models) {
+                    tracing::info!(
+                        "CURSOR: auto model resolved: {actual_model} → {} ({})",
+                        selection.model_id,
+                        selection.matched_by
+                    );
+                    run_model = selection.model_id;
                 }
-            });
-            let http_response = http::Response::builder()
-                .status(status)
-                .header("content-type", "application/json")
-                .body(reqwest::Body::from(
-                    serde_json::to_string(&error_body).unwrap_or_default(),
-                ))
-                .map_err(CursorExecutorError::InvalidRequest)?;
-            return Ok(CursorExecutorResponse {
-                response: UpstreamResponse::Reqwest(http_response.into()),
-                url,
-                headers,
-                transformed_body: request.body,
-                transport: TransportKind::Reqwest,
-            });
+            }
         }
+
+        // Long-session empty-turn recovery (9router cursor.js:380-424,
+        // 871-887 `runWithRetry`): a long history replay can come back HTTP
+        // 200 with zero deltas. Retry once on a tail-only frame. Our
+        // transport buffers the whole turn before responding, so output is
+        // naturally withheld until the final attempt — the JS "withheld
+        // error event during retry" falls out for free. Each attempt is a
+        // fresh `Run` request on the shared h2 client (upstream opens a
+        // fresh h2 session per attempt; hyper may reuse the connection,
+        // which is equivalent for a unary-then-stream RPC).
+        let max_retries = cursor_empty_turn_max_retries();
+        let tail_threshold = cursor_tail_only_threshold();
+        let retry_delay = cursor_empty_turn_retry_delay();
+        let mut working_messages = messages.clone();
+        let mut attempt = 0u32;
 
         let response_id = format!("chatcmpl-msg_{}", now_millis());
         let created = now_secs();
-        let body_bytes = consume_agent_stream(
-            response.into_body(),
-            &response_id,
-            created,
-            &actual_model,
-            request.stream,
-            &request.body,
-        )
-        .await?;
+        let (body_bytes, produced_output) = loop {
+            let frame = build_agent_run_frame(&working_messages, &run_model);
+
+            // 9router v0.5.50 agent path uses the same buildHeaders as the
+            // chat path (cursorChecksum.js buildCursorHeaders —
+            // x-cursor-client-type "ide", x-ghost-mode, checksum bundle),
+            // spread over the h2 request.
+            let mut request_builder = hyper::Request::builder()
+                .method(http::Method::POST)
+                .uri(url.clone())
+                .header(":authority", "agent.api5.cursor.sh")
+                .header(":scheme", "https")
+                .header("accept", "application/connect+proto, */*")
+                .header("content-type", "application/connect+proto")
+                .header("connect-accept-encoding", "gzip")
+                .header("connect-protocol-version", "1")
+                .header("user-agent", "connect-es/1.6.1")
+                .header("x-cursor-client-type", "ide")
+                .header("x-ghost-mode", if ghost_mode { "true" } else { "false" })
+                .header("x-request-id", uuid::Uuid::new_v4().to_string());
+            for (name, value) in headers.iter() {
+                request_builder = request_builder.header(name.as_str(), value.as_bytes());
+            }
+            let req = request_builder
+                .body(Full::new(bytes::Bytes::from(frame)))
+                .map_err(CursorExecutorError::InvalidRequest)?;
+            // Hang-timeout guard (cursor.js:349-351 `hangTimeout` — close
+            // the session if the server never responds). Maps to a
+            // `connection_error` 500 via `execute`, matching cursor.js
+            // `executeAgent` semantics.
+            let response = tokio::time::timeout(cursor_request_timeout(), client.request(req))
+                .await
+                .map_err(|_| CursorExecutorError::Timeout("HTTP/2 request timed out".to_string()))?
+                .map_err(CursorExecutorError::Hyper)?;
+
+            let status = response.status();
+            if status != 200 {
+                // Non-200: read the raw body and surface it as a JSON error
+                // (cursor.js:509-528 — errors are returned untransformed so
+                // account fallback can read the body). Never retried: a
+                // non-200 is a transport/protocol failure, not an empty turn.
+                let error_text = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|collected| collected.to_bytes().to_vec())
+                    .unwrap_or_default();
+                let error_text = String::from_utf8_lossy(&error_text).to_string();
+                let error_body = serde_json::json!({
+                    "error": {
+                        "message": format!(
+                            "Cursor AgentService {}: {}",
+                            status,
+                            if error_text.is_empty() {
+                                "request failed".to_string()
+                            } else {
+                                error_text
+                            }
+                        ),
+                        "type": "api_error",
+                    }
+                });
+                let http_response = http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(reqwest::Body::from(
+                        serde_json::to_string(&error_body).unwrap_or_default(),
+                    ))
+                    .map_err(CursorExecutorError::InvalidRequest)?;
+                return Ok(CursorExecutorResponse {
+                    response: UpstreamResponse::Reqwest(http_response.into()),
+                    url,
+                    headers,
+                    transformed_body: request.body,
+                    transport: TransportKind::Reqwest,
+                });
+            }
+
+            let (attempt_body, attempt_produced_output) = consume_agent_stream(
+                response.into_body(),
+                &response_id,
+                created,
+                &actual_model,
+                request.stream,
+                &request.body,
+            )
+            .await?;
+
+            // Retry only a clean empty turn on a long replay: zero deltas,
+            // no error envelope, session at/above the tail threshold, retries
+            // remaining (cursor.js shouldRetryEmptyTurn + runWithRetry).
+            if !attempt_produced_output && messages.len() >= tail_threshold && attempt < max_retries
+            {
+                attempt += 1;
+                tracing::info!(
+                    "CURSOR: empty_turn on {}-message session; retry {attempt}/{max_retries} with tail-only frame",
+                    messages.len()
+                );
+                working_messages = tail_only_cursor_messages(&messages);
+                tokio::time::sleep(retry_delay).await;
+                continue;
+            }
+            break (attempt_body, attempt_produced_output);
+        };
+
+        // 9router finishTurn (cursor.js:544-549): a turn that ends with zero
+        // deltas surfaces as the error event "Cursor AgentService returned an
+        // empty turn" — after retries are exhausted we emit the same
+        // api_error envelope so the caller's fallback sees a failure rather
+        // than a successful empty completion.
+        let body_bytes = if produced_output {
+            body_bytes
+        } else {
+            let error_json = json!({"error": {
+                "message": "Cursor AgentService returned an empty turn",
+                "type": "api_error",
+                "code": "unknown",
+            }});
+            if request.stream {
+                format!("data: {error_json}\n\n{SSE_DONE}").into_bytes()
+            } else {
+                serde_json::to_vec(&error_json)?
+            }
+        };
 
         // JS createErrorResponse (cursor.js:257-276): an in-stream
         // resource_exhausted error must surface as HTTP 429 so the caller's
@@ -4158,5 +4364,84 @@ mod tests {
             Some(value) => std::env::set_var("TZ", value),
             None => std::env::remove_var("TZ"),
         }
+    }
+
+    // ==================== EMPTY-TURN RECOVERY (cursor.js:399-419) ====================
+
+    fn msg(role: &str, content: &str) -> Value {
+        json!({"role": role, "content": content})
+    }
+
+    #[test]
+    fn tail_only_keeps_system_drops_prior_notes_and_tail_turn() {
+        let mut messages = vec![
+            msg("system", "You are a coding assistant."),
+            msg("user", "old question"),
+            msg("assistant", "old answer"),
+        ];
+        // Pad past the tail threshold shape: many alternating turns.
+        for i in 0..40 {
+            messages.push(msg("user", &format!("q{i}")));
+            messages.push(msg("assistant", &format!("a{i}")));
+        }
+        messages.push(msg("user", "current request"));
+
+        let tail = tail_only_cursor_messages(&messages);
+        // system + recovery note + tail (assistant a39? no — anchor is the
+        // last user message; preceding assistant a39 is included).
+        assert_eq!(tail.len(), 1 + 1 + 2, "system + note + assistant+user tail");
+        assert_eq!(tail[0]["role"], "system");
+        assert_eq!(tail[0]["content"], "You are a coding assistant.");
+        assert!(tail[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[9router] Long session: 84 messages trimmed"));
+        assert_eq!(tail[2]["role"], "assistant");
+        assert_eq!(tail[2]["content"], "a39");
+        assert_eq!(tail[3]["role"], "user");
+        assert_eq!(tail[3]["content"], "current request");
+    }
+
+    #[test]
+    fn tail_only_filters_prior_recovery_notes() {
+        let messages = vec![
+            msg(
+                "system",
+                "[9router] Long session: 90 messages trimmed to the latest turn.",
+            ),
+            msg("system", "real system prompt"),
+            msg("user", "hi"),
+        ];
+        let tail = tail_only_cursor_messages(&messages);
+        // Prior note dropped; real system kept; note re-added once.
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail[0]["content"], "real system prompt");
+        assert!(tail[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Long session: 3"));
+        assert_eq!(tail[2]["role"], "user");
+        assert_eq!(tail[2]["content"], "hi");
+    }
+
+    #[test]
+    fn tail_only_empty_and_tool_anchor() {
+        assert!(tail_only_cursor_messages(&[]).is_empty());
+        // Anchor on the trailing tool result; the preceding assistant message
+        // is pulled into the tail (cursor.js tailStart = anchor - 1).
+        let messages = vec![
+            msg("user", "run it"),
+            msg("assistant", "calling tool"),
+            json!({"role": "tool", "content": "tool output"}),
+        ];
+        let tail = tail_only_cursor_messages(&messages);
+        assert_eq!(tail.len(), 3, "note + assistant + tool");
+        assert_eq!(tail[0]["role"], "system");
+        assert!(tail[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Long session: 3"));
+        assert_eq!(tail[1]["role"], "assistant");
+        assert_eq!(tail[2]["role"], "tool");
     }
 }

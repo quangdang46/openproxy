@@ -395,6 +395,18 @@ mod tests {
         }
     }
 
+    // Bead openproxy-4d5h.31: Codex gpt-6.1-terra (responses-lite lane,
+    // upstream v0.5.112 registry/codex.js) must be in the static catalog.
+    #[test]
+    fn codex_gpt_6_1_terra_registered() {
+        let catalog = provider_catalog();
+        let m = catalog
+            .find_model("codex", "gpt-6.1-terra")
+            .expect("codex/gpt-6.1-terra should resolve through cx");
+        assert_eq!(m.name.as_deref(), Some("GPT 6.1 Terra"));
+        assert_eq!(m.kind, "llm");
+    }
+
     // providerIdToAlias must resolve provider ids to the JS aliases, and
     // find_model must reach models through them (bead .46).
     #[test]

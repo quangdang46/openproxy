@@ -43,6 +43,12 @@ pub struct TtsRequest<'a> {
     /// Optional style/voice instruction string (xiaomi-mimo threads this as a
     /// soft role:user instruction).
     pub style: Option<&'a str>,
+    /// Client-requested output format (`mp3`, `wav`, `pcm`, `json`, …).
+    /// 9router `handleTtsCore` takes it as `responseFormat`
+    /// (`url.searchParams.get("response_format") || body.response_format ||
+    /// "mp3"`, tts.js:32); the ollama-local adapter needs it to pick the
+    /// upstream `response_format` (`wav`|`pcm`).
+    pub response_format: Option<&'a str>,
 }
 
 /// Result returned by an adapter: base64 audio + format string.
@@ -93,6 +99,10 @@ pub async fn response_to_base64(
         "mp3".to_string()
     } else if ctype.contains("ogg") {
         "ogg".to_string()
+    } else if ctype.contains("pcm") {
+        // 9router `_base.js responseToBase64` also maps `audio/L16`-style
+        // PCM responses to "pcm" (ollama-local can return raw PCM).
+        "pcm".to_string()
     } else {
         default_format.to_string()
     };
@@ -106,6 +116,13 @@ pub async fn response_to_base64(
 pub async fn upstream_error(response: reqwest::Response) -> TtsError {
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
+    upstream_error_parts(status, text)
+}
+
+/// Build a [`TtsError::Upstream`] from an already-consumed error body —
+/// for adapters that must inspect the body (e.g. ollama-local's
+/// voice-fallback probe) before deciding whether to retry.
+pub fn upstream_error_parts(status: u16, text: String) -> TtsError {
     let msg = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
         parsed
             .pointer("/error/message")

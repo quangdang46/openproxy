@@ -474,6 +474,10 @@ fn emit_tool_calls_block(
     events: &mut Vec<Value>,
     tool_calls: &[Value],
 ) {
+    // The answer is switching to tool calls, so thinking is over — close the
+    // reasoning item before the function_call items (upstream
+    // openai-responses.js tool_calls arm: closeReasoning + closeMessage).
+    close_reasoning(state, events);
     let mut func_call_ids = state
         .get("funcCallIds")
         .cloned()
@@ -817,6 +821,11 @@ pub fn chat_to_responses_response(
                     &delta,
                 );
             }
+            // The answer starts, so thinking is over. Upstreams that send
+            // reasoning via reasoning_content never emit "</think>", so close
+            // the reasoning item here rather than at finish_reason (upstream
+            // openai-responses.js text arm: closeReasoning before emitText).
+            close_reasoning(state, &mut events);
             let content: &str = &content;
             let mut msg_item_added = state
                 .get("msgItemAdded")
@@ -1660,6 +1669,76 @@ mod tests {
             "think closed: {s}"
         );
         assert!(s.contains("output_text.delta"), "resumed text: {s}");
+    }
+
+    #[test]
+    fn reasoning_content_then_text_closes_reasoning_before_message() {
+        // Upstream openai-responses.js: the answer starting closes the
+        // reasoning item — reasoning_content upstreams never emit "</think>",
+        // so waiting for finish_reason would interleave the sections.
+        let mut state = ResponseTransformState::default();
+        let think = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"reasoning_content": "hmm"},
+                "finish_reason": null}]
+        });
+        let text = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"content": "answer"},
+                "finish_reason": null}]
+        });
+        let _ = chat_to_responses_response(&think, &mut state.responses.state);
+        let events = chat_to_responses_response(&text, &mut state.responses.state);
+        let s = serde_json::to_string(&events).unwrap_or_default();
+        let done_pos = s.find("reasoning_summary_text.done");
+        let msg_pos = s.find("\"type\":\"message\"");
+        assert!(
+            done_pos.is_some(),
+            "reasoning must close when text begins: {s}"
+        );
+        assert!(
+            msg_pos.map(|p| done_pos.unwrap() < p).unwrap_or(false),
+            "reasoning done must precede the message item: {s}"
+        );
+        // A second text chunk must not re-close reasoning.
+        let more = chat_to_responses_response(&text, &mut state.responses.state);
+        let s2 = serde_json::to_string(&more).unwrap_or_default();
+        assert!(
+            !s2.contains("reasoning_summary_text.done"),
+            "reasoning closed only once: {s2}"
+        );
+    }
+
+    #[test]
+    fn tool_calls_close_reasoning_before_function_call() {
+        let mut state = ResponseTransformState::default();
+        let think = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"reasoning_content": "hmm"},
+                "finish_reason": null}]
+        });
+        let call = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "search", "arguments": "{}"}
+                }]},
+                "finish_reason": null}]
+        });
+        let _ = chat_to_responses_response(&think, &mut state.responses.state);
+        let events = chat_to_responses_response(&call, &mut state.responses.state);
+        let s = serde_json::to_string(&events).unwrap_or_default();
+        let done_pos = s.find("reasoning_summary_text.done");
+        let fc_pos = s.find("function_call");
+        assert!(done_pos.is_some(), "reasoning must close: {s}");
+        assert!(
+            fc_pos.map(|p| done_pos.unwrap() < p).unwrap_or(false),
+            "reasoning done must precede the function_call item: {s}"
+        );
     }
 
     #[test]

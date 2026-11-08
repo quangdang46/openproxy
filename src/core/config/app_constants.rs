@@ -93,23 +93,27 @@ pub fn current_platform() -> AgPlatform {
     }
 }
 
+/// Official Antigravity Hub Desktop fingerprint — port of
+/// `ANTIGRAVITY_IDE_VERSION` / `ANTIGRAVITY_IDE_USER_AGENT` in
+/// `open-sse/providers/shared.js` (Hub 2.24.0). Kept static `darwin/arm64`
+/// even when the server runs on Linux: the provider profile intentionally
+/// matches the Hub client, not the server host.
+pub const ANTIGRAVITY_IDE_VERSION: &str = "2.24.0";
+pub const ANTIGRAVITY_IDE_USER_AGENT: &str = "antigravity/hub/2.24.0 darwin/arm64";
+
 /// Antigravity advertised User-Agent for chat / stream requests.
-/// Mirrors ANTAGRAVITY_IDE_VERSION in `open-sse/providers/shared.js:81-83`.
+/// Mirrors `ANTIGRAVITY_HEADERS["User-Agent"]` / `getPlatformUserAgent()` in
+/// `open-sse/config/appConstants.js`, both of which resolve to
+/// [`ANTIGRAVITY_IDE_USER_AGENT`].
 pub fn ag_chat_user_agent() -> String {
-    format!(
-        "antigravity/2.11.0 {}/{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+    ANTIGRAVITY_IDE_USER_AGENT.to_string()
 }
 
 /// Antigravity advertised User-Agent for the platform handshake.
+/// Mirrors `getPlatformUserAgent()` in `open-sse/config/appConstants.js`,
+/// which resolves to [`ANTIGRAVITY_IDE_USER_AGENT`].
 pub fn ag_platform_user_agent() -> String {
-    format!(
-        "antigravity/1.104.0 {}/{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+    ANTIGRAVITY_IDE_USER_AGENT.to_string()
 }
 
 // ─── Anti-loop / cloaking ────────────────────────────────────────────────
@@ -361,5 +365,18 @@ mod tests {
         assert!(ua.contains("gemini-cli/0.34.0"));
         assert!(ua.contains("gemini-3-pro"));
         assert!(ua.contains("terminal"));
+    }
+
+    /// Port of `ANTIGRAVITY_IDE_USER_AGENT` in `open-sse/providers/shared.js`
+    /// (Hub 2.24.0, static darwin/arm64). Bump together with upstream.
+    #[test]
+    fn antigravity_ide_user_agent_matches_upstream() {
+        assert_eq!(ANTIGRAVITY_IDE_VERSION, "2.24.0");
+        assert_eq!(
+            ANTIGRAVITY_IDE_USER_AGENT,
+            "antigravity/hub/2.24.0 darwin/arm64"
+        );
+        assert_eq!(ag_chat_user_agent(), ANTIGRAVITY_IDE_USER_AGENT);
+        assert_eq!(ag_platform_user_agent(), ANTIGRAVITY_IDE_USER_AGENT);
     }
 }

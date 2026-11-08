@@ -165,7 +165,7 @@ pub struct ProviderExecutorConfig {
 
 /// 9router `CLAUDE_CLI_VERSION` (open-sse/providers/shared.js:25). Pinned
 /// exactly: a moving version would itself be a fingerprint.
-const CLAUDE_CLI_VERSION: &str = "2.1.258";
+const CLAUDE_CLI_VERSION: &str = "2.1.280";
 
 /// The static Claude-CLI identity 9router sends to `api.anthropic.com`.
 ///
@@ -745,7 +745,7 @@ mod claude_identity_tests {
             .default_headers;
         assert_eq!(
             header(&headers, "user-agent"),
-            Some("claude-cli/2.1.258 (external, sdk-cli)"),
+            Some("claude-cli/2.1.280 (external, sdk-cli)"),
             "a generic UA is the fingerprint this fixes"
         );
         assert_eq!(header(&headers, "x-app"), Some("cli"));

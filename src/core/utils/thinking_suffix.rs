@@ -6,7 +6,9 @@
 //!
 //! Levels: none|minimal|low|medium|high|xhigh|max.
 
+use regex::Regex;
 use serde_json::{json, Map, Value};
+use std::sync::LazyLock;
 
 use crate::core::translator::registry::Format;
 
@@ -197,11 +199,44 @@ pub fn resolve_thinking_native(
     }
 }
 
+/// Adaptive-thinking support predicate for Claude Haiku, ported from 9router
+/// `isAdaptiveThinkingUnsupported` (`open-sse/translator/formats/claude.js:175`,
+/// upstream v0.5.111 #5183): Haiku 3.x/4.x reject `thinking.type "adaptive"` +
+/// `output_config.effort`; Haiku 5+ accepts ONLY adaptive. The version may
+/// follow "haiku" (`haiku-4-5`, `haiku-5.5`, dated snapshots like
+/// `claude-haiku-4-5-20251001`) or precede it (`claude-4.5-haiku`,
+/// `claude-3-5-haiku`). Unversioned "haiku" keeps the old, safe downgrade.
+///
+/// Rust `regex` has no look-around, so the JS `(?<![\d.])` guard becomes a
+/// consuming `(?:^|[^\d.])` prefix — identical leftmost-match semantics.
+pub(crate) fn is_adaptive_thinking_unsupported(model: &str) -> bool {
+    if !model.to_ascii_lowercase().contains("haiku") {
+        return false;
+    }
+    static HAIKU_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)haiku[-._]?(\d+)|(?:^|[^\d.])(\d+)(?:[-._]\d+)?[-._]?haiku")
+            .expect("haiku version regex")
+    });
+    let Some(caps) = HAIKU_VERSION_RE.captures(model) else {
+        // Unversioned haiku → keep the old, safe downgrade.
+        return true;
+    };
+    let major = caps
+        .get(1)
+        .or_else(|| caps.get(2))
+        .and_then(|m| m.as_str().parse::<u64>().ok());
+    match major {
+        Some(v) => v < 5,
+        None => true,
+    }
+}
+
 fn is_claude_adaptive_model(model: &str) -> bool {
-    // 9router MODEL_CAPABILITIES: opus/sonnet 4.6+ and sonnet-5 use claude-adaptive
+    // 9router MODEL_CAPABILITIES: opus/sonnet 4.6+ and sonnet-5 use claude-adaptive.
+    // Haiku is version-gated: 5+ is adaptive-only (#5183), older/unversioned budget.
     let m = model.to_ascii_lowercase();
     if m.contains("haiku") {
-        return false;
+        return !is_adaptive_thinking_unsupported(model);
     }
     m.contains("opus-4.6")
         || m.contains("opus-4-6")
@@ -1071,6 +1106,49 @@ mod tests {
             resolve_thinking_native(Format::Kiro, "kiro", "amazon-nova"),
             ThinkingNative::Noop
         );
+    }
+
+    #[test]
+    fn haiku_adaptive_gate_is_version_aware() {
+        // #5183: Haiku 5+ is adaptive-only; <5 and unversioned stay budget.
+        for model in [
+            "claude-haiku-5.5",
+            "claude-haiku-5-5",
+            "claude-haiku-5.5-20260101",
+        ] {
+            assert_eq!(
+                resolve_thinking_native(Format::Claude, "claude", model),
+                ThinkingNative::ClaudeAdaptive,
+                "{model}"
+            );
+        }
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-3-5-haiku",
+            "claude-4.5-haiku",
+            "claude-haiku",
+        ] {
+            assert_eq!(
+                resolve_thinking_native(Format::Claude, "claude", model),
+                ThinkingNative::ClaudeBudget,
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_haiku_5_5_applies_adaptive_plus_effort() {
+        let mut body = json!({"messages": []});
+        apply_thinking_level(
+            Format::Claude,
+            "claude",
+            "claude-haiku-5.5",
+            &mut body,
+            "high",
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     #[test]

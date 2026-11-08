@@ -22,9 +22,9 @@ use super::base::{
 const CHAT_SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Antigravity IDE fingerprint (port of `ANTIGRAVITY_IDE_USER_AGENT` in
-/// `open-sse/providers/shared.js:81-83`:
-/// `antigravity/ide/${ANTIGRAVITY_IDE_VERSION} darwin/arm64`, version 2.11.0).
-pub const ANTIGRAVITY_IDE_USER_AGENT: &str = "antigravity/ide/2.11.0 darwin/arm64";
+/// `open-sse/providers/shared.js` — Antigravity Hub 2.24.0, static
+/// `darwin/arm64`). Canonical definition lives in `app_constants`.
+pub use crate::core::config::app_constants::ANTIGRAVITY_IDE_USER_AGENT;
 
 /// Default antigravity chat-search model (registry `searchViaChat.defaultModel`).
 const ANTIGRAVITY_DEFAULT_MODEL: &str = "gemini-2.5-flash";

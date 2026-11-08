@@ -533,7 +533,7 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
 /// - null/non-string → null
 /// - length <= 8 → first char + "***"
 /// - otherwise → first 8 chars + "***"
-fn mask_api_key(api_key: Option<&str>) -> Option<String> {
+pub(crate) fn mask_api_key(api_key: Option<&str>) -> Option<String> {
     let key = api_key?;
     if key.is_empty() {
         return None;

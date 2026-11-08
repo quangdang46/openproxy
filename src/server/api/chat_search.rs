@@ -374,6 +374,7 @@ pub async fn handle_search_completions(
                                 message: format!("Unknown provider: {}", member),
                                 retry_after: None,
                                 upstream_body: None,
+                                upstream_headers: Vec::new(),
                             });
                         };
                         let chain =
@@ -403,6 +404,7 @@ pub async fn handle_search_completions(
                     message,
                     earliest_retry_after: _,
                     upstream_body: _,
+                    upstream_headers: _,
                 }) => with_cors_response(
                     (
                         StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -491,6 +493,7 @@ impl SearchChain {
                 ),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             };
         }
         ComboAttemptError {
@@ -500,6 +503,7 @@ impl SearchChain {
                 .unwrap_or_else(|| "all search providers failed".to_string()),
             retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         }
     }
 }

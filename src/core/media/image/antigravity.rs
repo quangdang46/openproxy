@@ -14,6 +14,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use super::base::{empty_normalized, now_secs, ImageAdapter, ImageRequest};
+use crate::core::config::app_constants::ANTIGRAVITY_IDE_USER_AGENT;
 use crate::core::executor::antigravity::ANTIGRAVITY_BASE_URL;
 
 pub struct AntigravityAdapter;
@@ -69,10 +70,12 @@ impl ImageAdapter for AntigravityAdapter {
             HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|e| format!("invalid token header: {e}"))?,
         );
-        // Executor-parity client metadata (antigravity.js buildHeaders).
+        // Executor-parity client fingerprint: upstream routes image requests
+        // through the antigravity executor, whose UA is
+        // `ANTIGRAVITY_IDE_USER_AGENT` (Antigravity Hub 2.24.0).
         headers.insert(
             "User-Agent",
-            HeaderValue::from_static("antigravity/1.0.0 windows/amd64"),
+            HeaderValue::from_static(ANTIGRAVITY_IDE_USER_AGENT),
         );
         Ok(headers)
     }

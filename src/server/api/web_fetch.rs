@@ -199,6 +199,7 @@ async fn execute_combo_fetch(
                         message: e.message,
                         retry_after: None,
                         upstream_body: None,
+                        upstream_headers: Vec::new(),
                     })
             }
         },
@@ -209,6 +210,7 @@ async fn execute_combo_fetch(
         message: e.message,
         earliest_retry_after: e.earliest_retry_after,
         upstream_body: e.upstream_body,
+        upstream_headers: e.upstream_headers,
     })
 }
 

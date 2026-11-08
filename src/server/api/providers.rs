@@ -126,7 +126,82 @@ fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, S
             });
             Ok(out)
         }
+        // 9router `modelsFetcher.type: "nous-free"` (services/nous.js
+        // normalizeNousFreeModels): zero-priced, text-capable models with a
+        // >=200k context window, largest context first.
+        "nous-free" => {
+            let mut out: Vec<(u64, Value)> = values
+                .iter()
+                .filter(|value| nous_text_capable(value))
+                .filter(|value| {
+                    let pricing = value.get("pricing");
+                    nous_zero_price(pricing.and_then(|p| p.get("prompt")))
+                        && nous_zero_price(pricing.and_then(|p| p.get("completion")))
+                })
+                .filter_map(|value| {
+                    let id = value.get("id").and_then(Value::as_str)?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let context_length = nous_context_length(value).unwrap_or(0);
+                    (context_length >= 200_000).then(|| {
+                        (
+                            context_length,
+                            json!({
+                                "id": id,
+                                "name": value.get("name").and_then(Value::as_str).unwrap_or(id),
+                                "contextLength": context_length,
+                            }),
+                        )
+                    })
+                })
+                .collect();
+            out.sort_by(|a, b| b.0.cmp(&a.0));
+            Ok(out.into_iter().map(|(_, model)| model).collect())
+        }
         _ => Err("Unknown filter type".to_string()),
+    }
+}
+
+fn nous_positive_u64(value: Option<&Value>) -> Option<u64> {
+    match value {
+        Some(Value::Number(number)) => number.as_u64().filter(|n| *n > 0),
+        Some(Value::String(text)) => text.trim().parse::<u64>().ok().filter(|n| *n > 0),
+        _ => None,
+    }
+}
+
+fn nous_context_length(model: &Value) -> Option<u64> {
+    nous_positive_u64(model.get("context_length")).or_else(|| {
+        nous_positive_u64(
+            model
+                .get("top_provider")
+                .and_then(|provider| provider.get("context_length")),
+        )
+    })
+}
+
+fn nous_zero_price(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Number(number)) => number.as_f64() == Some(0.0),
+        Some(Value::String(text)) => text.trim().parse::<f64>() == Ok(0.0),
+        _ => false,
+    }
+}
+
+fn nous_text_capable(model: &Value) -> bool {
+    match model
+        .get("architecture")
+        .and_then(|architecture| architecture.get("output_modalities"))
+        .and_then(Value::as_array)
+    {
+        Some(modalities) => {
+            modalities.is_empty()
+                || modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("text"))
+        }
+        None => true,
     }
 }
 

@@ -34,7 +34,11 @@ const ANTIGRAVITY_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform 
     https://www.googleapis.com/auth/cclog \
     https://www.googleapis.com/auth/experimentsandconfigs";
 
-const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+/// Port of `ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent` (registry
+/// `antigravity.js`) → `ANTIGRAVITY_IDE_USER_AGENT` in
+/// `open-sse/providers/shared.js` (Antigravity Hub 2.24.0).
+const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT: &str =
+    crate::core::config::app_constants::ANTIGRAVITY_IDE_USER_AGENT;
 const ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT: &str =
     "google-cloud-sdk vscode_cloudshelleditor/0.1";
 

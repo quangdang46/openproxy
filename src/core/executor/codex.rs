@@ -225,6 +225,133 @@ const CODEX_SSE_USER_OUTPUT_PATTERNS: &[&str] = &[
 const CODEX_MODEL_CAPACITY_MESSAGE: &str =
     "Selected model is at capacity. Please try a different model.";
 
+/// Codex `/responses` "responses-lite" lane — port of 9router
+/// `isCodexResponsesLiteModel` (open-sse/executors/codex.js:28-31): registry
+/// models flagged `responsesLite: true` in providers/registry/codex.js
+/// (`GPT_6_LITE_THINKING_LEVELS` ids). The `[1m]` variants resolve to their
+/// base `upstreamModelId` before this check runs, so only base ids are listed.
+const CODEX_RESPONSES_LITE_MODELS: &[&str] =
+    &["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"];
+
+/// Strip a trailing `(...)` thinking-level suffix the way the JS
+/// `/\([^()]+\)\s*$/` does (codex.js:29).
+fn strip_trailing_paren_suffix(model: &str) -> &str {
+    let trimmed = model.trim_end();
+    if !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    if let Some(idx) = trimmed.rfind('(') {
+        let inner = &trimmed[idx + 1..trimmed.len() - 1];
+        if !inner.is_empty() && !inner.contains('(') && !inner.contains(')') {
+            return trimmed[..idx].trim_end();
+        }
+    }
+    trimmed
+}
+
+/// 9router `isCodexResponsesLiteModel`: registry `responsesLite` flag lookup
+/// on the (paren-suffix-stripped) upstream model id.
+fn is_codex_responses_lite_model(model: &str) -> bool {
+    CODEX_RESPONSES_LITE_MODELS.contains(&strip_trailing_paren_suffix(model))
+}
+
+/// `tool?.type === "web_search"` (codex.js hosted-search detection).
+fn is_web_search_tool(tool: &Value) -> bool {
+    tool.get("type").and_then(Value::as_str) == Some("web_search")
+}
+
+/// `body.tools?.some?.(tool => tool?.type === "web_search")` — false for
+/// missing/non-array `tools`.
+fn has_web_search_tool(tools: &Value) -> bool {
+    tools
+        .as_array()
+        .is_some_and(|arr| arr.iter().any(is_web_search_tool))
+}
+
+/// Dedup key for folding `additional_tools` declarations into `tools`:
+/// JS `` `${tool?.type}:${tool?.name || tool?.function?.name || ""}` ``.
+fn tool_dedup_key(tool: &Value) -> String {
+    let name = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            tool.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    format!(
+        "{}:{}",
+        tool.get("type").and_then(Value::as_str).unwrap_or(""),
+        name
+    )
+}
+
+/// Server-generated item id prefixes Codex `/responses` cannot resolve with
+/// `store=false` (JS `SERVER_ID_PATTERN`, codex.js:34).
+fn is_server_item_id(id: &str) -> bool {
+    id.starts_with("rs_")
+        || id.starts_with("fc_")
+        || id.starts_with("resp_")
+        || id.starts_with("msg_")
+}
+
+/// Port of `convertSystemToDeveloperRole` (codex.js:54-61): `role: "system"`
+/// message items become `"developer"` so they stay in the cacheable prefix.
+fn convert_system_to_developer_role(items: &mut [Value]) {
+    for item in items.iter_mut() {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        let role_is_system = obj.get("role").and_then(Value::as_str) == Some("system");
+        // JS: `!item.type || item.type === "message"`
+        let type_ok = match obj.get("type") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.is_empty() || s == "message",
+            Some(Value::Bool(false)) => true,
+            Some(v) => v.as_str() == Some("message"),
+        };
+        if role_is_system && type_ok {
+            obj.insert("role".to_string(), Value::String("developer".to_string()));
+        }
+    }
+}
+
+/// Port of `stripStoredItemReferences` (codex.js:64-75): drop string items and
+/// `item_reference` objects carrying server ids, and delete server-generated
+/// `id` fields. On the lite lane (`preserve_lite_prefix`) a developer
+/// message's `msg_` id is kept for prefix-cache affinity.
+fn strip_stored_item_references(items: &mut Vec<Value>, preserve_lite_prefix: bool) {
+    items.retain(|item| {
+        if let Some(s) = item.as_str() {
+            return !is_server_item_id(s);
+        }
+        if let Some(obj) = item.as_object() {
+            if obj.get("type").and_then(Value::as_str) == Some("item_reference") {
+                return false;
+            }
+        }
+        true
+    });
+    for item in items.iter_mut() {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(id) = obj.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        if !is_server_item_id(&id) {
+            continue;
+        }
+        let keep = preserve_lite_prefix
+            && obj.get("role").and_then(Value::as_str) == Some("developer")
+            && id.starts_with("msg_");
+        if !keep {
+            obj.remove("id");
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct CodexExecutor {
@@ -375,6 +502,7 @@ impl CodexExecutor {
         stream: bool,
         connection_id: Option<&str>,
         credentials: &ProviderConnection,
+        responses_lite: bool,
     ) -> Result<HeaderMap, CodexExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -383,6 +511,17 @@ impl CodexExecutor {
             HeaderValue::from_str(&format!("Bearer {}", api_key))
                 .map_err(CodexExecutorError::InvalidHeader)?,
         );
+
+        // 9router parity (codex.js:222-224): the responses-lite lane is
+        // signalled upstream via this header — set only when the (post-
+        // transform) body carries no web_search tool, which is exactly the
+        // `responses_lite` lane decision.
+        if responses_lite {
+            headers.insert(
+                "x-openai-internal-codex-responses-lite",
+                HeaderValue::from_static("true"),
+            );
+        }
 
         // 9router parity: session_id header for request session continuity.
         let session_id = connection_id
@@ -426,6 +565,67 @@ impl CodexExecutor {
     const DEFAULT_CODEX_INSTRUCTIONS: &'static str =
         crate::core::config::codex_instructions::CODEX_DEFAULT_INSTRUCTIONS;
 
+    /// Thinking-level sets for `normalizeReasoningEffort` — port of
+    /// `getThinkingLevels("codex", …)` (open-sse/providers/thinkingLevels.js).
+    /// Only the codex-relevant entries are needed here.
+    /// Registry `thinkingLevels` on the lite GPT-6.x entries wins over the
+    /// `*gpt-6*` pattern (which carries `CODEX_GPT_5_6_LEVELS`).
+    const LITE_THINKING_LEVELS: &'static [&'static str] =
+        &["low", "medium", "high", "xhigh", "max"];
+    const GPT6_THINKING_LEVELS: &'static [&'static str] =
+        &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    const GPT56_ULTRA_LEVELS: &'static [&'static str] = &[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    /// `*codex*` pattern — codex cannot disable thinking.
+    const CODEX_PATTERN_LEVELS: &'static [&'static str] = &["low", "medium", "high", "xhigh"];
+    /// `L.openai` format fallback (FORMAT_LEVELS.openai).
+    const OPENAI_FORMAT_LEVELS: &'static [&'static str] =
+        &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+    /// `getThinkingLevels("codex", model)` reduced to the level sets that can
+    /// match a codex upstream id. PATTERN_THINKING is first-match-wins and the
+    /// codex rows are `*gpt-6*` → `*gpt-5.6-sol*` → `*gpt-5.6-terra*` →
+    /// `*gpt-5.6-luna*` → `*codex*`; anything else falls to the openai format
+    /// list. Every chat model on this lane declares `reasoning: true`, so the
+    /// JS `null` (non-reasoning) case never produces different wire output.
+    fn codex_thinking_levels(model: &str) -> &'static [&'static str] {
+        if CODEX_RESPONSES_LITE_MODELS.contains(&strip_trailing_paren_suffix(model)) {
+            return Self::LITE_THINKING_LEVELS;
+        }
+        if model.contains("gpt-6") {
+            return Self::GPT6_THINKING_LEVELS;
+        }
+        if model.contains("gpt-5.6-sol") || model.contains("gpt-5.6-terra") {
+            return Self::GPT56_ULTRA_LEVELS;
+        }
+        if model.contains("gpt-5.6-luna") {
+            return Self::GPT6_THINKING_LEVELS;
+        }
+        if model.contains("codex") {
+            return Self::CODEX_PATTERN_LEVELS;
+        }
+        Self::OPENAI_FORMAT_LEVELS
+    }
+
+    /// Port of `normalizeReasoningEffort` (codex.js:145-152).
+    fn normalize_reasoning_effort(model: &str, value: &str, responses_lite: bool) -> String {
+        let levels = Self::codex_thinking_levels(model);
+        if levels.contains(&value) {
+            return value.to_string();
+        }
+        if responses_lite && (value == "none" || value == "minimal") {
+            return "low".to_string();
+        }
+        if value == "ultra" && levels.contains(&"max") {
+            return "max".to_string();
+        }
+        if value == "max" || value == "ultra" {
+            return "xhigh".to_string();
+        }
+        value.to_string()
+    }
+
     /// Transform the request body from Chat Completions format to Codex Responses API format.
     ///
     /// Handles both pre-translated bodies (input[] array from `chat_to_openai_responses_request`)
@@ -437,6 +637,9 @@ impl CodexExecutor {
     /// - Converts messages[] to input[] with type "message", role, and content as input_text blocks
     /// - Converts "system" role to "developer"
     /// - Strips server-generated IDs (rs_, fc_, resp_, msg_ prefixes) to avoid 404s with store:false
+    /// - Routes registry `responsesLite` models (GPT-6.x lite ids) through the
+    ///   responses-lite lane: tools + instructions move into `input` prefix
+    ///   items, top-level Responses-only fields are stripped (codex.js:482-502)
     ///
     /// 9router codex.js parity:
     /// - Forces stream: true (Codex backend; client JSON via forceStream SSE→JSON)
@@ -450,7 +653,7 @@ impl CodexExecutor {
         _stream: bool,
     ) -> Result<Value, CodexExecutorError> {
         // Handle both pre-translated (input[]) and untranslated (messages[]) bodies
-        let input_items = if let Some(input) = body.get("input").and_then(Value::as_array) {
+        let mut input_items = if let Some(input) = body.get("input").and_then(Value::as_array) {
             if input.is_empty() {
                 return Err(CodexExecutorError::UnsupportedFormat(
                     "Empty input array in request body".to_string(),
@@ -461,11 +664,75 @@ impl CodexExecutor {
             Self::extract_input_items(body)?
         };
 
-        let instructions = body
-            .get("instructions")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(Self::DEFAULT_CODEX_INSTRUCTIONS);
+        // 9router codex.js:422-449 — hosted web_search cannot run from a Lite
+        // input prefix. A lite model carrying web_search (top-level `tools`
+        // or an `additional_tools` input item) folds the prefix declarations
+        // back into `tools` (deduped on `type:name`) and takes the FULL
+        // Responses lane instead.
+        let is_lite_model = is_codex_responses_lite_model(actual_model);
+        let mut tools = body.get("tools").cloned().unwrap_or(Value::Null);
+        let mut converted_lite_prefix = false;
+        if is_lite_model {
+            let input_has_web_search = input_items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("additional_tools")
+                    && item
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ts| ts.iter().any(is_web_search_tool))
+            });
+            if has_web_search_tool(&tools) || input_has_web_search {
+                let mut merged: Vec<Value> = tools.as_array().cloned().unwrap_or_default();
+                let mut seen: std::collections::HashSet<String> =
+                    merged.iter().map(tool_dedup_key).collect();
+                for item in &input_items {
+                    if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                        continue;
+                    }
+                    let Some(prefix_tools) = item.get("tools").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for tool in prefix_tools {
+                        if seen.insert(tool_dedup_key(tool)) {
+                            merged.push(tool.clone());
+                        }
+                    }
+                }
+                tools = Value::Array(merged);
+                converted_lite_prefix = input_items
+                    .iter()
+                    .any(|i| i.get("type").and_then(Value::as_str) == Some("additional_tools"));
+                input_items
+                    .retain(|i| i.get("type").and_then(Value::as_str) != Some("additional_tools"));
+            }
+        }
+        // Lane decision happens BEFORE the `-<effort>` suffix strip, matching
+        // JS order (upstreamModel is checked before body.model is rewritten) —
+        // so `gpt-6.1-terra-high` takes the full lane while bare
+        // `gpt-6.1-terra` / `gpt-6.1-terra(high)` take lite.
+        let responses_lite = is_lite_model && !has_web_search_tool(&tools);
+
+        // 9router codex.js:454-461 — role normalization + server-id stripping
+        // run on BOTH lanes; the lite lane keeps developer `msg_` ids.
+        convert_system_to_developer_role(&mut input_items);
+        strip_stored_item_references(&mut input_items, responses_lite);
+
+        let has_lite_prefix = input_items
+            .iter()
+            .any(|i| i.get("type").and_then(Value::as_str) == Some("additional_tools"));
+
+        // Codex's /responses validator rejects tool schemas carrying Unicode
+        // property escapes (\p{...}) with HTTP 400 — valid ECMA regex but not
+        // supported by Codex's schema validator (#3922). Strip patterns before
+        // dispatch; 9router applies the same strip in normalizeCodexTools.
+        let cleaned_tools: Option<Vec<Value>> = tools.as_array().map(|arr| {
+            arr.iter()
+                .map(|tool| {
+                    let mut cleaned = tool.clone();
+                    strip_codex_tool_patterns(&mut cleaned);
+                    cleaned
+                })
+                .collect()
+        });
 
         // Strip effort suffix from model name (9router: none/minimal/low/medium/high/xhigh)
         let effort_levels = ["none", "minimal", "low", "medium", "high", "xhigh"];
@@ -487,49 +754,141 @@ impl CodexExecutor {
             }
         }
 
-        // Priority: body.reasoning.effort > reasoning_effort > model suffix > default low
-        let effort = body
-            .pointer("/reasoning/effort")
-            .and_then(Value::as_str)
-            .or_else(|| body.get("reasoning_effort").and_then(Value::as_str))
-            .or(model_effort)
-            .unwrap_or("low");
+        // 9router codex.js:517-526 — effort resolution differs by lane: the
+        // lite lane defaults to `medium` (full lane `low`), emits
+        // `reasoning: { effort, context: "all_turns" }` with NO `summary`,
+        // while the full lane emits `{ effort, summary: "auto" }`.
+        let default_effort = if responses_lite { "medium" } else { "low" };
+        let mut reasoning_obj = match body.get("reasoning") {
+            Some(v) if v.is_object() => v.as_object().unwrap().clone(),
+            _ => serde_json::Map::new(),
+        };
+        let reasoning_present = body.get("reasoning").is_some_and(Value::is_object);
+        let effort: Option<Value> = if reasoning_present {
+            // JS else-branch: only reasoning.effort is normalized; a missing
+            // effort stays absent (JS assigns `undefined`, dropped by JSON).
+            reasoning_obj.get("effort").cloned().map(|e| match e {
+                Value::String(s) => Value::String(Self::normalize_reasoning_effort(
+                    &model_id,
+                    &s,
+                    responses_lite,
+                )),
+                other => other,
+            })
+        } else {
+            // Priority: reasoning_effort param > model suffix > lane default.
+            let raw = body
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| model_effort.map(str::to_string))
+                .unwrap_or_else(|| default_effort.to_string());
+            Some(Value::String(Self::normalize_reasoning_effort(
+                &model_id,
+                &raw,
+                responses_lite,
+            )))
+        };
+        match &effort {
+            Some(e) => {
+                reasoning_obj.insert("effort".to_string(), e.clone());
+            }
+            None => {
+                reasoning_obj.remove("effort");
+            }
+        }
+        if responses_lite {
+            reasoning_obj.insert("context".to_string(), json!("all_turns"));
+        } else if !reasoning_obj.contains_key("summary") {
+            reasoning_obj.insert("summary".to_string(), json!("auto"));
+        }
+        let reasoning = Value::Object(reasoning_obj);
 
         let mut request_body = json!({
             "model": model_id,
             "input": input_items,
-            "instructions": instructions,
             "stream": true, // 9router always forces stream
             "store": false,
-            "reasoning": { "effort": effort, "summary": "auto" },
+            "reasoning": reasoning,
         });
 
-        // Codex's /responses validator rejects tool schemas carrying Unicode
-        // property escapes (\p{...}) with HTTP 400 — valid ECMA regex but not
-        // supported by Codex's schema validator (#3922). Strip patterns before
-        // dispatch; 9router applies the same strip in normalizeCodexTools.
-        if let Some(tools) = body.get("tools") {
-            let mut cleaned = tools.clone();
-            if let Some(arr) = cleaned.as_array_mut() {
-                for tool in arr.iter_mut() {
-                    strip_codex_tool_patterns(tool);
+        let client_instructions = body
+            .get("instructions")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
+
+        if responses_lite {
+            // 9router codex.js:483-499 — Codex 0.155 carries tools and
+            // instructions as `input` prefix items; the Responses-only
+            // top-level fields are stripped/nulled.
+            if !has_lite_prefix {
+                // JS uses the RAW client instructions, falling back to the
+                // default prompt — independent of the top-level `instructions`
+                // field, which is always emptied on this lane.
+                let prefix_instructions =
+                    client_instructions.unwrap_or(Self::DEFAULT_CODEX_INSTRUCTIONS);
+                let mut prefix = vec![json!({
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": cleaned_tools.clone().unwrap_or_default(),
+                })];
+                if !prefix_instructions.is_empty() {
+                    prefix.push(json!({
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{ "type": "input_text", "text": prefix_instructions }],
+                    }));
                 }
+                let mut new_input = prefix;
+                if let Some(arr) = request_body["input"].as_array() {
+                    new_input.extend(arr.iter().cloned());
+                }
+                request_body["input"] = json!(new_input);
             }
-            request_body["tools"] = cleaned;
-        }
-        if let Some(tool_choice) = body.get("tool_choice") {
-            request_body["tool_choice"] = tool_choice.clone();
-        }
-        // JS keeps `stop` (not in the delete list, codex.js:462-479).
-        if let Some(stop) = body.get("stop") {
-            request_body["stop"] = stop.clone();
+            request_body["instructions"] = json!("");
+            request_body["tools"] = Value::Null;
+            // JS `body.tool_choice ||= "auto"`.
+            let tool_choice = body
+                .get("tool_choice")
+                .cloned()
+                .filter(|v| !v.is_null() && v.as_str() != Some(""));
+            request_body["tool_choice"] = tool_choice.unwrap_or_else(|| json!("auto"));
+            request_body["parallel_tool_calls"] = json!(false);
+        } else {
+            // 9router codex.js:467-469 — inject the default prompt only when
+            // the client sent none AND no lite prefix was converted.
+            if let Some(instr) = client_instructions {
+                request_body["instructions"] = json!(instr);
+            } else if !converted_lite_prefix {
+                request_body["instructions"] = json!(Self::DEFAULT_CODEX_INSTRUCTIONS);
+            }
+            if let Some(tools_arr) = cleaned_tools {
+                request_body["tools"] = json!(tools_arr);
+            } else if !tools.is_null() {
+                // Non-array `tools` passes through untouched (JS
+                // normalizeCodexTools early-returns on non-arrays).
+                request_body["tools"] = tools.clone();
+            }
+            // JS keeps `stop` out via the final allowlist, but the pre-existing
+            // port preserved it — keep that behavior on the full lane.
+            if let Some(stop) = body.get("stop") {
+                request_body["stop"] = stop.clone();
+            }
+            if let Some(tool_choice) = body.get("tool_choice") {
+                request_body["tool_choice"] = tool_choice.clone();
+            }
         }
 
         // Include reasoning encrypted content — Codex backend requires this for
         // reasoning models. JS: `if effort !== "none" → body.include =
-        // ["reasoning.encrypted_content"]` (codex.js:457-459). Overwrite any
-        // client-supplied include per JS.
-        if effort != "none" {
+        // ["reasoning.encrypted_content"]` (codex.js:529-531), evaluated on the
+        // NORMALIZED effort. Overwrite any client-supplied include per JS.
+        let include_reasoning = match reasoning.get("effort") {
+            Some(Value::String(s)) => !s.is_empty() && s != "none",
+            Some(Value::Null) | None => false,
+            Some(_) => true,
+        };
+        if include_reasoning {
             request_body["include"] = json!(["reasoning.encrypted_content"]);
         }
 
@@ -816,7 +1175,6 @@ impl CodexExecutor {
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
         // Always stream upstream (9router force stream); client JSON via chat sse_to_json
-        let headers = self.build_headers(api_key, true, connection_id, &request.credentials)?;
 
         // Strip the `_compact` routing flag before send (JS codex.js:395
         // `delete body._compact` — the upstream never sees it).
@@ -835,6 +1193,21 @@ impl CodexExecutor {
         }
 
         let transformed_body = self.transform_request_body(&request.body, &actual_model, true)?;
+
+        // 9router codex.js:222-224 — the lite header is set when the model is
+        // a registry `responsesLite` id AND the transformed body carries no
+        // web_search tool (the lite lane nulls `tools`, so this reduces to the
+        // lane decision; a lite model that fell back to the full lane for
+        // hosted search keeps `tools` and gets no header).
+        let responses_lite = is_codex_responses_lite_model(&actual_model)
+            && !has_web_search_tool(transformed_body.get("tools").unwrap_or(&Value::Null));
+        let headers = self.build_headers(
+            api_key,
+            true,
+            connection_id,
+            &request.credentials,
+            responses_lite,
+        )?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
 
@@ -1354,6 +1727,190 @@ mod tests {
             .transform_request_body(&body, "o4-mini", false)
             .unwrap();
         assert!(out.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn test_codex_responses_lite_lane_gpt_6_1_terra() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+
+        let body = json!({
+            "model": "codex/gpt-6.1-terra",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "type": "function", "name": "f", "parameters": { "type": "object" } }]
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra", true)
+            .unwrap();
+
+        assert_eq!(out["model"], "gpt-6.1-terra");
+        assert_eq!(out["stream"], true);
+        assert_eq!(out["store"], false);
+        // Lite lane: Responses-only top-level fields stripped/nulled.
+        assert_eq!(out["instructions"], "");
+        assert!(out["tools"].is_null(), "lite tools must be null");
+        assert_eq!(out["tool_choice"], "auto");
+        assert_eq!(out["parallel_tool_calls"], false);
+        // reasoning: { effort, context: "all_turns" } — no summary, medium default.
+        assert_eq!(out["reasoning"]["effort"], "medium");
+        assert_eq!(out["reasoning"]["context"], "all_turns");
+        assert!(out["reasoning"].get("summary").is_none());
+        assert_eq!(out["include"], json!(["reasoning.encrypted_content"]));
+
+        // Tools + instructions moved into input prefix items (Codex 0.155).
+        let input = out["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["tools"][0]["name"], "f");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "developer");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            CodexExecutor::DEFAULT_CODEX_INSTRUCTIONS
+        );
+        assert_eq!(input[2]["role"], "user");
+    }
+
+    #[test]
+    fn test_codex_responses_lite_lane_client_instructions_and_effort() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+
+        // Client instructions go into the prefix message verbatim; explicit
+        // reasoning.effort wins and is normalized against the lite level set
+        // (none/minimal → low).
+        let body = json!({
+            "model": "gpt-6.1-terra",
+            "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }],
+            "instructions": "MY SYS",
+            "reasoning_effort": "none"
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra", true)
+            .unwrap();
+        assert_eq!(out["reasoning"]["effort"], "low");
+        assert_eq!(out["reasoning"]["context"], "all_turns");
+        let input = out["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert_eq!(input[0]["tools"], json!([]));
+        assert_eq!(input[1]["content"][0]["text"], "MY SYS");
+
+        // reasoning object present → only effort is normalized, other fields kept.
+        let body = json!({
+            "model": "gpt-6.1-terra",
+            "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }],
+            "reasoning": { "effort": "high" }
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra", true)
+            .unwrap();
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert_eq!(out["reasoning"]["context"], "all_turns");
+    }
+
+    #[test]
+    fn test_codex_responses_lite_web_search_falls_back_to_full_lane() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+
+        let body = json!({
+            "model": "gpt-6.1-terra",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "type": "web_search" }]
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra", true)
+            .unwrap();
+        // Hosted search cannot run from a lite prefix → full Responses lane.
+        assert_eq!(
+            out["instructions"],
+            CodexExecutor::DEFAULT_CODEX_INSTRUCTIONS
+        );
+        assert_eq!(out["tools"][0]["type"], "web_search");
+        assert_eq!(out["reasoning"]["effort"], "low");
+        assert_eq!(out["reasoning"]["summary"], "auto");
+        assert!(out["reasoning"].get("context").is_none());
+        assert!(out.get("parallel_tool_calls").is_none());
+        assert!(out.get("tool_choice").is_none());
+        // No additional_tools prefix injected.
+        let input = out["input"].as_array().unwrap();
+        assert!(input
+            .iter()
+            .all(|i| i.get("type").and_then(Value::as_str) != Some("additional_tools")));
+    }
+
+    #[test]
+    fn test_codex_responses_lite_suffix_and_paren_variants() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+
+        // Dash effort suffix is checked BEFORE the lite decision upstream —
+        // `gpt-6.1-terra-high` takes the FULL lane (codex.js order).
+        let body = json!({
+            "model": "gpt-6.1-terra",
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra-high", true)
+            .unwrap();
+        assert_eq!(out["model"], "gpt-6.1-terra");
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert_eq!(out["reasoning"]["summary"], "auto");
+        assert!(out["reasoning"].get("context").is_none());
+        assert_eq!(
+            out["instructions"],
+            CodexExecutor::DEFAULT_CODEX_INSTRUCTIONS
+        );
+
+        // Paren suffix is stripped for the lite lookup → lite lane, effort kept.
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra(high)", true)
+            .unwrap();
+        assert_eq!(out["model"], "gpt-6.1-terra");
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert_eq!(out["reasoning"]["context"], "all_turns");
+        assert_eq!(out["instructions"], "");
+    }
+
+    #[test]
+    fn test_codex_lite_lane_preserves_developer_msg_id() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+
+        // On the lite lane a developer message keeps its `msg_` id
+        // (preserveLitePrefix); item_reference objects are dropped.
+        let body = json!({
+            "model": "gpt-6.1-terra",
+            "input": [
+                { "type": "message", "role": "developer", "id": "msg_keep", "content": [{ "type": "input_text", "text": "sys" }] },
+                { "type": "item_reference", "id": "msg_drop" },
+                { "type": "message", "role": "user", "id": "msg_user", "content": [{ "type": "input_text", "text": "hi" }] },
+                "rs_orphan_string"
+            ]
+        });
+        let out = executor
+            .transform_request_body(&body, "gpt-6.1-terra", true)
+            .unwrap();
+        let input = out["input"].as_array().unwrap();
+        // additional_tools prefix first, then developer msg (id kept), user msg (id stripped).
+        // The injected prefix also carries a developer message — find ours by text.
+        let dev = input
+            .iter()
+            .find(|i| {
+                i["role"] == "developer"
+                    && i["type"] == "message"
+                    && i["content"][0]["text"] == "sys"
+            })
+            .unwrap();
+        assert_eq!(dev["id"], "msg_keep");
+        let user = input.iter().find(|i| i["role"] == "user").unwrap();
+        assert!(user.get("id").is_none());
+        assert!(input.iter().all(|i| i["type"] != "item_reference"));
+        assert!(input.iter().all(|i| i.as_str() != Some("rs_orphan_string")));
+
+        // Full lane strips the developer msg_ id too.
+        let out = executor
+            .transform_request_body(&body, "gpt-6-astra", true)
+            .unwrap();
+        let input = out["input"].as_array().unwrap();
+        let dev = input.iter().find(|i| i["role"] == "developer").unwrap();
+        assert!(dev.get("id").is_none());
     }
 
     #[test]

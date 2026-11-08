@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 
+use crate::server::api::usage::mask_api_key;
 use crate::types::{ApiKey, ProviderConnection, ProviderNode, SummaryCounter, UsageDb, UsageEntry};
 
 use super::usage_live::{ActiveRequest, PendingSnapshot};
@@ -99,7 +100,7 @@ pub struct ApiKeyStats {
     pub cost: f64,
     pub raw_model: String,
     pub provider: String,
-    pub api_key: Option<String>,
+    pub api_key_masked: Option<String>,
     pub key_name: String,
     pub api_key_key: String,
     pub last_used: String,
@@ -499,20 +500,7 @@ fn aggregate_live_entry(
     }
 
     let api_key_value = entry.api_key.clone();
-    let api_key_group = if let Some(api_key) = &api_key_value {
-        format!(
-            "{}|{}|{}",
-            api_key,
-            entry.model,
-            if provider.is_empty() {
-                "unknown"
-            } else {
-                &provider
-            }
-        )
-    } else {
-        "local-no-key".to_string()
-    };
+    let api_key_group = api_key_group_key(api_key_value.as_deref(), &entry.model, &provider);
     let api_key_bucket = stats.by_api_key.entry(api_key_group).or_default();
     api_key_bucket.requests += 1;
     api_key_bucket.prompt_tokens += prompt_tokens;
@@ -524,7 +512,7 @@ fn aggregate_live_entry(
     api_key_bucket.cost += cost;
     api_key_bucket.raw_model = entry.model.clone();
     api_key_bucket.provider = provider_display.clone();
-    api_key_bucket.api_key = api_key_value.clone();
+    api_key_bucket.api_key_masked = mask_api_key(api_key_value.as_deref());
     api_key_bucket.key_name = api_key_value
         .as_ref()
         .and_then(|key| {
@@ -534,7 +522,8 @@ fn aggregate_live_entry(
                 .or_else(|| Some(format!("{}...", key.chars().take(8).collect::<String>())))
         })
         .unwrap_or_else(|| "Local (No API Key)".to_string());
-    api_key_bucket.api_key_key = api_key_value.unwrap_or_else(|| "local-no-key".to_string());
+    api_key_bucket.api_key_key =
+        mask_api_key(api_key_value.as_deref()).unwrap_or_else(|| "local-no-key".to_string());
     update_last_used(&mut api_key_bucket.last_used, &timestamp);
 
     let endpoint = entry
@@ -663,6 +652,34 @@ fn merge_by_account(
     }
 }
 
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Group key for `by_api_key`: masked key + hash of the full key so distinct
+/// keys never collide, without leaking the raw key into the serialized map key.
+fn api_key_group_key(api_key: Option<&str>, model: &str, provider: &str) -> String {
+    match api_key {
+        Some(key) if !key.is_empty() => format!(
+            "{}#{:016x}|{}|{}",
+            mask_api_key(Some(key)).unwrap_or_default(),
+            fnv1a64(key.as_bytes()),
+            model,
+            if provider.is_empty() {
+                "unknown"
+            } else {
+                provider
+            }
+        ),
+        _ => "local-no-key".to_string(),
+    }
+}
+
 fn merge_by_api_key(
     target: &mut BTreeMap<String, ApiKeyStats>,
     by_api_key: &BTreeMap<String, SummaryCounter>,
@@ -670,7 +687,7 @@ fn merge_by_api_key(
     provider_names: &BTreeMap<String, String>,
     api_key_names: &BTreeMap<String, String>,
 ) {
-    for (api_key_group, counter) in by_api_key {
+    for (_api_key_group, counter) in by_api_key {
         let raw_model = counter.raw_model.clone().unwrap_or_default();
         let provider = counter.provider.clone().unwrap_or_default();
         let provider_display = provider_names
@@ -678,6 +695,7 @@ fn merge_by_api_key(
             .cloned()
             .unwrap_or(provider.clone());
         let api_key = counter.api_key.clone();
+        let api_key_masked = mask_api_key(api_key.as_deref());
         let key_name = api_key
             .as_ref()
             .and_then(|key| {
@@ -687,7 +705,10 @@ fn merge_by_api_key(
                     .or_else(|| Some(format!("{}...", key.chars().take(8).collect::<String>())))
             })
             .unwrap_or_else(|| "Local (No API Key)".to_string());
-        let bucket = target.entry(api_key_group.clone()).or_default();
+        // Recompute the group key from masked material — persisted daily
+        // summaries may still carry raw keys in their map keys.
+        let group_key = api_key_group_key(api_key.as_deref(), &raw_model, &provider);
+        let bucket = target.entry(group_key).or_default();
         bucket.requests += counter.requests;
         bucket.prompt_tokens += counter.prompt_tokens;
         bucket.completion_tokens += counter.completion_tokens;
@@ -698,9 +719,9 @@ fn merge_by_api_key(
         bucket.cost += counter.cost;
         bucket.raw_model = raw_model;
         bucket.provider = provider_display;
-        bucket.api_key = api_key.clone();
+        bucket.api_key_masked = api_key_masked.clone();
         bucket.key_name = key_name;
-        bucket.api_key_key = api_key.unwrap_or_else(|| "local-no-key".to_string());
+        bucket.api_key_key = api_key_masked.unwrap_or_else(|| "local-no-key".to_string());
         update_last_used(&mut bucket.last_used, last_used);
     }
 }
@@ -780,20 +801,7 @@ fn overlay_precise_last_used(
             }
         }
 
-        let api_key_group = if let Some(api_key) = &entry.api_key {
-            format!(
-                "{}|{}|{}",
-                api_key,
-                entry.model,
-                if provider.is_empty() {
-                    "unknown"
-                } else {
-                    &provider
-                }
-            )
-        } else {
-            "local-no-key".to_string()
-        };
+        let api_key_group = api_key_group_key(entry.api_key.as_deref(), &entry.model, &provider);
         if let Some(api_key_bucket) = stats.by_api_key.get_mut(&api_key_group) {
             update_last_used(&mut api_key_bucket.last_used, timestamp);
         }
@@ -889,4 +897,37 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_group_key_never_contains_raw_key() {
+        let raw = "sk-SECRET-KEY-1234567890";
+        let key = api_key_group_key(Some(raw), "gpt-4o", "openai");
+        assert!(!key.contains(raw));
+        assert!(key.contains("sk-SECRE***"));
+        // Distinct keys must not collide even with identical masks.
+        let other = api_key_group_key(Some("sk-SECRET-OTHER-999"), "gpt-4o", "openai");
+        assert_ne!(key, other);
+        assert_eq!(api_key_group_key(None, "m", "p"), "local-no-key");
+        assert_eq!(api_key_group_key(Some(""), "m", "p"), "local-no-key");
+    }
+
+    #[test]
+    fn api_key_stats_serializes_masked_fields_only() {
+        let stats = ApiKeyStats {
+            api_key_masked: mask_api_key(Some("sk-abcdef1234567890")),
+            api_key_key: mask_api_key(Some("sk-abcdef1234567890"))
+                .unwrap_or_else(|| "local-no-key".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("apiKeyMasked"));
+        assert!(json.contains("sk-abcde***"));
+        assert!(!json.contains("sk-abcdef1234567890"));
+        assert!(!json.contains("\"apiKey\""));
+    }
 }

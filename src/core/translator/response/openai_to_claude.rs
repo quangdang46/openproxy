@@ -550,6 +550,8 @@ fn convert_finish_reason(reason: &str) -> &'static str {
         "stop" => "end_turn",
         "length" => "max_tokens",
         "tool_calls" => "tool_use",
+        // Upstream fromOpenAIFinish (finishReason.js): content_filter → refusal.
+        "content_filter" => "refusal",
         _ => "end_turn",
     }
 }

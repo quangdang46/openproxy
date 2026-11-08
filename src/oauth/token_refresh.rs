@@ -1068,6 +1068,85 @@ pub async fn refresh_codebuddy_intl_token(refresh_token: &str) -> Result<Refresh
     })
 }
 
+/// Nous Research refresh — Portal token endpoint + fresh inference agent key.
+///
+/// 9router parity: `open-sse/services/tokenRefresh/providers.js` `refreshNousToken`.
+/// The stored `access_token` is the minted agent key when minting succeeds, so
+/// the refresh result must carry the new agent key (or the raw OAuth access
+/// token when minting fails) rather than the Portal token itself.
+pub async fn refresh_nous_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(crate::oauth::nous::TOKEN_URL)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(ACCEPT, "application/json")
+        .header("x-nous-refresh-token", refresh_token)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", crate::oauth::nous::CLIENT_ID),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Nous refresh request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        return Err(format!("Nous refresh returned HTTP {status}"));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Nous refresh parse failed: {e}"))?;
+
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| "Nous refresh response missing access_token".to_string())?
+        .to_string();
+
+    let token_expires_in = payload
+        .get("expires_in")
+        .or_else(|| payload.get("expiresIn"))
+        .and_then(Value::as_i64);
+
+    let new_refresh_token = payload
+        .get("refresh_token")
+        .or_else(|| payload.get("refreshToken"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| Some(refresh_token.to_string()));
+
+    // Minting is best-effort: upstream falls back to the OAuth access token.
+    let agent_key = crate::oauth::nous::mint_agent_key(&access_token)
+        .await
+        .ok()
+        .flatten();
+
+    let (inference_token, expires_in) = match &agent_key {
+        Some(agent_key) => {
+            let ttl = crate::oauth::nous::agent_key_ttl(agent_key);
+            let expires_in = match (token_expires_in, ttl) {
+                (Some(token_ttl), Some(agent_ttl)) => Some(token_ttl.min(agent_ttl)),
+                (Some(token_ttl), None) => Some(token_ttl),
+                (None, Some(agent_ttl)) => Some(agent_ttl),
+                (None, None) => None,
+            };
+            (agent_key.api_key.clone(), expires_in)
+        }
+        None => (access_token, token_expires_in),
+    };
+
+    Ok(RefreshResult {
+        access_token: inference_token,
+        refresh_token: new_refresh_token,
+        expires_in,
+    })
+}
+
 /// Dispatch to the correct per-provider token refresh function.
 ///
 /// Matches on `provider` name and calls the appropriate `dedup_refresh` wrapper.
@@ -1230,6 +1309,14 @@ pub async fn dispatch_oauth_refresh(
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
                 async move { refresh_codebuddy_intl_token(&rt).await }
+            })
+            .await
+        }
+        "nous" | "nous-research" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_nous_token(&rt).await }
             })
             .await
         }

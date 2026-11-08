@@ -21,6 +21,7 @@
 //! currently rate-limited.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::{FromRequest, Multipart, Request, State};
@@ -33,6 +34,8 @@ use super::cors::{cors_preflight_response, with_cors_response};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use tracing::debug;
+
+use tokio::io::AsyncReadExt;
 
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::server::auth::require_api_key_with_reload;
@@ -59,6 +62,11 @@ pub enum SttFormat {
     HuggingfaceAsr,
     /// Gemini `generateContent` with `inline_data` audio.
     GeminiStt,
+    /// Codex OAuth transcription — `chatgpt.com/backend-api/transcribe`.
+    /// Reuses Codex chat OAuth connections; audio is converted to 24 kHz
+    /// PCM16 WAV via ffmpeg before upload (upstream `codexStt.js` +
+    /// `codexSttAudio.js`).
+    CodexTranscribe,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,8 +124,10 @@ pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::AssemblyAi,
         },
+        // Inference Providers router, hf-inference ASR route — keeps the Hub
+        // model id (`router.huggingface.co/hf-inference/models/<hubId>`).
         "huggingface" => SttProviderConfig {
-            base_url: "https://api-inference.huggingface.co/models".to_string(),
+            base_url: "https://router.huggingface.co/hf-inference/models".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::HuggingfaceAsr,
@@ -127,6 +137,16 @@ pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
             auth_type_none: false,
             auth_header: SttAuthHeader::Key,
             format: SttFormat::GeminiStt,
+        },
+        // Upstream `providers/registry/codex.js` sttConfig — ChatGPT backend
+        // transcription reusing the Codex OAuth chat connection.
+        "codex" => SttProviderConfig {
+            base_url: "https://chatgpt.com/backend-api/transcribe".to_string(),
+            auth_type_none: false,
+            // Bearer is applied inside `transcribe_codex` together with the
+            // `ChatGPT-Account-Id` header; this value is unused for the format.
+            auth_header: SttAuthHeader::Bearer,
+            format: SttFormat::CodexTranscribe,
         },
         "selfhosted-stt" => SttProviderConfig {
             base_url: SELFHOSTED_STT_DEFAULT_URL.to_string(),
@@ -150,14 +170,20 @@ fn resolve_stt_config(
     connection: &crate::types::ProviderConnection,
 ) -> Option<SttProviderConfig> {
     let mut cfg = stt_config(provider)?;
-    if let Some(base_url) = connection
-        .provider_specific_data
-        .get("baseUrl")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        cfg.base_url = base_url.trim_end_matches('/').to_string();
+    // Upstream sttCore.js:281 — "OAuth transcription uses a fixed ChatGPT
+    // endpoint; never honor connection URL overrides." A per-connection
+    // `baseUrl` must not redirect Codex STT traffic to an arbitrary host
+    // (it would also leak the OAuth bearer token).
+    if provider != "codex" {
+        if let Some(base_url) = connection
+            .provider_specific_data
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            cfg.base_url = base_url.trim_end_matches('/').to_string();
+        }
     }
     Some(cfg)
 }
@@ -458,7 +484,7 @@ async fn dispatch_with_fallback(
     };
 
     if cfg.auth_type_none {
-        match transcribe(state, provider, &cfg, model, req, None).await {
+        match transcribe(state, provider, &cfg, model, req, None, None).await {
             DispatchResult::Ok(resp) => return resp,
             DispatchResult::Err { status, message } => {
                 return json_error(status, &message);
@@ -506,7 +532,17 @@ async fn dispatch_with_fallback(
                 );
             }
         };
-        match transcribe(state, provider, &effective_cfg, model, req, token_ref).await {
+        match transcribe(
+            state,
+            provider,
+            &effective_cfg,
+            model,
+            req,
+            token_ref,
+            Some(&connection),
+        )
+        .await
+        {
             DispatchResult::Ok(resp) => return resp,
             DispatchResult::Err { status, message } => {
                 if should_fallback(status) {
@@ -589,6 +625,7 @@ async fn transcribe(
     model: &str,
     req: &SttRequest,
     token: Option<&str>,
+    connection: Option<&ProviderConnection>,
 ) -> DispatchResult {
     if !cfg.auth_type_none && token.is_none() {
         return DispatchResult::Err {
@@ -614,6 +651,13 @@ async fn transcribe(
         SttFormat::NvidiaAsr => transcribe_nvidia(&client, cfg, model, req, token).await,
         SttFormat::HuggingfaceAsr => transcribe_huggingface(&client, cfg, model, req, token).await,
         SttFormat::GeminiStt => transcribe_gemini(&client, cfg, model, req, token).await,
+        SttFormat::CodexTranscribe => match connection {
+            Some(conn) => transcribe_codex(&client, cfg, model, req, conn).await,
+            None => DispatchResult::Err {
+                status: StatusCode::UNAUTHORIZED,
+                message: "Codex transcription requires an OAuth connection".to_string(),
+            },
+        },
     }
 }
 
@@ -1171,6 +1215,447 @@ async fn transcribe_gemini(
     ok_json(json!({ "text": text }))
 }
 
+// --- codex (ChatGPT backend transcription; OAuth + ffmpeg → 24 kHz WAV) ---
+//
+// Port of upstream `open-sse/handlers/codexStt.js` + `codexSttAudio.js`
+// (v0.5.109) and `providers/registry/codex.js` sttConfig. Reuses the Codex
+// OAuth chat connection: `access_token` goes in `Authorization: Bearer` and
+// the account id (`provider_specific_data.workspaceId` → `chatgptAccountId`
+// → `accountId`) in `ChatGPT-Account-Id`.
+
+/// Upstream `codexSttAudio.js` `MAX_AUDIO_BYTES` — raw upload cap (25 MiB).
+const CODEX_STT_MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+/// Upstream `MAX_AUDIO_SECONDS` — ffmpeg `-t` cap.
+const CODEX_STT_MAX_AUDIO_SECONDS: u32 = 120;
+/// Upstream `MAX_PCM_BYTES` — PCM16 mono @ 24 kHz for `MAX_AUDIO_SECONDS`.
+const CODEX_STT_MAX_PCM_BYTES: usize = CODEX_STT_MAX_AUDIO_SECONDS as usize * 24_000 * 2;
+/// Upstream `readBounded` response cap (1 MiB).
+const CODEX_STT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Upstream transcript text cap.
+const CODEX_STT_MAX_TEXT_LEN: usize = 250_000;
+/// Upstream `AbortSignal.timeout(60000)` covers convert + upload + response.
+const CODEX_STT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upstream ffmpeg spawn `timeout: 15000`.
+const CODEX_STT_CONVERT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upstream `if (active >= 2)` in-flight cap.
+const CODEX_STT_MAX_CONCURRENT: usize = 2;
+/// Upstream `codex.transport.headers["User-Agent"]` for CLI 0.159.0
+/// (`providers/registry/codex.js` `CODEX_CLI_VERSION`).
+const CODEX_STT_USER_AGENT: &str = "codex_cli_rs/0.159.0";
+
+static CODEX_STT_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII slot for the upstream `active < 2` concurrency cap.
+struct CodexSttSlot;
+
+impl CodexSttSlot {
+    fn acquire() -> Option<Self> {
+        let mut current = CODEX_STT_ACTIVE.load(Ordering::Relaxed);
+        loop {
+            if current >= CODEX_STT_MAX_CONCURRENT {
+                return None;
+            }
+            match CODEX_STT_ACTIVE.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+impl Drop for CodexSttSlot {
+    fn drop(&mut self) {
+        CODEX_STT_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn codex_stt_err(status: StatusCode, message: impl Into<String>) -> DispatchResult {
+    DispatchResult::Err {
+        status,
+        message: message.into(),
+    }
+}
+
+/// Upstream credential gate (`codexStt.js`): OAuth auth type, printable-ASCII
+/// access token (`/^[\x21-\x7e]+$/`), and a printable account id
+/// (`/^[\x21-\x7e]{1,256}$/`) from `workspaceId` → `chatgptAccountId` →
+/// `accountId`.
+fn codex_stt_credentials<'a>(
+    connection: &'a ProviderConnection,
+) -> Result<(&'a str, &'a str), DispatchResult> {
+    let invalid = || {
+        codex_stt_err(
+            StatusCode::UNAUTHORIZED,
+            "A valid Codex OAuth account is required",
+        )
+    };
+    if connection.auth_type != "oauth" {
+        return Err(invalid());
+    }
+    let token = connection.access_token.as_deref().ok_or_else(invalid)?;
+    if token.is_empty() || !token.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        return Err(invalid());
+    }
+    let account_id = ["workspaceId", "chatgptAccountId", "accountId"]
+        .iter()
+        .find_map(|key| {
+            connection
+                .provider_specific_data
+                .get(*key)
+                .and_then(Value::as_str)
+        })
+        .ok_or_else(invalid)?;
+    if account_id.is_empty()
+        || account_id.len() > 256
+        || !account_id.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    {
+        return Err(invalid());
+    }
+    Ok((token, account_id))
+}
+
+/// Upstream field gate: only `response_format` ∈ {json, text} (default json);
+/// `language`, `prompt`, `temperature` must be absent or empty.
+fn codex_stt_response_format(req: &SttRequest) -> Result<String, DispatchResult> {
+    for (present, key) in [
+        (req.language.is_some(), "language"),
+        (req.prompt.is_some(), "prompt"),
+        (req.temperature.is_some(), "temperature"),
+    ] {
+        if present {
+            return Err(codex_stt_err(
+                StatusCode::BAD_REQUEST,
+                format!("{key} is not supported by Codex transcription"),
+            ));
+        }
+    }
+    let format = req
+        .response_format
+        .clone()
+        .unwrap_or_else(|| "json".to_string());
+    if format != "json" && format != "text" {
+        return Err(codex_stt_err(
+            StatusCode::BAD_REQUEST,
+            "Only json and text response formats are supported",
+        ));
+    }
+    Ok(format)
+}
+
+/// Wrap raw little-endian PCM16 mono @ 24 kHz in a canonical 44-byte WAV
+/// header (mirrors the `Buffer.alloc(44 + pcm.length)` block in
+/// `codexSttAudio.js`).
+fn wav_wrap_pcm16_24k(pcm: &[u8]) -> Vec<u8> {
+    let data_len = pcm.len() as u32;
+    let riff_len = 36u32.saturating_add(data_len);
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_len.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // channels = mono
+    wav.extend_from_slice(&24_000u32.to_le_bytes()); // sample rate
+    wav.extend_from_slice(&48_000u32.to_le_bytes()); // byte rate (24000*2)
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
+}
+
+/// Convert arbitrary audio input to 24 kHz mono PCM16 WAV via ffmpeg,
+/// mirroring `convertAudio` in `codexSttAudio.js`: bounded temp dir (input
+/// written mode 0600), `-t 120.01`, `-ac 1 -ar 24000 -c:a pcm_s16le`,
+/// stdout capped at `MAX_PCM_BYTES`, 15 s spawn timeout. Requires ffmpeg on
+/// PATH (503 when absent, same as upstream).
+async fn codex_convert_audio_to_wav(file_bytes: &[u8]) -> Result<Vec<u8>, DispatchResult> {
+    let dir = std::env::temp_dir().join(format!("openproxy-codex-stt-{}", uuid::Uuid::new_v4()));
+    let result = codex_convert_inner(&dir, file_bytes).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    result
+}
+
+async fn codex_convert_inner(
+    dir: &std::path::Path,
+    file_bytes: &[u8],
+) -> Result<Vec<u8>, DispatchResult> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| codex_stt_err(StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir tmp: {e}")))?;
+    let input = dir.join("input");
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&input).map_err(|e| {
+            codex_stt_err(StatusCode::INTERNAL_SERVER_ERROR, format!("tmpfile: {e}"))
+        })?;
+        use std::io::Write;
+        file.write_all(file_bytes).map_err(|e| {
+            codex_stt_err(StatusCode::INTERNAL_SERVER_ERROR, format!("tmpfile: {e}"))
+        })?;
+    }
+
+    let mut child = match tokio::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "1",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-format_whitelist",
+            "wav,mp3,mov,matroska,webm,ogg,flac,aac",
+            "-i",
+        ])
+        .arg(&input)
+        .args([
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-t",
+            &format!("{:.2}", CODEX_STT_MAX_AUDIO_SECONDS as f64 + 0.01),
+            "-threads",
+            "1",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(codex_stt_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ffmpeg is required for transcription",
+            ));
+        }
+        Err(_) => {
+            return Err(codex_stt_err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Audio conversion timed out",
+            ));
+        }
+    };
+
+    let conversion = async {
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let mut pcm: Vec<u8> = Vec::new();
+        let mut oversized = false;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match stdout.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if pcm.len() + n > CODEX_STT_MAX_PCM_BYTES {
+                        oversized = true;
+                        break;
+                    }
+                    pcm.extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+        if oversized {
+            let _ = child.kill().await;
+        }
+        let status = child.wait().await;
+        (pcm, oversized, status)
+    };
+
+    match tokio::time::timeout(CODEX_STT_CONVERT_TIMEOUT, conversion).await {
+        Err(_) => Err(codex_stt_err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Audio conversion timed out",
+        )),
+        Ok((pcm, oversized, status)) => {
+            if oversized {
+                return Err(codex_stt_err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Audio duration exceeds {} seconds",
+                        CODEX_STT_MAX_AUDIO_SECONDS
+                    ),
+                ));
+            }
+            match status {
+                Ok(s) if s.success() && !pcm.is_empty() => Ok(wav_wrap_pcm16_24k(&pcm)),
+                _ => Err(codex_stt_err(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid or unsupported audio",
+                )),
+            }
+        }
+    }
+}
+
+/// Read a response body with a hard byte cap (upstream `readBounded`).
+async fn codex_read_bounded(res: &mut reqwest::Response) -> Result<Vec<u8>, DispatchResult> {
+    let mut body = Vec::new();
+    loop {
+        match res.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > CODEX_STT_MAX_RESPONSE_BYTES {
+                    return Err(codex_stt_err(
+                        StatusCode::BAD_GATEWAY,
+                        "Body exceeds size limit",
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(body),
+            Err(e) => {
+                return Err(codex_stt_err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed reading response: {e}"),
+                ));
+            }
+        }
+    }
+}
+
+async fn transcribe_codex(
+    client: &reqwest::Client,
+    cfg: &SttProviderConfig,
+    model: &str,
+    req: &SttRequest,
+    connection: &ProviderConnection,
+) -> DispatchResult {
+    // Codex STT is only exposed through the registry `transcribe` model;
+    // other codex models are chat/image and must not hit this endpoint.
+    if model != "transcribe" {
+        return codex_stt_err(
+            StatusCode::BAD_REQUEST,
+            "Codex transcription requires the 'transcribe' model",
+        );
+    }
+    let (access_token, account_id) = match codex_stt_credentials(connection) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let format = match codex_stt_response_format(req) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    if req.file_bytes.is_empty() {
+        return codex_stt_err(
+            StatusCode::BAD_REQUEST,
+            "A non-empty audio file is required",
+        );
+    }
+    if req.file_bytes.len() > CODEX_STT_MAX_AUDIO_BYTES {
+        return codex_stt_err(StatusCode::PAYLOAD_TOO_LARGE, "Audio exceeds 25 MiB");
+    }
+    let _slot = match CodexSttSlot::acquire() {
+        Some(s) => s,
+        None => {
+            return codex_stt_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Transcription capacity reached",
+            );
+        }
+    };
+
+    // Upstream `AbortSignal.timeout(60000)` bounds convert + upload + response.
+    let work = async {
+        let wav = codex_convert_audio_to_wav(&req.file_bytes).await?;
+
+        // "audio/wav" is a static valid MIME — mime_str cannot fail here.
+        let part = reqwest::multipart::Part::bytes(wav)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .expect("static audio/wav MIME is valid");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let request = client
+            .post(&cfg.base_url)
+            .multipart(form)
+            .timeout(CODEX_STT_TIMEOUT)
+            .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+            .header("ChatGPT-Account-Id", account_id)
+            .header(header::USER_AGENT, CODEX_STT_USER_AGENT);
+        // `redirect: "error"` upstream — reqwest follows redirects at the
+        // client level, so a 3xx surfaces as a non-success status below.
+        // NOTE: do not set Content-Type manually — `.multipart()` generates
+        // the boundary parameter.
+        let mut res = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(codex_stt_err(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Request failed: {e}"),
+                ));
+            }
+        };
+        if !res.status().is_success() {
+            // Upstream maps any non-2xx outside 400..=599 to 502 and answers
+            // with a fixed message (the error body is discarded).
+            let code = res.status().as_u16();
+            let status = if (400..=599).contains(&code) {
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY)
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            return Err(codex_stt_err(status, "Codex transcription failed"));
+        }
+        let body = codex_read_bounded(&mut res).await?;
+        let text = match serde_json::from_slice::<Value>(&body) {
+            Ok(v) => v.get("text").and_then(Value::as_str).map(str::to_string),
+            Err(_) => None,
+        };
+        match text {
+            Some(t) if t.len() <= CODEX_STT_MAX_TEXT_LEN => Ok(t),
+            _ => Err(codex_stt_err(
+                StatusCode::BAD_GATEWAY,
+                "Invalid transcription response",
+            )),
+        }
+    };
+
+    match tokio::time::timeout(CODEX_STT_TIMEOUT, work).await {
+        Err(_) => codex_stt_err(StatusCode::GATEWAY_TIMEOUT, "Codex transcription failed"),
+        Ok(Err(e)) => e,
+        Ok(Ok(text)) => {
+            if format == "text" {
+                DispatchResult::Ok(
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        text,
+                    )
+                        .into_response(),
+                )
+            } else {
+                ok_json(json!({ "text": text }))
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CORS + error helpers.
 // ---------------------------------------------------------------------------
@@ -1295,6 +1780,19 @@ mod tests {
         );
         assert!(url.contains("&smart_format=true"));
         assert!(url.contains("&punctuate=true"));
+    }
+
+    #[test]
+    fn huggingface_stt_uses_router_hf_inference_route() {
+        // 9router cf663f5: api-inference.huggingface.co is retired; ASR goes
+        // through the router's hf-inference provider, Hub model id appended.
+        let cfg = stt_config("huggingface").unwrap();
+        assert_eq!(
+            cfg.base_url,
+            "https://router.huggingface.co/hf-inference/models"
+        );
+        assert_eq!(cfg.format, SttFormat::HuggingfaceAsr);
+        assert_eq!(cfg.auth_header, SttAuthHeader::Bearer);
     }
 
     #[test]
@@ -1544,5 +2042,225 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).expect("json body");
         assert_eq!(body["error"]["message"], "Combos not supported");
         assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    // --- codex transcription ---
+
+    fn codex_conn(psd: &[(&str, &str)]) -> ProviderConnection {
+        use std::collections::BTreeMap;
+        ProviderConnection {
+            id: "codex-1".into(),
+            provider: "codex".into(),
+            auth_type: "oauth".into(),
+            access_token: Some("codex-access-token".into()),
+            provider_specific_data: psd
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                .collect::<BTreeMap<_, _>>(),
+            ..Default::default()
+        }
+    }
+
+    fn stt_req() -> SttRequest {
+        SttRequest {
+            model: "transcribe".into(),
+            file_bytes: vec![1, 2, 3],
+            file_name: "audio.wav".into(),
+            file_content_type: Some("audio/wav".into()),
+            language: None,
+            prompt: None,
+            response_format: None,
+            temperature: None,
+            deepgram_smart_format: None,
+            deepgram_punctuate: None,
+        }
+    }
+
+    #[test]
+    fn codex_stt_catalog_entry() {
+        let cfg = stt_config("codex").expect("codex STT config");
+        assert_eq!(cfg.format, SttFormat::CodexTranscribe);
+        assert_eq!(cfg.base_url, "https://chatgpt.com/backend-api/transcribe");
+        assert!(!cfg.auth_type_none);
+    }
+
+    #[test]
+    fn codex_stt_ignores_connection_base_url_override() {
+        // Upstream sttCore.js:281 — the OAuth transcription endpoint is fixed;
+        // a connection baseUrl must never redirect it (bearer-token leak).
+        use std::collections::BTreeMap;
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "baseUrl".to_string(),
+            Value::String("https://evil.example.com/transcribe".to_string()),
+        );
+        let conn = ProviderConnection {
+            id: "codex-1".into(),
+            provider: "codex".into(),
+            auth_type: "oauth".into(),
+            access_token: Some("tok".into()),
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        let cfg = resolve_stt_config("codex", &conn).expect("codex config");
+        assert_eq!(cfg.base_url, "https://chatgpt.com/backend-api/transcribe");
+    }
+
+    #[test]
+    fn codex_credentials_require_oauth_and_printable_token() {
+        let conn = codex_conn(&[("workspaceId", "acct-123")]);
+        let (token, account) = codex_stt_credentials(&conn).expect("valid creds");
+        assert_eq!(token, "codex-access-token");
+        assert_eq!(account, "acct-123");
+
+        // Non-OAuth auth type rejected.
+        let mut bad = codex_conn(&[("workspaceId", "acct-123")]);
+        bad.auth_type = "apikey".into();
+        assert!(codex_stt_credentials(&bad).is_err());
+
+        // Missing access token rejected.
+        let mut bad = codex_conn(&[("workspaceId", "acct-123")]);
+        bad.access_token = None;
+        assert!(codex_stt_credentials(&bad).is_err());
+
+        // Non-printable token rejected (upstream /^[\x21-\x7e]+$/).
+        let mut bad = codex_conn(&[("workspaceId", "acct-123")]);
+        bad.access_token = Some("tok en".into());
+        assert!(codex_stt_credentials(&bad).is_err());
+
+        // Missing account id rejected.
+        let bad = codex_conn(&[]);
+        assert!(codex_stt_credentials(&bad).is_err());
+    }
+
+    #[test]
+    fn codex_account_id_prefers_workspace_id() {
+        // Upstream: workspaceId || chatgptAccountId || accountId.
+        let conn = codex_conn(&[
+            ("accountId", "a1"),
+            ("chatgptAccountId", "a2"),
+            ("workspaceId", "a3"),
+        ]);
+        let (_, account) = codex_stt_credentials(&conn).unwrap();
+        assert_eq!(account, "a3");
+
+        let conn = codex_conn(&[("accountId", "a1"), ("chatgptAccountId", "a2")]);
+        let (_, account) = codex_stt_credentials(&conn).unwrap();
+        assert_eq!(account, "a2");
+
+        // Over-long account id rejected (upstream {1,256}).
+        let long = "x".repeat(257);
+        let conn = codex_conn(&[("workspaceId", long.as_str())]);
+        assert!(codex_stt_credentials(&conn).is_err());
+    }
+
+    #[test]
+    fn codex_response_format_only_json_or_text() {
+        let mut req = stt_req();
+        assert_eq!(codex_stt_response_format(&req).unwrap(), "json");
+
+        req.response_format = Some("text".into());
+        assert_eq!(codex_stt_response_format(&req).unwrap(), "text");
+
+        for bad in ["srt", "vtt", "verbose_json", "JSON"] {
+            req.response_format = Some(bad.into());
+            assert!(codex_stt_response_format(&req).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn codex_rejects_language_prompt_temperature() {
+        let mut req = stt_req();
+        req.language = Some("en".into());
+        assert!(codex_stt_response_format(&req).is_err());
+
+        let mut req = stt_req();
+        req.prompt = Some("translate".into());
+        assert!(codex_stt_response_format(&req).is_err());
+
+        let mut req = stt_req();
+        req.temperature = Some("0.5".into());
+        assert!(codex_stt_response_format(&req).is_err());
+    }
+
+    #[test]
+    fn wav_wrap_pcm16_24k_header_is_canonical() {
+        let pcm = vec![0u8; 480]; // 10 ms of silence
+        let wav = wav_wrap_pcm16_24k(&pcm);
+        assert_eq!(wav.len(), 44 + pcm.len());
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        // RIFF chunk size = 36 + data len.
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 36 + 480);
+        // PCM, mono, 24 kHz, byte rate 48000, align 2, 16-bit.
+        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 48_000);
+        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 480);
+        assert_eq!(&wav[44..], pcm.as_slice());
+    }
+
+    #[test]
+    fn codex_slot_caps_concurrency_at_two() {
+        let s1 = CodexSttSlot::acquire().expect("slot 1");
+        let s2 = CodexSttSlot::acquire().expect("slot 2");
+        assert!(CodexSttSlot::acquire().is_none(), "third slot rejected");
+        drop(s1);
+        assert!(CodexSttSlot::acquire().is_some(), "drop releases a slot");
+        drop(s2);
+    }
+
+    /// End-to-end conversion check against the real ffmpeg binary (same
+    /// dependency upstream requires). Skipped when ffmpeg is not on PATH.
+    #[tokio::test]
+    async fn codex_convert_produces_24k_wav() {
+        // 0.5 s of 16 kHz mono PCM silence → valid WAV input for ffmpeg.
+        let samples = 8_000usize;
+        let mut wav_in = Vec::with_capacity(44 + samples * 2);
+        wav_in.extend_from_slice(b"RIFF");
+        wav_in.extend_from_slice(&((36 + samples * 2) as u32).to_le_bytes());
+        wav_in.extend_from_slice(b"WAVEfmt ");
+        wav_in.extend_from_slice(&16u32.to_le_bytes());
+        wav_in.extend_from_slice(&1u16.to_le_bytes());
+        wav_in.extend_from_slice(&1u16.to_le_bytes());
+        wav_in.extend_from_slice(&16_000u32.to_le_bytes());
+        wav_in.extend_from_slice(&32_000u32.to_le_bytes());
+        wav_in.extend_from_slice(&2u16.to_le_bytes());
+        wav_in.extend_from_slice(&16u16.to_le_bytes());
+        wav_in.extend_from_slice(b"data");
+        wav_in.extend_from_slice(&((samples * 2) as u32).to_le_bytes());
+        wav_in.resize(44 + samples * 2, 0);
+
+        if !tokio::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+
+        let wav = codex_convert_audio_to_wav(&wav_in)
+            .await
+            .expect("conversion should succeed");
+        assert_eq!(&wav[0..4], b"RIFF");
+        // 24 kHz mono output.
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
+        // ~0.5 s * 24000 * 2 bytes ≈ 24000 bytes of PCM.
+        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+        assert!(
+            data_len > 20_000 && data_len < 30_000,
+            "data_len={data_len}"
+        );
     }
 }

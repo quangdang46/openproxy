@@ -27,8 +27,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::core::config::app_constants::{
-    ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, INTERNAL_REQUEST_HEADER_NAME,
-    INTERNAL_REQUEST_HEADER_VALUE,
+    ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, ANTIGRAVITY_IDE_USER_AGENT,
+    INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
 };
 use crate::core::proxy::ProxyTarget;
 use crate::core::utils::project_id_cache;
@@ -297,18 +297,21 @@ impl AntigravityExecutor {
         Ok(headers)
     }
 
-    /// Build the Client-Metadata + api-client headers that Antigravity's
-    /// Cloud Code endpoint expects. These are sent alongside the standard
+    /// Build the Client-Metadata + api-client headers merged into the
+    /// Antigravity chat request. These are sent alongside the standard
     /// auth headers produced by [`build_headers`].
     ///
-    /// - `User-Agent: google-api-nodejs-client/9.15.1`
+    /// - `User-Agent: antigravity/hub/2.24.0 darwin/arm64`
+    ///   ([`ANTIGRAVITY_IDE_USER_AGENT`] — port of `ANTIGRAVITY_IDE_USER_AGENT`
+    ///   in `open-sse/providers/shared.js`; upstream `buildHeaders` resolves
+    ///   the chat UA to the same fingerprint)
     /// - `X-Goog-Api-Client: google-cloud-sdk vscode_cloudshelleditor/0.1`
     /// - `Client-Metadata: {"ideType":9,"platform":<enum>,"pluginType":2}`
     pub fn build_antigravity_headers() -> Result<HeaderMap, AntigravityExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(
             "User-Agent",
-            HeaderValue::from_static("google-api-nodejs-client/9.15.1"),
+            HeaderValue::from_static(ANTIGRAVITY_IDE_USER_AGENT),
         );
         headers.insert(
             "X-Goog-Api-Client",
@@ -348,7 +351,7 @@ impl AntigravityExecutor {
             .post(cloud_code_api::LOAD_CODE_ASSIST)
             .header("Authorization", format!("Bearer {access_token}"))
             .header("Content-Type", "application/json")
-            .header("User-Agent", "google-api-nodejs-client/9.15.1")
+            .header("User-Agent", ANTIGRAVITY_IDE_USER_AGENT)
             .header(
                 "X-Goog-Api-Client",
                 "google-cloud-sdk vscode_cloudshelleditor/0.1",
@@ -395,7 +398,7 @@ impl AntigravityExecutor {
                 .post(onboard_url)
                 .header("Authorization", format!("Bearer {access_token}"))
                 .header("Content-Type", "application/json")
-                .header("User-Agent", "google-api-nodejs-client/9.15.1")
+                .header("User-Agent", ANTIGRAVITY_IDE_USER_AGENT)
                 .header(
                     "X-Goog-Api-Client",
                     "google-cloud-sdk vscode_cloudshelleditor/0.1",
@@ -886,6 +889,24 @@ impl AntigravityExecutor {
 
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
 
+        // normalizeGeminiContents (antigravity.js:274 →
+        // open-sse/translator/formats/gemini.js): merge adjacent same-role
+        // turns, strip empty parts, sanitize functionResponse payloads ($ref
+        // rename), order functionResponses last for Gemini 4, and guarantee
+        // initial/terminal user turns. Image requests build their own contents
+        // upstream and skip this step.
+        if !is_image {
+            if let Some(req) = request.body.get_mut("request") {
+                if let Some(contents) = req.get("contents").and_then(Value::as_array).cloned() {
+                    let normalized =
+                        crate::core::translator::request::openai_to_gemini::normalize_gemini_contents(
+                            &contents, &request.model,
+                        );
+                    req["contents"] = Value::Array(normalized);
+                }
+            }
+        }
+
         // Add the top-level request envelope (JS transformRequest return,
         // antigravity.js:268-276): project, model, userAgent, requestType,
         // requestId around the `request` sub-object.
@@ -1276,7 +1297,7 @@ mod tests {
         let headers = AntigravityExecutor::build_antigravity_headers().unwrap();
         assert_eq!(
             headers.get("User-Agent").and_then(|v| v.to_str().ok()),
-            Some("google-api-nodejs-client/9.15.1")
+            Some(ANTIGRAVITY_IDE_USER_AGENT)
         );
         assert_eq!(
             headers

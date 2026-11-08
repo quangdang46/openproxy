@@ -483,6 +483,14 @@ impl TranslationRegistry {
         client_headers: Option<&std::collections::HashMap<String, String>>,
         connection_id: Option<&str>,
     ) -> bool {
+        // Role the client actually ended on, in the SOURCE format's shape —
+        // captured before translation rewrites the body (translator/index.js:73
+        // `detectClientLastRole`). A prefill expressed via contents[]/input[]
+        // must still be recognised as an explicit trailing assistant turn.
+        let client_last_role =
+            crate::core::translator::request::claude_format::detect_client_last_role(body)
+                .map(str::to_string);
+
         if source != target {
             // Direct route: exact source→target pair (lossless for claude→kiro etc.)
             if let Some(transform) = self.request_transforms.get(&(source, target)) {
@@ -565,6 +573,16 @@ impl TranslationRegistry {
                 client_headers,
                 connection_id,
             );
+            // translator/index.js:153 — after prepare, restore a trailing
+            // user turn unless the client itself ended on assistant. The
+            // clientLastRole here covers contents[]/input[] sources that
+            // prepare_claude_request's messages[]-only check cannot see.
+            if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+                crate::core::translator::request::claude_format::ensure_trailing_user_turn(
+                    messages,
+                    client_last_role.as_deref(),
+                );
+            }
         }
 
         true
@@ -1535,5 +1553,102 @@ mod parity_tests {
         assert!(global_registry()
             .finish_stream(Format::OpenAiResponses, Format::OpenAi, &mut state)
             .is_empty());
+    }
+
+    // ─── trailing user turn / prefill (translator/index.js:73,153) ──
+
+    #[test]
+    fn claude_target_restores_trailing_user_after_empty_tail_dropped() {
+        // Client ended on user but the trailing turn was empty; cleanup drops
+        // it and the previous assistant turn must not become last
+        // (newer Claude models 400 on that shape).
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+                {"role": "user", "content": ""}
+            ]
+        });
+        global_registry().translate_request_with_strip(
+            Format::Claude,
+            Format::Claude,
+            "claude-sonnet-4-5",
+            &mut body,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.last().unwrap()["role"], "user");
+        assert_eq!(
+            msgs.last().unwrap()["content"][0]["text"],
+            "Continue.",
+            "placeholder user turn restored"
+        );
+    }
+
+    #[test]
+    fn claude_target_preserves_contents_shaped_prefill() {
+        // Gemini contents[] ending in role "model" is an explicit assistant
+        // prefill — detect_client_last_role must recognise it even though the
+        // translated body only has messages[].
+        let mut body = json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "prefill"}]}
+            ]
+        });
+        global_registry().translate_request_with_strip(
+            Format::Gemini,
+            Format::Claude,
+            "claude-sonnet-4-5",
+            &mut body,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let msgs = body["messages"]
+            .as_array()
+            .expect("claude body has messages");
+        assert_eq!(
+            msgs.last().unwrap()["role"],
+            "assistant",
+            "contents[] prefill must survive as a trailing assistant turn: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn claude_target_preserves_input_shaped_prefill() {
+        // Responses input[] ending in role "assistant" is likewise prefill.
+        let mut body = json!({
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "prefill"}
+            ]
+        });
+        global_registry().translate_request_with_strip(
+            Format::OpenAiResponses,
+            Format::Claude,
+            "claude-sonnet-4-5",
+            &mut body,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        let msgs = body["messages"]
+            .as_array()
+            .expect("claude body has messages");
+        assert_eq!(
+            msgs.last().unwrap()["role"],
+            "assistant",
+            "input[] prefill must survive as a trailing assistant turn: {msgs:?}"
+        );
     }
 }

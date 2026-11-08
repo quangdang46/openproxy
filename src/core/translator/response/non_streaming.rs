@@ -67,17 +67,34 @@ pub fn claude_to_openai_non_streaming(response: &mut Value) -> bool {
         }
     }
 
-    // Map stop_reason.
+    // Map stop_reason (upstream finishReason.js toOpenAIFinish, claude arm).
+    let stop_reason = response.get("stop_reason").and_then(|v| v.as_str());
     let finish_reason = if !tool_calls.is_empty() {
         "tool_calls"
     } else {
-        match response.get("stop_reason").and_then(|v| v.as_str()) {
+        match stop_reason {
             Some("end_turn") | Some("stop_sequence") => "stop",
             Some("max_tokens") => "length",
             Some("tool_use") => "tool_calls",
+            // A refusal is a blocked turn, not a clean stop.
+            Some("refusal") => "content_filter",
             _ => "stop",
         }
     };
+
+    // A refusal produces no content blocks; surface Anthropic's own
+    // explanation as the message text so the client shows *why* the turn is
+    // empty (upstream claude-to-openai.js message_delta arm).
+    if stop_reason == Some("refusal") && text_content.is_empty() {
+        if let Some(explanation) = response
+            .pointer("/stop_details/explanation")
+            .and_then(|v| v.as_str())
+        {
+            if !explanation.is_empty() {
+                text_content = explanation.to_string();
+            }
+        }
+    }
 
     // Map usage.
     let usage = if let Some(usage) = response.get("usage") {
@@ -532,7 +549,7 @@ pub fn openai_to_claude_non_streaming(response: &mut Value) -> bool {
             "stop" => "end_turn",
             "length" | "max_tokens" => "max_tokens",
             "tool_calls" => "tool_use",
-            "content_filter" => "end_turn",
+            "content_filter" => "refusal",
             _ => "end_turn",
         };
     }
@@ -657,6 +674,28 @@ mod tests {
         assert_eq!(resp["object"], "chat.completion");
         assert_eq!(resp["choices"][0]["message"]["content"], "");
         assert_eq!(resp["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_claude_to_openai_refusal_maps_to_content_filter() {
+        let mut resp = json!({
+            "id": "msg_refusal",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "refusal",
+            "stop_details": {"type": "refusal", "explanation": "I can't help with that."},
+            "usage": {"input_tokens": 5, "output_tokens": 0}
+        });
+        let result = claude_to_openai_non_streaming(&mut resp);
+        assert!(result);
+        assert_eq!(resp["choices"][0]["finish_reason"], "content_filter");
+        // The explanation surfaces as the message text (refusal has no blocks).
+        assert_eq!(
+            resp["choices"][0]["message"]["content"],
+            "I can't help with that."
+        );
     }
 
     #[test]
@@ -903,6 +942,25 @@ mod tests {
         assert_eq!(resp["content"][1]["type"], "tool_use");
         assert_eq!(resp["content"][1]["name"], "search");
         assert_eq!(resp["content"][1]["input"]["q"], "hello");
+    }
+
+    #[test]
+    fn test_openai_to_claude_content_filter_maps_to_refusal() {
+        let mut resp = json!({
+            "id": "chatcmpl-789",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "gpt-4",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "blocked"},
+                "finish_reason": "content_filter"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+        });
+        let result = openai_to_claude_non_streaming(&mut resp);
+        assert!(result);
+        assert_eq!(resp["stop_reason"], "refusal");
     }
 
     #[test]

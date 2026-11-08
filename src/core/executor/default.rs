@@ -15,6 +15,7 @@ use tokio::sync::{self, Semaphore};
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
+use crate::core::utils::claude_cloaking::extract_claude_session_id_from_user_id;
 use crate::core::utils::reasoning_content_injector::inject_reasoning_content;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::types::{ProviderConnection, ProviderNode};
@@ -45,6 +46,15 @@ const DASHSCOPE_INTL_CHAT_URL: &str =
 /// `qw` model prefix keep working, so the warning is the only way a user finds
 /// out the id is on its way out.
 const DEPRECATED_PROVIDERS: &[(&str, &str)] = &[("qwen", "alims-intl")];
+
+/// Nous Portal requires neutral attribution tags on some API-key models.
+/// 9router parity: `open-sse/config/appConstants.js` NOUS_ATTRIBUTION, with the
+/// router identity renamed to this product. Matching is deliberately exact:
+/// HTTPS + hostname + `/v1/chat/completions` path only.
+const NOUS_ATTRIBUTION_HOSTNAME: &str = "inference-api.nousresearch.com";
+const NOUS_ATTRIBUTION_PATH: &str = "/v1/chat/completions";
+const NOUS_ATTRIBUTION_TAGS: [&str; 3] =
+    ["product=openproxy", "client=openproxy", "user=openproxy"];
 
 /// Log a deprecation notice when a request is dispatched to a provider that
 /// upstream has retired.
@@ -378,7 +388,9 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "huggingface",
-            ProviderConfig::openai("https://api-inference.huggingface.co"),
+            // api-inference.huggingface.co is retired; the Inference
+            // Providers router serves the OpenAI-compatible surface.
+            ProviderConfig::openai("https://router.huggingface.co"),
         ),
         ("jina-ai", ProviderConfig::openai("https://api.jina.ai/v1")),
         ("linkup", ProviderConfig::openai("https://api.linkup.so/v1")),
@@ -519,6 +531,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         (
             "publicai",
             ProviderConfig::openai("https://api.publicai.co/v1/chat/completions"),
+        ),
+        (
+            "nous",
+            ProviderConfig::openai("https://inference-api.nousresearch.com/v1/chat/completions"),
         ),
         (
             "nous-research",
@@ -782,12 +798,14 @@ impl ExecutorError {
                 message: message.clone(),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             },
             Self::MissingCredentials(p) => ComboAttemptError {
                 status: 400,
                 message: format!("Missing credentials for provider: {p}"),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             },
             // Transport failures are 502, not 500: the request never reached
             // the provider, so 500 would tell the client our own server broke
@@ -804,6 +822,7 @@ impl ExecutorError {
                 message: "Upstream request failed".to_string(),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             },
             // The remaining variants carry a client-safe message or a status;
             // their `Debug` is fine to surface.
@@ -812,6 +831,7 @@ impl ExecutorError {
                 message: format!("Execution failed: {other:?}"),
                 retry_after: None,
                 upstream_body: None,
+                upstream_headers: Vec::new(),
             },
         }
     }
@@ -1785,11 +1805,16 @@ impl DefaultExecutor {
         Ok(self.config.base_url.clone())
     }
 
+    /// `body` is the provider-format request body about to be sent — 9router
+    /// passes it to `buildHeaders` so Claude OAuth can align
+    /// `x-claude-code-session-id` with `metadata.user_id.session_id`
+    /// (open-sse/executors/default.js:226-233).
     pub fn build_headers(
         &self,
         model: &str,
         credentials: &ProviderConnection,
         stream: bool,
+        body: &Value,
     ) -> Result<HeaderMap, ExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -2004,6 +2029,30 @@ impl DefaultExecutor {
             }
         }
 
+        // Claude OAuth: align x-claude-code-session-id with
+        // metadata.user_id.session_id when the client didn't already send the
+        // header (9router default.js:226-233). Gated on `sk-ant-oat` so plain
+        // API-key (`sk-ant-api…`) requests are untouched.
+        if self.provider == "claude" && !headers.contains_key("x-claude-code-session-id") {
+            let token = credentials
+                .access_token
+                .as_deref()
+                .or(credentials.api_key.as_deref())
+                .unwrap_or("");
+            if token.contains("sk-ant-oat") {
+                if let Some(session_id) = body
+                    .get("metadata")
+                    .and_then(|m| m.get("user_id"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|uid| extract_claude_session_id_from_user_id(uid))
+                {
+                    if let Ok(value) = HeaderValue::from_str(&session_id) {
+                        headers.insert("x-claude-code-session-id", value);
+                    }
+                }
+            }
+        }
+
         if stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
         }
@@ -2012,7 +2061,23 @@ impl DefaultExecutor {
     }
 
     pub fn transform_request(&self, body: &Value, model: &str) -> Value {
-        let mut body = self.apply_json_schema_fallback(body);
+        self.transform_request_with_credentials(body, model, false, &ProviderConnection::default())
+    }
+
+    /// Credential-aware request transform. `execute` uses this so provider
+    /// hooks that depend on auth mode (Nous API-key attribution) see the same
+    /// credentials and resolved endpoint that `build_headers`/`build_url` use.
+    pub fn transform_request_with_credentials(
+        &self,
+        body: &Value,
+        model: &str,
+        stream: bool,
+        credentials: &ProviderConnection,
+    ) -> Value {
+        // 9router applies Nous attribution before the JSON-schema fallback so
+        // the tag survives that rewrite (open-sse/executors/default.js:99).
+        let attributed = self.apply_nous_attribution(body, model, stream, credentials);
+        let mut body = self.apply_json_schema_fallback(&attributed);
 
         // Normalize developer→system role (many providers reject role:developer)
         normalize_developer_role(&mut body);
@@ -2074,6 +2139,87 @@ impl DefaultExecutor {
         }
 
         body
+    }
+
+    /// Nous Portal attribution for API-key Chat Completions requests.
+    ///
+    /// Port of 9router `applyNousAttribution` (open-sse/executors/default.js):
+    /// only `openai-compatible-*` connections with an API key, only when the
+    /// resolved upstream URL is exactly the HTTPS Nous Chat Completions
+    /// endpoint. Caller tags are preserved; missing/empty `product`, `client`,
+    /// and `user` values are filled with this router's neutral identity.
+    fn apply_nous_attribution(
+        &self,
+        body: &Value,
+        model: &str,
+        stream: bool,
+        credentials: &ProviderConnection,
+    ) -> Value {
+        if !self.provider.starts_with("openai-compatible-")
+            || non_empty_option(credentials.api_key.as_deref()).is_none()
+            || !body.is_object()
+        {
+            return body.clone();
+        }
+
+        if let Some(tags) = body.get("tags") {
+            if !tags.is_null() && !tags.is_array() {
+                return body.clone();
+            }
+        }
+
+        let url = match self.build_url(model, stream, credentials) {
+            Ok(raw) => match url::Url::parse(&raw) {
+                Ok(url) => url,
+                Err(_) => return body.clone(),
+            },
+            Err(_) => return body.clone(),
+        };
+        if url.scheme() != "https"
+            || url.host_str() != Some(NOUS_ATTRIBUTION_HOSTNAME)
+            || url.path() != NOUS_ATTRIBUTION_PATH
+        {
+            return body.clone();
+        }
+
+        let mut tags: Vec<Value> = body
+            .get("tags")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        for fallback in NOUS_ATTRIBUTION_TAGS {
+            let prefix = &fallback[..fallback.find('=').map(|i| i + 1).unwrap_or(fallback.len())];
+            tags.retain(|tag| {
+                let Some(text) = tag.as_str() else {
+                    return true;
+                };
+                !text.starts_with(prefix)
+                    || text
+                        .strip_prefix(prefix)
+                        .is_some_and(|value| !value.trim().is_empty())
+            });
+            if !tags
+                .iter()
+                .any(|tag| tag.as_str().is_some_and(|text| text.starts_with(prefix)))
+            {
+                tags.push(Value::String(fallback.to_string()));
+            }
+        }
+
+        // JS `new Set(tags)` dedupes exact string values while leaving distinct
+        // non-string values untouched; cloned objects are already distinct.
+        let mut seen = std::collections::HashSet::new();
+        tags.retain(|tag| match tag {
+            Value::String(text) => seen.insert(text.clone()),
+            _ => true,
+        });
+
+        let mut out = body.clone();
+        if let Some(object) = out.as_object_mut() {
+            object.insert("tags".to_string(), Value::Array(tags));
+        }
+        out
     }
 
     /// Fallback json_schema -> json_object for openai-compatible providers
@@ -2175,10 +2321,20 @@ impl DefaultExecutor {
         // Latency applies to REAL too (first-byte delay before send loop).
         crate::core::simulation::FaultInjector::apply_latency(&real_fault).await;
         // Build headers and transformed body once, reused across retries and
-        // fallback URLs.
-        let mut headers =
-            self.build_headers(&request.model, &request.credentials, request.stream)?;
-        let transformed_body = self.transform_request(&request.body, &request.model);
+        // fallback URLs. The transformed body is what upstream sees, so it is
+        // also what header derivation (Claude session id) reads.
+        let transformed_body = self.transform_request_with_credentials(
+            &request.body,
+            &request.model,
+            request.stream,
+            &request.credentials,
+        );
+        let mut headers = self.build_headers(
+            &request.model,
+            &request.credentials,
+            request.stream,
+            &transformed_body,
+        )?;
 
         // Try primary then fallback URLs.
         let urls = self.resolve_urls(&request.model, request.stream, &request.credentials);
@@ -2299,6 +2455,7 @@ impl DefaultExecutor {
                                 &request.model,
                                 &request.credentials,
                                 request.stream,
+                                &transformed_body,
                             )?;
                             // Retry immediately with refreshed credentials.
                             //
@@ -3717,7 +3874,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A plain provider connection carries its endpoint override in
     /// `provider_specific_data["baseUrl"]`, but `build_url` only consulted that
     /// for `openai-compatible` / `anthropic-compatible` *nodes* — so a
@@ -3798,7 +3954,12 @@ mod tests {
         // noAuth provider: an unauthenticated POST is accepted upstream, so a
         // credential-less connection must not fail with MissingCredentials.
         let headers = zen_executor()
-            .build_headers("hy3-free", &ProviderConnection::default(), false)
+            .build_headers(
+                "hy3-free",
+                &ProviderConnection::default(),
+                false,
+                &serde_json::json!({}),
+            )
             .expect("noAuth provider must build headers without credentials");
         assert!(!headers.contains_key(AUTHORIZATION));
     }
@@ -3810,7 +3971,7 @@ mod tests {
             ..ProviderConnection::default()
         };
         let headers = zen_executor()
-            .build_headers("hy3-free", &credentials, false)
+            .build_headers("hy3-free", &credentials, false, &serde_json::json!({}))
             .unwrap();
         assert_eq!(headers[AUTHORIZATION], "Bearer zen-key");
     }
@@ -3824,7 +3985,12 @@ mod tests {
         let openrouter =
             DefaultExecutor::new("openrouter", Arc::new(ClientPool::new()), None).unwrap();
         let headers = openrouter
-            .build_headers("meta/llama-3.1-8b-instruct:free", &credentials, false)
+            .build_headers(
+                "meta/llama-3.1-8b-instruct:free",
+                &credentials,
+                false,
+                &serde_json::json!({}),
+            )
             .unwrap();
         assert_eq!(headers["HTTP-Referer"], "https://endpoint-proxy.local");
         assert_eq!(headers["X-Title"], "Endpoint Proxy");
@@ -3834,7 +4000,12 @@ mod tests {
             let executor = DefaultExecutor::new(provider, Arc::new(ClientPool::new()), None);
             if let Ok(executor) = executor {
                 let headers = executor
-                    .build_headers("tencent/hy3:free", &credentials, false)
+                    .build_headers(
+                        "tencent/hy3:free",
+                        &credentials,
+                        false,
+                        &serde_json::json!({}),
+                    )
                     .unwrap();
                 assert!(
                     !headers.contains_key("HTTP-Referer"),
@@ -3842,6 +4013,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 9router default.js:226-233 — Claude OAuth requests carry
+    /// `x-claude-code-session-id` aligned with `metadata.user_id.session_id`;
+    /// plain API-key requests must not (the `sk-ant-oat` gate).
+    #[test]
+    fn claude_oauth_forwards_session_id_header() {
+        let executor = DefaultExecutor::new("claude", Arc::new(ClientPool::new()), None).unwrap();
+        let body = serde_json::json!({
+            "metadata": {
+                "user_id": "{\"device_id\":\"d\",\"account_uuid\":\"a\",\"session_id\":\"sess-abc\"}"
+            }
+        });
+
+        // OAuth token → header derived from metadata.user_id.session_id.
+        let oauth = ProviderConnection {
+            access_token: Some("sk-ant-oat01-token".to_string()),
+            ..ProviderConnection::default()
+        };
+        let headers = executor
+            .build_headers("claude-sonnet-4-5", &oauth, true, &body)
+            .unwrap();
+        assert_eq!(headers["x-claude-code-session-id"], "sess-abc");
+
+        // API key (non-OAT) → no session header.
+        let api_key = ProviderConnection {
+            api_key: Some("sk-ant-api03-plain".to_string()),
+            ..ProviderConnection::default()
+        };
+        let headers = executor
+            .build_headers("claude-sonnet-4-5", &api_key, true, &body)
+            .unwrap();
+        assert!(!headers.contains_key("x-claude-code-session-id"));
+
+        // OAuth token but no session in metadata → no header.
+        let no_meta = serde_json::json!({"messages": []});
+        let headers = executor
+            .build_headers("claude-sonnet-4-5", &oauth, true, &no_meta)
+            .unwrap();
+        assert!(!headers.contains_key("x-claude-code-session-id"));
     }
 
     #[test]
@@ -3924,7 +4135,7 @@ mod tests {
             ..ProviderConnection::default()
         };
         let headers = executor
-            .build_headers("mimo-x-pro-preview", &creds, true)
+            .build_headers("mimo-x-pro-preview", &creds, true, &serde_json::json!({}))
             .unwrap();
         assert_eq!(headers["Cookie"], "serviceToken=abc");
         assert!(!headers.contains_key(AUTHORIZATION));
@@ -3935,7 +4146,7 @@ mod tests {
             ..ProviderConnection::default()
         };
         let headers = executor
-            .build_headers("mimo-v2.5-pro", &creds, true)
+            .build_headers("mimo-v2.5-pro", &creds, true, &serde_json::json!({}))
             .unwrap();
         assert_eq!(headers[AUTHORIZATION], "Bearer sk-x");
     }
@@ -4023,6 +4234,131 @@ mod tests {
                 "region {region} must route to {host}, got {url}"
             );
         }
+    }
+
+    /// 9router `applyNousAttribution` (open-sse/executors/default.js): only an
+    /// `openai-compatible-*` connection holding an API key whose resolved URL
+    /// is exactly the HTTPS Nous Chat Completions endpoint gets the neutral
+    /// `product`/`client`/`user` tags — and only when the caller did not
+    /// already supply them.
+    fn nous_compatible_executor(base_url: &str) -> DefaultExecutor {
+        let node = ProviderNode {
+            id: "node-nous".to_string(),
+            r#type: "openai-compatible".to_string(),
+            name: "Nous".to_string(),
+            prefix: None,
+            api_type: None,
+            base_url: Some(base_url.to_string()),
+            created_at: None,
+            updated_at: None,
+            extra: Default::default(),
+        };
+        DefaultExecutor::new(
+            "openai-compatible-nous",
+            Arc::new(ClientPool::new()),
+            Some(node),
+        )
+        .unwrap()
+    }
+
+    fn api_key_credentials() -> ProviderConnection {
+        ProviderConnection {
+            api_key: Some("nous-key".to_string()),
+            ..ProviderConnection::default()
+        }
+    }
+
+    fn transform_tags(
+        executor: &DefaultExecutor,
+        body: &serde_json::Value,
+        credentials: &ProviderConnection,
+    ) -> Vec<String> {
+        executor
+            .transform_request_with_credentials(
+                body,
+                "poolside/laguna-xs-2.1:free",
+                false,
+                credentials,
+            )
+            .get("tags")
+            .and_then(|tags| tags.as_array())
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(|tag| tag.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn nous_api_key_chat_completions_gets_default_attribution_tags() {
+        let executor = nous_compatible_executor("https://inference-api.nousresearch.com/v1");
+        let tags = transform_tags(
+            &executor,
+            &serde_json::json!({"messages": []}),
+            &api_key_credentials(),
+        );
+        for expected in ["product=openproxy", "client=openproxy", "user=openproxy"] {
+            assert!(tags.iter().any(|tag| tag == expected), "{tags:?}");
+        }
+    }
+
+    #[test]
+    fn nous_attribution_preserves_caller_tags_and_identities() {
+        let executor = nous_compatible_executor("https://inference-api.nousresearch.com/v1");
+        let body = serde_json::json!({
+            "messages": [],
+            "tags": ["product=caller-product", "client=", "custom=keep", "user=caller-user"]
+        });
+        let tags = transform_tags(&executor, &body, &api_key_credentials());
+        assert!(tags.iter().any(|tag| tag == "product=caller-product"));
+        assert!(tags.iter().any(|tag| tag == "custom=keep"));
+        assert!(tags.iter().any(|tag| tag == "user=caller-user"));
+        // Empty `client=` is filled with the router identity; `user` is kept.
+        assert!(tags.iter().any(|tag| tag == "client=openproxy"));
+        assert!(!tags.iter().any(|tag| tag == "user=openproxy"));
+    }
+
+    #[test]
+    fn nous_attribution_requires_api_key_and_exact_nous_url() {
+        let executor = nous_compatible_executor("https://inference-api.nousresearch.com/v1");
+        let body = serde_json::json!({"messages": []});
+
+        // OAuth connections (access_token only) must not claim API-key
+        // attribution — upstream gates on `apiKey` presence.
+        let oauth = ProviderConnection {
+            access_token: Some("oauth-token".to_string()),
+            ..ProviderConnection::default()
+        };
+        assert!(transform_tags(&executor, &body, &oauth).is_empty());
+
+        // A different upstream on the same connection shape is untouched.
+        let other = nous_compatible_executor("https://api.example.com/v1");
+        assert!(transform_tags(&other, &body, &api_key_credentials()).is_empty());
+
+        // Path must be exactly /v1/chat/completions (responses endpoint is
+        // out of scope for Chat Completions attribution).
+        let responses_node = ProviderNode {
+            id: "node-nous-rs".to_string(),
+            r#type: "openai-compatible".to_string(),
+            name: "Nous".to_string(),
+            prefix: None,
+            api_type: Some("responses".to_string()),
+            base_url: Some("https://inference-api.nousresearch.com/v1".to_string()),
+            created_at: None,
+            updated_at: None,
+            extra: Default::default(),
+        };
+        let responses_exec = DefaultExecutor::new(
+            "openai-compatible-nous-rs",
+            Arc::new(ClientPool::new()),
+            Some(responses_node),
+        )
+        .unwrap();
+        assert!(
+            transform_tags(&responses_exec, &body, &api_key_credentials()).is_empty(),
+            "responses endpoint must not receive Chat Completions attribution"
+        );
     }
 }
 

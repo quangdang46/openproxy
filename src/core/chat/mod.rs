@@ -345,6 +345,12 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 // beta baked in: runtime_transport already_endpoint would otherwise drop urlSuffix.
                 base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
             },
+            // Kimi Code natively serves the OpenAI Responses API
+            // (9r kimi.js transports[2]; Codex wire_api = "responses").
+            TransportMatch {
+                format: Format::OpenAiResponses,
+                base_url: "https://api.kimi.com/coding/v1/responses".into(),
+            },
         ],
         "kimi-coding" => vec![
             TransportMatch {
@@ -354,6 +360,10 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
+            },
+            TransportMatch {
+                format: Format::OpenAiResponses,
+                base_url: "https://api.kimi.com/coding/v1/responses".into(),
             },
         ],
         "glm" => vec![
@@ -747,6 +757,13 @@ mod tests {
             t.base_url,
             "https://api.kimi.com/coding/v1/messages?beta=true"
         );
+        // Kimi Code natively serves the OpenAI Responses API
+        // (9r kimi.js transports[2] — Codex wire_api = "responses").
+        let t = resolve_transport("kimi", Format::OpenAiResponses).expect("kimi responses");
+        assert_eq!(t.base_url, "https://api.kimi.com/coding/v1/responses");
+        let t = resolve_transport("kimi-coding", Format::OpenAiResponses)
+            .expect("kimi-coding responses");
+        assert_eq!(t.base_url, "https://api.kimi.com/coding/v1/responses");
 
         // glm coding plan (api.z.ai), not open.bigmodel.cn paas
         let t = resolve_transport("glm", Format::OpenAi).expect("glm openai");
@@ -908,6 +925,30 @@ mod tests {
         assert!(!is_opencode_go_responses_only_model("grok-4.5"));
         assert!(!is_opencode_go_responses_only_model("gpt-5.6-terra"));
         assert!(!is_opencode_go_responses_only_model("big-pickle"));
+    }
+
+    #[test]
+    fn kimi_coding_responses_request_uses_responses_transport() {
+        // 9router kimi.js transports[2]: Responses-wire clients (Codex
+        // wire_api = "responses") reach https://api.kimi.com/coding/v1/responses.
+        let body = json!({
+            "model": "k3",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+        let plan = RequestPlan::new(Some("/v1/responses"), &body, "kimi-coding", "k3");
+        assert_eq!(plan.source_format, Format::OpenAiResponses);
+        assert_eq!(plan.target_format, Format::OpenAiResponses);
+        assert_eq!(
+            plan.transport_base_url.as_deref(),
+            Some("https://api.kimi.com/coding/v1/responses")
+        );
+        assert!(!plan.needs_translation());
+        // The merged `kimi` provider shares the same transport table.
+        let plan = RequestPlan::new(Some("/v1/responses"), &body, "kimi", "k3");
+        assert_eq!(
+            plan.transport_base_url.as_deref(),
+            Some("https://api.kimi.com/coding/v1/responses")
+        );
     }
 
     #[test]

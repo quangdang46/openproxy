@@ -140,4 +140,15 @@ export const TTS_PROVIDER_CONFIG: Record<string, TTSProviderConfig> = {
     apiEndpoint: "/api/media-providers/tts/minimax/voices?provider=minimax-cn",
     defaultVoiceId: "English_expressive_narrator",
   },
+  // Ollama Local Phonon — preset voices ship in the catalog under
+  // `ollama-local-tts-voices` (38 voices; language-specific checkpoints
+  // only accept `default`, which the adapter falls back to on a 400).
+  "ollama-local": {
+    hasModelSelector: true,
+    hasBrowseButton: false,
+    hasVoiceIdInput: true,
+    voiceSource: "hardcoded",
+    voiceKey: "ollama-local-tts-voices",
+    defaultVoiceId: "default",
+  },
 };

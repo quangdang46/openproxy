@@ -28,6 +28,62 @@ pub fn looks_like_sse(input: &[u8]) -> bool {
     trimmed.starts_with("data:") || trimmed.starts_with("event:") || trimmed.starts_with(':')
 }
 
+/// JavaScript truthiness for a parsed SSE chunk field — mirrors the
+/// `if (chunk?.error)` check in 9router sseToJsonHandler.js:126.
+fn js_truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// Extract the upstream SSE `error` payload from a collapsed conversion
+/// result.
+///
+/// `convert_chat_completion_stream` returns `{"error": <chunk.error>}` when
+/// the upstream stream carried an error frame (9router
+/// sseToJsonHandler.js:126-131). The single-key shape is the marker that lets
+/// `proxy_sse_to_json_response` answer with the upstream status/message
+/// instead of a generic 502 (sseToJsonHandler.js:307-320). Returns `None`
+/// for any normal completion body.
+pub fn sse_error_frame(collapsed: &Value) -> Option<&Value> {
+    let obj = collapsed.as_object()?;
+    if obj.len() == 1 {
+        obj.get("error")
+    } else {
+        None
+    }
+}
+
+/// 9router sseToJsonHandler.js:312-315 — `Number(error.status)` is kept only
+/// when it is an integer in 400..=599; anything else maps to 502.
+pub fn sse_error_status(err: &Value) -> u16 {
+    let n = match err.get("status") {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    match n {
+        Some(f) if f.fract() == 0.0 && (400.0..=599.0).contains(&f) => f as u16,
+        _ => 502,
+    }
+}
+
+/// 9router sseToJsonHandler.js:318 — `error.message ||
+/// "Upstream SSE stream failed"`.
+pub fn sse_error_message(err: &Value) -> String {
+    match err.get("message") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(other) if js_truthy(other) => {
+            serde_json::to_string(other).unwrap_or_else(|_| "Upstream SSE stream failed".into())
+        }
+        _ => "Upstream SSE stream failed".to_string(),
+    }
+}
+
 /// Convert SSE stream bytes to a single `chat.completion` JSON response.
 ///
 /// Automatically detects the SSE format:
@@ -83,6 +139,7 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
     let mut model: Option<String> = None;
     let mut usage: Option<Value> = None;
     let mut choices: BTreeMap<usize, ChoiceAccum> = BTreeMap::new();
+    let mut stream_error: Option<Value> = None;
 
     // Split by blank lines (SSE frame delimiter).
     for frame in sse.split("\n\n") {
@@ -92,10 +149,12 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
         }
 
         // Extract the `data:` line (skip `event:` lines if present).
-        let data_str = frame
-            .lines()
-            .find(|line| line.trim().starts_with("data: "))
-            .and_then(|line| line.trim().strip_prefix("data: "));
+        // 9router accepts `data:` with or without a following space
+        // (sseToJsonHandler.js:121-122: `startsWith("data:")` + trim).
+        let data_str = frame.lines().find_map(|line| {
+            let trimmed = line.trim();
+            trimmed.strip_prefix("data:").map(|rest| rest.trim_start())
+        });
 
         let Some(data_str) = data_str else {
             continue;
@@ -108,6 +167,16 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
         let Ok(data) = serde_json::from_str::<Value>(data_str) else {
             continue;
         };
+
+        // 9router sseToJsonHandler.js:126-127 — a chunk carrying a truthy
+        // `error` is an upstream failure frame, not a completion chunk: it is
+        // never accumulated, and the LAST one wins.
+        if let Some(err) = data.get("error") {
+            if js_truthy(err) {
+                stream_error = Some(err.clone());
+                continue;
+            }
+        }
 
         // Capture metadata from the very first data frame.
         if id.is_none() {
@@ -213,6 +282,14 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
                 }
             }
         }
+    }
+
+    // 9router sseToJsonHandler.js:131 — an upstream error frame voids the
+    // whole conversion: `{ error: streamError }` is returned even when real
+    // chunks were accumulated, and the caller turns it into an error result
+    // carrying the upstream status/message (sseToJsonHandler.js:307-320).
+    if let Some(err) = stream_error {
+        return Some(json!({ "error": err }));
     }
 
     if choices.is_empty() {
@@ -1042,5 +1119,144 @@ mod tests {
         let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
         assert_eq!(result["usage"]["prompt_tokens"], 10);
         assert!(result["usage"].get("prompt_tokens_details").is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Upstream SSE `error` frames (9router sseToJsonHandler.js:117-131,
+    // 302-320 — v0.5.112: "answer with the upstream status and message
+    // instead of swallowing them into a generic 502")
+    // ------------------------------------------------------------------
+
+    /// An `error` chunk in a Chat-Completions SSE stream surfaces as the
+    /// `{"error": ...}` marker — even when real chunks were accumulated —
+    /// and is never folded into a completion.
+    #[test]
+    fn chat_stream_error_frame_returns_error_marker() {
+        let chunks = [
+            json!({"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1712345678,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}),
+            json!({"error":{"message":"You exceeded your current quota","status":403,"type":"billing_error"}}),
+        ];
+        let sse: String = chunks
+            .iter()
+            .map(|c| format!("data: {}\n\n", serde_json::to_string(c).unwrap()))
+            .collect::<Vec<_>>()
+            .join("")
+            + "data: [DONE]\n\n";
+
+        let result = sse_stream_to_json(sse.as_bytes(), None).unwrap();
+        assert_eq!(
+            result["error"]["message"],
+            "You exceeded your current quota"
+        );
+        assert_eq!(result["error"]["status"], 403);
+        assert!(result.get("choices").is_none());
+        // The marker is detectable by the proxy layer.
+        assert_eq!(sse_error_frame(&result).unwrap()["status"], json!(403));
+    }
+
+    /// `data:` without a trailing space is still an SSE data line
+    /// (sseToJsonHandler.js:121-122 trims after the prefix).
+    #[test]
+    fn chat_stream_error_frame_without_space_after_colon() {
+        let sse = concat!(
+            "data:{\"error\":{\"message\":\"rate limited\",\"status\":429}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let result = sse_stream_to_json(sse.as_bytes(), None).unwrap();
+        assert_eq!(result["error"]["status"], 429);
+    }
+
+    /// Falsy `error` fields (`null`, `false`, `""`, `0`) are not error frames —
+    /// JS `chunk?.error` is falsy for them (sseToJsonHandler.js:126).
+    #[test]
+    fn chat_stream_falsy_error_field_is_not_an_error_frame() {
+        let chunks = [
+            json!({"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}],"error":null}),
+            json!({"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"error":false}),
+        ];
+        let sse: String = chunks
+            .iter()
+            .map(|c| format!("data: {}\n\n", serde_json::to_string(c).unwrap()))
+            .collect::<Vec<_>>()
+            .join("");
+        let result = sse_stream_to_json(sse.as_bytes(), None).unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"], "ok");
+        assert!(sse_error_frame(&result).is_none());
+    }
+
+    /// A normal completion never trips the marker check.
+    #[test]
+    fn sse_error_frame_ignores_normal_bodies() {
+        let completion = json!({
+            "id": "chatcmpl-x", "object": "chat.completion", "created": 1,
+            "model": "gpt-4",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        });
+        assert!(sse_error_frame(&completion).is_none());
+        // Even an object that merely HAS an "error" key alongside others is
+        // not the collapse marker.
+        let with_extra = json!({"error": {"message": "x"}, "choices": []});
+        assert!(sse_error_frame(&with_extra).is_none());
+    }
+
+    /// Status clamping (sseToJsonHandler.js:312-315): integer 400-599 kept —
+    /// including numeric strings, as `Number("403")` is 403 — everything else
+    /// is 502.
+    #[test]
+    fn sse_error_status_clamps_to_400_599_else_502() {
+        assert_eq!(sse_error_status(&json!({"status": 403})), 403);
+        assert_eq!(sse_error_status(&json!({"status": 429.0})), 429);
+        assert_eq!(sse_error_status(&json!({"status": "503"})), 503);
+        assert_eq!(sse_error_status(&json!({"status": 200})), 502);
+        assert_eq!(sse_error_status(&json!({"status": 600})), 502);
+        assert_eq!(sse_error_status(&json!({"status": 403.5})), 502);
+        assert_eq!(sse_error_status(&json!({"status": "abc"})), 502);
+        assert_eq!(sse_error_status(&json!({"status": null})), 502);
+        assert_eq!(sse_error_status(&json!({})), 502);
+    }
+
+    /// Message fallback (sseToJsonHandler.js:318).
+    #[test]
+    fn sse_error_message_falls_back_when_missing_or_falsy() {
+        assert_eq!(
+            sse_error_message(&json!({"message": "billing hard limit"})),
+            "billing hard limit"
+        );
+        assert_eq!(
+            sse_error_message(&json!({"status": 500})),
+            "Upstream SSE stream failed"
+        );
+        assert_eq!(
+            sse_error_message(&json!({"message": ""})),
+            "Upstream SSE stream failed"
+        );
+        assert_eq!(
+            sse_error_message(&json!({"message": null})),
+            "Upstream SSE stream failed"
+        );
+    }
+
+    /// Responses API parity: `response.failed` collapses to
+    /// `status: "failed"` (streamToJsonConverter.js:37-39) — upstream keeps
+    /// HTTP 200 and carries the status in the body, which our collapse already
+    /// does via `finish_reason: "failed"`.
+    #[test]
+    fn responses_failed_event_marks_status_failed() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_fail\",\"created_at\":1}}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_fail\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
+        );
+        let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
+        assert_eq!(result["choices"][0]["finish_reason"], "failed");
+        // The collapsed body is a normal completion shape — NOT the error
+        // marker — so the proxy leaves the upstream 200 status alone, matching
+        // upstream which also answers 200 for the Responses path.
+        assert!(sse_error_frame(&result).is_none());
+
+        let responses = responses_stream_to_responses(sse.as_bytes()).unwrap();
+        assert_eq!(responses["status"], "failed");
+        assert_eq!(responses["id"], "resp_fail");
     }
 }

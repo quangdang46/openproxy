@@ -204,6 +204,12 @@ pub struct ComboAttemptError {
     /// should return this body verbatim instead of constructing a new one from
     /// `message`. 9router parity: preserve upstream response on error.
     pub upstream_body: Option<Vec<u8>>,
+    /// Upstream rate-limit headers forwarded to the client verbatim —
+    /// 9router `upstreamResponseHeaders` (open-sse/utils/upstreamHeaders.js):
+    /// `retry-after`, `x-should-retry`, and every `anthropic-ratelimit-*`,
+    /// lower-cased name → value. Empty when the attempt never reached an
+    /// upstream response.
+    pub upstream_headers: Vec<(String, String)>,
 }
 
 impl ComboAttemptError {
@@ -213,6 +219,7 @@ impl ComboAttemptError {
             message: message.into(),
             retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         }
     }
 }
@@ -255,6 +262,10 @@ pub struct ComboExecutionError {
     /// Preserved upstream error body from the last failing member (H23).
     /// When set, the error response should return this body verbatim.
     pub upstream_body: Option<Vec<u8>>,
+    /// Forwarded upstream rate-limit headers from the last failing member —
+    /// 9router `lastHeaders` (src/sse/handlers/chat.js:384) surfaced on the
+    /// final error/unavailable response.
+    pub upstream_headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +960,7 @@ where
             },
             earliest_retry_after: None,
             upstream_body: None,
+            upstream_headers: Vec::new(),
         });
     }
 
@@ -1036,6 +1048,7 @@ where
                         message: error.message.clone(),
                         retry_after: error.retry_after,
                         upstream_body: error.upstream_body.clone(),
+                        upstream_headers: error.upstream_headers.clone(),
                     });
                 }
                 // 9router combo.js:319 reads `retryAfter` out of the member's
@@ -1062,6 +1075,7 @@ where
                         message: error.message,
                         earliest_retry_after,
                         upstream_body: error.upstream_body.clone(),
+                        upstream_headers: error.upstream_headers.clone(),
                     });
                 }
 
@@ -1109,11 +1123,26 @@ where
         .and_then(|e: &ComboAttemptError| e.upstream_body.clone())
         .or_else(|| first_error.as_ref().and_then(|e| e.upstream_body.clone()));
 
+    // 9router `lastHeaders` (src/sse/handlers/chat.js:384): the forwarded
+    // rate-limit headers of the LAST failed attempt ride the final error.
+    let final_upstream_headers = last_error
+        .as_ref()
+        .map(|e| e.upstream_headers.clone())
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            first_error
+                .as_ref()
+                .map(|e| e.upstream_headers.clone())
+                .filter(|h| !h.is_empty())
+        })
+        .unwrap_or_default();
+
     Err(ComboExecutionError {
         status,
         message,
         earliest_retry_after,
         upstream_body: final_upstream_body,
+        upstream_headers: final_upstream_headers,
     })
 }
 
@@ -1841,6 +1870,7 @@ mod tests {
             message: "rate limited".into(),
             retry_after: Some(Utc::now() + chrono::Duration::seconds(90)),
             upstream_body: Some(br#"{"error":{"message":"rate limited"}}"#.to_vec()),
+            upstream_headers: Vec::new(),
         };
         let with_body = ComboAttemptError {
             status: 503,
@@ -1850,6 +1880,7 @@ mod tests {
                 br#"{"error":{"message":"rate limited","retryAfter":"2030-01-01T00:00:00Z"}}"#
                     .to_vec(),
             ),
+            upstream_headers: Vec::new(),
         };
 
         for (error, expect_retry) in [(header_only, false), (with_body, true)] {

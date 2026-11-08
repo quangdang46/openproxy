@@ -21,7 +21,9 @@ use crate::types::{ProviderConnection, ProviderNode};
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 pub const GROK_CLI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
-const CLIENT_VERSION: &str = "0.2.93";
+/// Upstream 9router `open-sse/config/grokCli.js` `GROK_CLI_VERSION` —
+/// cli-chat-proxy rejects older identities with HTTP 426 (minimum 1.0.13).
+const CLIENT_VERSION: &str = "1.0.44";
 const CLIENT_IDENTIFIER: &str = "grok-pager";
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
@@ -614,9 +616,12 @@ impl GrokCliExecutor {
     ) -> Result<HeaderMap, GrokCliExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        // 9router `GROK_CLI_PAGER_USER_AGENT` — `grok-pager/<v> grok-shell/<v>`.
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"),
+            HeaderValue::from_str(&format!(
+                "grok-pager/{CLIENT_VERSION} grok-shell/{CLIENT_VERSION} (linux; x86_64)"
+            ))?,
         );
 
         let token = credentials
@@ -1121,6 +1126,44 @@ mod tests {
         );
         assert!(h.get(AUTHORIZATION).is_some());
         // never panic on secrets — just presence
+    }
+
+    #[test]
+    fn headers_carry_current_grok_cli_version() {
+        // 9router `open-sse/config/grokCli.js` GROK_CLI_VERSION: cli-chat-proxy
+        // returns HTTP 426 for identities below the 1.0.13 floor.
+        let creds = ProviderConnection {
+            id: "conn1".into(),
+            provider: "grok-cli".into(),
+            access_token: Some("tok".into()),
+            ..Default::default()
+        };
+        let h = GrokCliExecutor::build_headers(&creds, true, "sess", "req", 1, "grok-4.5", None)
+            .unwrap();
+        let version = h
+            .get("x-grok-client-version")
+            .and_then(|v| v.to_str().ok())
+            .expect("x-grok-client-version header must be set");
+        assert_eq!(version, "1.0.44");
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        let (major, minor, patch) = (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        );
+        assert!(
+            (major, minor, patch) >= (1, 0, 13),
+            "client version {version} below upstream 426 floor 1.0.13"
+        );
+        let ua = h
+            .get(USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .expect("User-Agent header must be set");
+        // 9router GROK_CLI_PAGER_USER_AGENT embeds the same version twice.
+        assert_eq!(
+            ua,
+            format!("grok-pager/{version} grok-shell/{version} (linux; x86_64)")
+        );
     }
 
     #[test]

@@ -267,7 +267,7 @@ async fn validate_provider(
         "nscale" => validate_bearer(&client, "https://inference.api.nscale.com/v1/models", &api_key).await,
         "baseten" => validate_bearer(&client, "https://inference.baseten.co/v1/models", &api_key).await,
         "publicai" => validate_bearer(&client, "https://api.publicai.co/v1/models", &api_key).await,
-        "nous-research" => validate_bearer(&client, "https://inference-api.nousresearch.com/v1/models", &api_key).await,
+        "nous" | "nous-research" => validate_nous(client, &api_key).await,
         "glhf" => validate_bearer(&client, "https://glhf.chat/api/openai/v1/models", &api_key).await,
         "uncloseai" => (true, None),
         "enally" => {
@@ -595,6 +595,40 @@ async fn validate_chat_probe(
         Ok(resp) => {
             let ok = resp.status().is_success() || resp.status().as_u16() == 401;
             (ok, None)
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// Nous credential probe — `/v1/models` is public, so only an authenticated
+/// one-token inference request proves the Portal API key/OAuth token was
+/// accepted (9router `createNousApiKeyProbe` / `isNousApiKeyAccepted`).
+async fn validate_nous(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+    let body = serde_json::json!({
+        "model": crate::oauth::nous::VALIDATION_MODEL,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": false,
+    });
+    match client
+        .post(crate::oauth::nous::CHAT_COMPLETIONS_URL)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if (200..300).contains(&status) {
+                (true, None)
+            } else {
+                let message = if status == 401 || status == 403 {
+                    "Invalid or inactive API key".to_string()
+                } else {
+                    format!("Unable to verify API key (Nous returned {status})")
+                };
+                (false, Some(message))
+            }
         }
         Err(e) => (false, Some(e.to_string())),
     }

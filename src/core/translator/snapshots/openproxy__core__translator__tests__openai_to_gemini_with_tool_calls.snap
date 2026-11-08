@@ -35,7 +35,9 @@ expression: result
             "name": "search_web",
             "response": {
               "result": {
-                "result": "{\"results\": [\"Rust is a systems language...\"]}"
+                "results": [
+                  "Rust is a systems language..."
+                ]
               }
             }
           }

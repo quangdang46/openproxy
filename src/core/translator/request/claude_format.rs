@@ -41,8 +41,14 @@ fn has_valid_content(msg: &Value) -> bool {
 }
 
 /// Models that reject `thinking.type = "adaptive"` + `output_config.effort`.
+///
+/// Version-aware port of 9router `isAdaptiveThinkingUnsupported`
+/// (`open-sse/translator/formats/claude.js:175`, upstream v0.5.111 #5183):
+/// Haiku 5+ (e.g. `claude-haiku-5.5`, `claude-haiku-5-5`) is adaptive-only;
+/// the downgrade to `enabled`/`budget_tokens` applies only to Haiku <5 or
+/// unversioned ids.
 fn is_adaptive_thinking_unsupported(model: &str) -> bool {
-    model.to_lowercase().contains("haiku")
+    crate::core::utils::thinking_suffix::is_adaptive_thinking_unsupported(model)
 }
 
 /// Providers whose quirks include dropping `output_config`.
@@ -647,6 +653,65 @@ pub fn anchor_claude_cache(body: &mut Value) {
     }
 }
 
+// ─── trailing user turn / prefill ───────────────────────────────────
+
+/// Placeholder text for the restored trailing user turn.
+/// Mirrors `TRAILING_USER_PLACEHOLDER` in claude.js:352.
+const TRAILING_USER_PLACEHOLDER: &str = "Continue.";
+
+/// Role the client's conversation actually ended on, in the source format's
+/// own shape — not every source uses `messages[]` (Gemini/Antigravity:
+/// `contents[]`, Responses/Codex: `input[]`). Only an explicit trailing
+/// `model`/`assistant` turn is real prefill and must reach
+/// [`ensure_trailing_user_turn`] as `"assistant"`; every other tail
+/// (including no role, e.g. a function output) stays `None` so the
+/// emptied-turn fix still applies.
+/// Mirrors `detectClientLastRole` in open-sse/translator/index.js:60-66.
+pub fn detect_client_last_role(body: &Value) -> Option<&str> {
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        return messages
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str);
+    }
+    let items = body
+        .get("contents")
+        .and_then(Value::as_array)
+        .or_else(|| body.get("input").and_then(Value::as_array))?;
+    let role = items.last()?.get("role")?.as_str()?;
+    if role == "assistant" || role == "model" {
+        Some("assistant")
+    } else {
+        None
+    }
+}
+
+/// Newer Claude models reject a body that ends on an assistant turn ("does not
+/// support assistant message prefill"). Cleanup passes delete messages left
+/// empty, so a trailing user turn that was empty (or held only dropped blocks)
+/// silently turns the previous assistant turn into the last one. Restore a
+/// user turn only when the client did not itself end on assistant (real
+/// prefill is its choice).
+/// Mirrors `ensureTrailingUserTurn` in claude.js:355-360 and the post-prepare
+/// call in translator/index.js:153.
+pub fn ensure_trailing_user_turn(messages: &mut Vec<Value>, original_last_role: Option<&str>) {
+    if original_last_role == Some("assistant") {
+        return;
+    }
+    let ends_on_assistant = messages
+        .last()
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        == Some("assistant");
+    if !ends_on_assistant {
+        return;
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": [{"type": "text", "text": TRAILING_USER_PLACEHOLDER}]
+    }));
+}
+
 // ─── prepareClaudeRequest ───────────────────────────────────────────
 
 /// Prepare a request body for a Claude-format endpoint.
@@ -746,6 +811,13 @@ pub fn prepare_claude_request(
     // ── 2. Messages ──
     if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
         let len = messages.len();
+        // Role the client actually ended on, before filtering can drop an
+        // emptied trailing turn (claude.js:563 `originalLastRole`).
+        let original_last_role = messages
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         // Pass 1: remove cache_control + filter empty messages
         let mut filtered: Vec<Value> = Vec::with_capacity(len);
@@ -770,6 +842,11 @@ pub fn prepare_claude_request(
 
         // Pass 1.5: fix tool_use / tool_result ordering
         filtered = fix_tool_use_ordering(filtered);
+
+        // Newer Claude models 400 on a body ending in an assistant turn —
+        // restore a trailing user turn unless the client itself ended on
+        // assistant (explicit prefill, claude.js:588).
+        ensure_trailing_user_turn(&mut filtered, original_last_role.as_deref());
 
         // Re-insert messages (we need to work with them for pass 2)
         *messages = filtered;
@@ -1153,6 +1230,79 @@ mod tests {
     }
 
     #[test]
+    fn passthrough_keeps_adaptive_thinking_on_haiku_5_plus() {
+        // #5183: Haiku 5+ accepts ONLY adaptive — no downgrade, effort kept.
+        for model in [
+            "claude-haiku-5.5",
+            "claude-haiku-5-5",
+            "claude-haiku-5.5-20260101",
+            "github/claude-haiku-5.5",
+        ] {
+            let mut body = json!({
+                "model": model,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            normalize_claude_passthrough(&mut body, model);
+            assert_eq!(
+                body["thinking"]["type"], "adaptive",
+                "adaptive kept on {model}"
+            );
+            assert_eq!(
+                body["output_config"]["effort"], "high",
+                "effort kept on {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_downgrades_adaptive_thinking_on_haiku_below_5() {
+        // Haiku <5 and unversioned ids keep the enabled/10000 downgrade.
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-4.5",
+            "claude-3-5-haiku",
+            "claude-4.5-haiku",
+            "claude-sonnet-haiku-4.7",
+            "claude-haiku",
+        ] {
+            let mut body = json!({
+                "model": model,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            normalize_claude_passthrough(&mut body, model);
+            assert_eq!(
+                body["thinking"]["type"], "enabled",
+                "adaptive → enabled on {model}"
+            );
+            assert_eq!(body["thinking"]["budget_tokens"], 10000, "{model}");
+            assert!(
+                body.get("output_config").is_none()
+                    || body["output_config"].get("effort").is_none(),
+                "effort stripped on {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_non_haiku_untouched_by_version_gate() {
+        // Non-haiku models never hit the downgrade path.
+        let mut body = json!({
+            "model": "claude-opus-4.7",
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "low"},
+            "messages": []
+        });
+        normalize_claude_passthrough(&mut body, "claude-opus-4.7");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "low");
+    }
+
+    #[test]
     fn passthrough_strips_effort_on_haiku() {
         let mut body = json!({
             "model": "claude-sonnet-haiku-4.7",
@@ -1444,6 +1594,137 @@ mod tests {
         prepare_claude_request(&mut body, "minimax", None, None, None);
         assert!(body.get("tools").is_none(), "empty tools removed");
         assert!(body.get("tool_choice").is_none(), "tool_choice removed");
+    }
+
+    // ─── ensure_trailing_user_turn / detect_client_last_role ───────
+
+    #[test]
+    fn prepare_restores_trailing_user_after_empty_tail_dropped() {
+        // Client ended on user, but the trailing user turn was empty and got
+        // filtered — the previous assistant turn must not become last
+        // (claude.js:311-319 + 588; newer Claude models 400 on that shape).
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+                {"role": "user", "content": ""}
+            ]
+        });
+        prepare_claude_request(&mut body, "claude", None, None, None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "emptied user dropped, placeholder user appended"
+        );
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(
+            msgs[2]["content"][0]["text"], "Continue.",
+            "placeholder user turn restored"
+        );
+    }
+
+    #[test]
+    fn prepare_preserves_explicit_trailing_assistant_prefill() {
+        // An explicit trailing assistant turn IS intentional prefill — only
+        // an assistant tail produced by cleanup gets a user turn appended.
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "text", "text": "partial"}]}
+            ]
+        });
+        prepare_claude_request(&mut body, "claude", None, None, None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "prefill preserved, no user turn appended");
+        assert_eq!(msgs[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn ensure_trailing_user_turn_is_noop_when_last_is_user() {
+        let mut msgs = vec![
+            json!({"role": "user", "content": "hi"}),
+            json!({"role": "assistant", "content": "a"}),
+            json!({"role": "user", "content": "next"}),
+        ];
+        ensure_trailing_user_turn(&mut msgs, Some("user"));
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn detect_client_last_role_reads_messages_shape() {
+        let body = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "a"}
+        ]});
+        assert_eq!(detect_client_last_role(&body), Some("assistant"));
+        let body = json!({"messages": [{"role": "user", "content": "hi"}]});
+        assert_eq!(detect_client_last_role(&body), Some("user"));
+    }
+
+    #[test]
+    fn detect_client_last_role_reads_contents_and_input_shapes() {
+        // Gemini/Antigravity contents[]: role "model" is the assistant turn.
+        let gemini = json!({"contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "prefill"}]}
+        ]});
+        assert_eq!(detect_client_last_role(&gemini), Some("assistant"));
+
+        // Responses/Codex input[]: role "assistant" is the prefill turn.
+        let responses = json!({"input": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "prefill"}
+        ]});
+        assert_eq!(detect_client_last_role(&responses), Some("assistant"));
+
+        // A tail with no role (e.g. function_call_output) is NOT prefill.
+        let tool_tail = json!({"input": [
+            {"role": "user", "content": "hi"},
+            {"type": "function_call_output", "call_id": "c1", "output": "r"}
+        ]});
+        assert_eq!(detect_client_last_role(&tool_tail), None);
+
+        // Non-assistant contents tail (user) is not prefill either.
+        let user_tail = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+        assert_eq!(detect_client_last_role(&user_tail), None);
+    }
+
+    #[test]
+    fn contents_shaped_prefill_survives_ensure_trailing_user_turn() {
+        // The prefill arrives via contents[] (Gemini shape); after translation
+        // it is an assistant tail in messages[], and the detected client last
+        // role must keep ensure_trailing_user_turn from appending a user turn.
+        let source = json!({"contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "prefill"}]}
+        ]});
+        let client_last_role = detect_client_last_role(&source);
+        assert_eq!(client_last_role, Some("assistant"));
+
+        let mut messages = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "hi"}]}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "prefill"}]}),
+        ];
+        ensure_trailing_user_turn(&mut messages, client_last_role);
+        assert_eq!(messages.len(), 2, "contents[] prefill preserved");
+        assert_eq!(messages[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn input_shaped_prefill_survives_ensure_trailing_user_turn() {
+        // Same guarantee for the Responses input[] shape.
+        let source = json!({"input": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "prefill"}
+        ]});
+        let client_last_role = detect_client_last_role(&source);
+        let mut messages = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "hi"}]}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "prefill"}]}),
+        ];
+        ensure_trailing_user_turn(&mut messages, client_last_role);
+        assert_eq!(messages.len(), 2, "input[] prefill preserved");
     }
 
     // ─── fixToolUseOrdering ────────────────────────────────────────

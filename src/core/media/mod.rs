@@ -11,6 +11,7 @@
 //! trait that the public handler dispatches to.
 
 mod error;
+pub(crate) mod ollama_local;
 pub use error::MediaError;
 
 pub mod embeddings;

@@ -3352,6 +3352,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "nanobanana",
     "nebius",
     "nlpcloud",
+    "nous",
     "nous-research",
     "nscale",
     "nvidia",

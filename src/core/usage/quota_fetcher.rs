@@ -59,6 +59,8 @@
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use crate::core::config::app_constants::{ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION};
+
 const GLM_INTL_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 const GLM_CN_URL: &str = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 
@@ -521,10 +523,11 @@ fn cloud_code_metadata() -> Value {
     })
 }
 
+/// Antigravity quota User-Agent — port of `ANTIGRAVITY_CONFIG.userAgent`
+/// (`ANTIGRAVITY_IDE_USER_AGENT` in `open-sse/providers/shared.js`,
+/// Antigravity Hub 2.24.0, static `darwin/arm64`).
 fn antigravity_user_agent() -> String {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    format!("antigravity/1.107.0 {os}/{arch}")
+    ANTIGRAVITY_IDE_USER_AGENT.to_string()
 }
 
 /// Normalise a reset-time value to an RFC 3339 string (seconds precision).
@@ -2437,7 +2440,7 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
     let extra_headers = [
         ("User-Agent", user_agent.as_str()),
         ("X-Client-Name", "antigravity"),
-        ("X-Client-Version", "1.107.0"),
+        ("X-Client-Version", ANTIGRAVITY_IDE_VERSION),
         ("x-request-source", "local"),
     ];
 
@@ -2481,7 +2484,7 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         .header("Content-Type", "application/json")
         .header("User-Agent", &user_agent)
         .header("X-Client-Name", "antigravity")
-        .header("X-Client-Version", "1.107.0")
+        .header("X-Client-Version", ANTIGRAVITY_IDE_VERSION)
         .header("x-request-source", "local")
         .json(&json!({ "project": project_id }))
         .send()
@@ -2709,7 +2712,7 @@ async fn fetch_antigravity_weekly_quota(
         .header("User-Agent", &user_agent)
         .header("Content-Type", "application/json")
         .header("X-Client-Name", "antigravity")
-        .header("X-Client-Version", "1.107.0")
+        .header("X-Client-Version", ANTIGRAVITY_IDE_VERSION)
         .header("x-request-source", "local")
         .json(&json!({ "project": project_id }))
         .send()
@@ -2896,11 +2899,12 @@ fn grok_cli_headers(
         ("Accept", "application/json".to_string()),
         (
             "User-Agent",
-            "grok-shell/0.2.99 (linux; x86_64)".to_string(),
+            // 9router `GROK_CLI_USER_AGENT` — `grok-shell/<GROK_CLI_VERSION>`.
+            "grok-shell/1.0.44 (linux; x86_64)".to_string(),
         ),
         ("x-xai-token-auth", "xai-grok-cli".to_string()),
         ("x-grok-client-identifier", "grok-shell".to_string()),
-        ("x-grok-client-version", "0.2.99".to_string()),
+        ("x-grok-client-version", "1.0.44".to_string()),
         ("x-grok-client-mode", "headless".to_string()),
         ("Authorization", format!("Bearer {token}")),
     ];

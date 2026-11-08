@@ -1,9 +1,10 @@
 //! Embedding-provider adapters ported from
 //! `open-sse/handlers/embeddingProviders/`.
 //!
-//! Three adapter implementations cover the supported providers:
+//! Adapter implementations cover the supported providers:
 //!   - [`OpenAiCompatAdapter`] for openai/openrouter/mistral/voyage-ai/
-//!     fireworks/together/nebius/github/nvidia/jina-ai
+//!     fireworks/together/nebius/nvidia/jina-ai
+//!   - [`GithubEmbeddingAdapter`] for GitHub Copilot (api.githubcopilot.com)
 //!   - [`GeminiAdapter`] for Google AI Studio (single + batch)
 //!   - [`OpenAiCompatNodeAdapter`] for runtime-configured custom nodes
 //!     (`openai-compatible-*`, `custom-embedding-*`)
@@ -57,6 +58,7 @@ pub fn get_embedding_adapter(provider: &str) -> Option<&'static dyn EmbeddingAda
         "jina-ai" => Some(&base::JINA_AI),
         "vercel-ai-gateway" => Some(&base::VERCEL_AI_GATEWAY),
         "selfhosted-embedding" => Some(&base::SELFHOSTED_EMBEDDING),
+        "ollama-local" => Some(&base::OLLAMA_LOCAL),
         "gemini" | "google_ai_studio" => Some(&base::GEMINI),
         _ if provider.starts_with("openai-compatible-")
             || provider.starts_with("custom-embedding-") =>

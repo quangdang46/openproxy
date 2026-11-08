@@ -298,6 +298,28 @@ pub fn grok_cli() -> OAuthProviderConfig {
     }
 }
 
+/// Nous Research — device-code flow (`hermes-cli` public client).
+///
+/// 9router parity: `open-sse/services/nous.js` + `src/lib/oauth/providers/nous.js`.
+/// `client_id` is carried as an extra param because the generic device-code
+/// helpers resolve the OAuth client through `get_param("client_id")`.
+pub fn nous() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "nous",
+        client_id: crate::oauth::nous::CLIENT_ID,
+        authorize_url: crate::oauth::nous::DEVICE_CODE_URL,
+        token_url: crate::oauth::nous::TOKEN_URL,
+        scopes: &["inference:invoke", "inference:mint_agent_key"],
+        uses_pkce: false,
+        extra_params: &[
+            ("client_id", crate::oauth::nous::CLIENT_ID),
+            ("agent_key_url", crate::oauth::nous::AGENT_KEY_URL),
+            ("inference_base_url", crate::oauth::nous::INFERENCE_BASE_URL),
+        ],
+        refresh_lead_ms: 5 * 60 * 1000,
+    }
+}
+
 /// Gemini CLI — PKCE auth-code flow (Google OAuth).
 pub fn gemini_cli() -> OAuthProviderConfig {
     OAuthProviderConfig {
@@ -569,6 +591,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "xai" => Some(xai()),
         "gemini-cli" => Some(gemini_cli()),
         "grok-cli" => Some(grok_cli()),
+        "nous" => Some(nous()),
         "qoder" => Some(qoder()),
         "kimchi" => Some(kimchi()),
         "cursor" => Some(cursor()),
@@ -620,6 +643,7 @@ mod device_code_registry {
             "codebuddy-intl",
             "qoder",
             "grok-cli",
+            "nous",
         ] {
             assert!(
                 get_config(provider).is_some(),

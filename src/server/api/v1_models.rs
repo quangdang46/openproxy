@@ -285,13 +285,26 @@ async fn build_models_list(
                     .collect::<Vec<_>>();
             }
 
-            if raw_model_ids.is_empty()
-                && !skip_dynamic_fetch
+            // `ollama-local` is the one provider whose static catalog is a
+            // *partial* advertisement: the registry only names the Phonon
+            // TTS tags, embedding families and the `clef` systemone models,
+            // while the chat models live on the daemon (`/api/tags`). Upstream
+            // lists the static set only; OpenProxy discovers the daemon too,
+            // so for this provider the discovered ids are merged into the
+            // static ones instead of only filling an empty list.
+            let discover = !skip_dynamic_fetch
                 && !UPSTREAM_CONNECTION_RE.is_match(provider_id)
                 && super::provider_models::supports_models_discovery(provider_id)
-            {
-                raw_model_ids =
+                && (raw_model_ids.is_empty()
+                    || (provider_id == "ollama-local" && !had_enabled_models));
+            if discover {
+                let discovered =
                     super::provider_models::fetch_discovered_model_ids(state, connection).await;
+                if raw_model_ids.is_empty() {
+                    raw_model_ids = discovered;
+                } else {
+                    raw_model_ids.extend(discovered);
+                }
             }
 
             let prefixes = [output_alias.as_str(), static_alias, provider_id];

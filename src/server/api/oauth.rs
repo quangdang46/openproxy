@@ -75,7 +75,11 @@ const ANTIGRAVITY_LOAD_CODE_ASSIST_ENDPOINT: &str =
 const ANTIGRAVITY_ONBOARD_USER_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
 const ANTIGRAVITY_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
-const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+/// Port of `ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent` (registry
+/// `antigravity.js`) → `ANTIGRAVITY_IDE_USER_AGENT` in
+/// `open-sse/providers/shared.js` (Antigravity Hub 2.24.0).
+const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT: &str =
+    crate::core::config::app_constants::ANTIGRAVITY_IDE_USER_AGENT;
 const ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT: &str =
     "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const ANTIGRAVITY_LOAD_CODE_ASSIST_CLIENT_METADATA: &str =
@@ -699,6 +703,7 @@ fn is_device_code_provider(provider: &str) -> bool {
             | "codebuddy-intl"
             | "qoder"
             | "grok-cli"
+            | "nous"
     )
 }
 
@@ -5254,7 +5259,7 @@ pub async fn poll_device_code(
     };
 
     // GitHub special: exchange OAuth token for Copilot token
-    let final_token_response = if provider == "github" {
+    let mut final_token_response = if provider == "github" {
         match device_code::exchange_github_copilot_token(&token_response.access_token).await {
             Ok(copilot_token) => copilot_token,
             Err(e) => {
@@ -5282,6 +5287,38 @@ pub async fn poll_device_code(
         extra_psd.insert("deviceId".to_string(), json!(device_id));
     }
 
+    // Nous mints a short-lived inference agent key after Portal OAuth. The
+    // OAuth access token stays usable as the fallback when minting fails, and
+    // the refresh token remains the durable credential for later re-mints.
+    if provider == "nous" {
+        match crate::oauth::nous::mint_agent_key(&final_token_response.access_token).await {
+            Ok(Some(agent_key)) => {
+                extra_psd.insert(
+                    "inferenceBaseUrl".to_string(),
+                    json!(crate::oauth::nous::INFERENCE_BASE_URL),
+                );
+                if let Some(key_id) = &agent_key.key_id {
+                    extra_psd.insert("agentKeyId".to_string(), json!(key_id));
+                }
+                if let Some(expires_at) = &agent_key.expires_at {
+                    extra_psd.insert("agentKeyExpiresAt".to_string(), json!(expires_at));
+                }
+                crate::oauth::nous::apply_agent_key_to_token_response(
+                    &mut final_token_response,
+                    Some(&agent_key),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "openproxy::oauth",
+                    provider = %provider,
+                    "Nous agent key mint failed; falling back to OAuth access token: {error}"
+                );
+            }
+        }
+    }
+
     if let Err(e) = store_connection(
         &state.db,
         &flow.account_id,
@@ -5305,7 +5342,7 @@ pub async fn poll_device_code(
             .snapshot()
             .provider_connections
             .iter()
-            .find(|c| c.provider == provider && c.id == flow.account_id)
+            .find(|c| c.provider == provider && c.id.contains(flow.account_id.as_str()))
             .cloned()
         {
             let _ = state

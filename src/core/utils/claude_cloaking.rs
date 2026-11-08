@@ -225,6 +225,42 @@ pub fn apply_cloaking(body: &Value, api_key: &str, session_id: Option<&str>) -> 
     result
 }
 
+/// Port of `extractClaudeSessionIdFromUserId` (claudeCloaking.js:33-45).
+///
+/// `metadata.user_id` is either the cloaked JSON blob
+/// `{"device_id":…,"account_uuid":…,"session_id":…}` or a bare
+/// `claude:<id>` / plain session string. Returns the session id with any
+/// `claude:` prefix stripped, or `None` when absent/empty.
+pub fn extract_claude_session_id_from_user_id(user_id: &str) -> Option<String> {
+    if user_id.is_empty() {
+        return None;
+    }
+    if user_id.starts_with('{') {
+        let parsed = serde_json::from_str::<Value>(user_id).ok()?;
+        let sid = parsed.get("session_id")?.as_str()?;
+        return clean_session_id(sid);
+    }
+    clean_session_id(user_id)
+}
+
+/// Strip a leading `claude:` prefix (case-insensitive) then trim — the JS
+/// `.replace(/^claude:/i, "").trim()` pair, in that order (the regex is
+/// anchored, so a leading space defeats the prefix match). Empty → `None`.
+fn clean_session_id(s: &str) -> Option<String> {
+    let stripped =
+        if s.len() >= "claude:".len() && s[.."claude:".len()].eq_ignore_ascii_case("claude:") {
+            &s["claude:".len()..]
+        } else {
+            s
+        };
+    let cleaned = stripped.trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
 /// Static list of Claude Code's native tool names exposed as decoys.
 fn cc_decoy_tools() -> &'static [Value] {
     use once_cell::sync::Lazy;
@@ -348,6 +384,34 @@ mod tests {
             .unwrap()
             .starts_with("x-anthropic-billing-header:"));
         assert_eq!(arr[1]["text"], "be helpful");
+    }
+
+    #[test]
+    fn extract_session_id_reads_cloaked_json_user_id() {
+        let user_id = "{\"device_id\":\"d\",\"account_uuid\":\"a\",\"session_id\":\"sess-abc\"}";
+        assert_eq!(
+            extract_claude_session_id_from_user_id(user_id).as_deref(),
+            Some("sess-abc")
+        );
+    }
+
+    #[test]
+    fn extract_session_id_strips_claude_prefix_and_handles_bare_ids() {
+        assert_eq!(
+            extract_claude_session_id_from_user_id("claude:sess-1").as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            extract_claude_session_id_from_user_id("CLAUDE: sess-2 ").as_deref(),
+            Some("sess-2")
+        );
+        assert_eq!(
+            extract_claude_session_id_from_user_id("plain-id").as_deref(),
+            Some("plain-id")
+        );
+        assert!(extract_claude_session_id_from_user_id("{\"nope\":1}").is_none());
+        assert!(extract_claude_session_id_from_user_id("{\"session_id\":\"\"}").is_none());
+        assert!(extract_claude_session_id_from_user_id("").is_none());
     }
 
     #[test]

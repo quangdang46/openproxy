@@ -1601,6 +1601,12 @@ async fn refresh_oauth_token(
         }
         "kiro" => refresh_kiro_token(connection, refresh_token, effective_proxy).await,
         "cline" => refresh_cline_token(refresh_token, effective_proxy).await,
+        "nous" | "nous-research" => {
+            // Shared refresh path also re-mints the short-lived inference
+            // agent key; it does not take the test proxy (same as
+            // dispatch_oauth_refresh used by the chat retry path).
+            crate::oauth::token_refresh::refresh_nous_token(refresh_token).await
+        }
         _ => Err("Provider refresh not supported".to_string()),
     }
 }
@@ -1822,7 +1828,9 @@ fn cloud_code_assist_probe_request(provider: &str, access_token: &str) -> Prepar
 /// CLI the token was minted for (testUtils.js:196-198).
 fn cloud_code_assist_user_agent(provider: &str) -> &'static str {
     if provider == "antigravity" {
-        "google-api-nodejs-client/9.15.1 vscode-antigravity/1.107.0"
+        // Port of `ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent` →
+        // `ANTIGRAVITY_IDE_USER_AGENT` (Antigravity Hub 2.24.0).
+        crate::core::config::app_constants::ANTIGRAVITY_IDE_USER_AGENT
     } else {
         "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0"
     }
@@ -2034,6 +2042,25 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                 body: None,
             })
         }
+        // Nous `/v1/models` is public; the saved-connection probe must be an
+        // authenticated inference request (9router createNousApiKeyProbe).
+        "nous" | "nous-research" => Some(PreparedRequest {
+            method: Method::POST,
+            url: crate::oauth::nous::CHAT_COMPLETIONS_URL.to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: Some(PreparedBody::Json(json!({
+                "model": crate::oauth::nous::VALIDATION_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": false,
+            }))),
+        }),
         _ => None,
     }
 }
@@ -2369,6 +2396,8 @@ fn is_refreshable_provider(provider: &str) -> bool {
             | "cline"
             | "kimi"
             | "kimi-coding"
+            | "nous"
+            | "nous-research"
     )
 }
 

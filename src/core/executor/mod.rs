@@ -56,6 +56,9 @@ pub use commandcode::{
     CommandCodeExecutionRequest, CommandCodeExecutor, CommandCodeExecutorError,
     CommandCodeExecutorResponse,
 };
+pub use cursor::catalog::{
+    resolve_cursor_models_for_connection, AutoModelSelection, CursorCatalogModel,
+};
 pub use cursor::{
     parse_cursor_sse_events, CursorExecutionRequest, CursorExecutor, CursorExecutorError,
     CursorExecutorResponse, SseEvent,

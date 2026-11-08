@@ -54,15 +54,10 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                 "text" => {
                     state.insert("textBlockStarted".into(), Value::Bool(true));
                 }
-                "thinking" => {
-                    state.insert("inThinkingBlock".into(), Value::Bool(true));
-                    state.insert("currentBlockIndex".into(), Value::from(index));
-                    results.push(make_chunk(
-                        state,
-                        json!({"content": "<think>"}),
-                        Value::Null,
-                    ));
-                }
+                // Thinking blocks need no start handling: thinking_delta events
+                // carry their own type and stream as reasoning_content. Upstream
+                // (claude-to-openai.js v0.5.112) emits no "<think>" markers —
+                // OpenAI-format clients render them as literal text.
                 "tool_use" => {
                     let tool_call_index = state
                         .get("toolCallIndex")
@@ -202,19 +197,6 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                 return results;
             }
 
-            let in_thinking = state
-                .get("inThinkingBlock")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let current_block = state.get("currentBlockIndex").and_then(|v| v.as_u64());
-            if in_thinking && current_block == Some(index) {
-                results.push(make_chunk(
-                    state,
-                    json!({"content": "</think>"}),
-                    Value::Null,
-                ));
-                state.insert("inThinkingBlock".into(), Value::Bool(false));
-            }
             state.insert("textBlockStarted".into(), Value::Bool(false));
             state.insert("thinkingBlockStarted".into(), Value::Bool(false));
         }
@@ -260,6 +242,27 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
             {
                 let finish = convert_stop_reason(stop_reason);
                 state.insert("finishReason".into(), Value::String(finish.to_string()));
+
+                // A refusal produces no content blocks at all. Surface
+                // Anthropic's own explanation as the message text so the
+                // client shows *why* the turn is empty instead of a blank
+                // reply (upstream claude-to-openai.js message_delta arm).
+                if stop_reason == "refusal" {
+                    if let Some(explanation) = chunk
+                        .pointer("/delta/stop_details/explanation")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !explanation.is_empty() {
+                            usage::note_content(state, explanation);
+                            results.push(make_chunk(
+                                state,
+                                json!({"content": explanation}),
+                                Value::Null,
+                            ));
+                        }
+                    }
+                }
+
                 let mut final_chunk =
                     make_chunk(state, json!({}), Value::String(finish.to_string()));
 
@@ -401,6 +404,9 @@ fn convert_stop_reason(reason: &str) -> &'static str {
         "max_tokens" => "length",
         "tool_use" => "tool_calls",
         "stop_sequence" => "stop",
+        // A refusal is a blocked turn, not a clean stop (upstream
+        // finishReason.js: CLAUDE_STOP.REFUSAL → OPENAI_FINISH.CONTENT_FILTER).
+        "refusal" => "content_filter",
         _ => "stop",
     }
 }
@@ -550,20 +556,87 @@ mod tests {
     }
 
     #[test]
-    fn thinking_block_wraps_in_think_tags() {
+    fn thinking_block_streams_reasoning_content_without_think_markers() {
         let events = [
             json!({"type": "message_start", "message": {"id": "m", "model": "claude"}}),
             json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
             json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "reasoning..."}}),
             json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "text"}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "answer"}}),
+            json!({"type": "content_block_stop", "index": 1}),
         ];
         let out = run(&events);
-        assert_eq!(out[1]["choices"][0]["delta"]["content"], "<think>");
+        // Thinking travels only in reasoning_content — no "<think>"/"</think>"
+        // markup may leak into the OpenAI content field.
+        for chunk in &out {
+            if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
+                assert!(
+                    !content.contains("<think>") && !content.contains("</think>"),
+                    "think marker leaked into content: {content}"
+                );
+            }
+        }
+        let reasoning: Vec<&str> = out
+            .iter()
+            .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
+            .collect();
+        assert_eq!(reasoning, vec!["reasoning..."]);
+        let texts: Vec<&str> = out
+            .iter()
+            .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(texts, vec!["answer"]);
+    }
+
+    #[test]
+    fn refusal_maps_to_content_filter_and_surfaces_explanation() {
+        let events = [
+            json!({"type": "message_start", "message": {"id": "m", "model": "claude"}}),
+            json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "refusal",
+                    "stop_details": {"type": "refusal", "explanation": "I can't help with that."}
+                },
+                "usage": {"input_tokens": 3, "output_tokens": 0}
+            }),
+            json!({"type": "message_stop"}),
+        ];
+        let out = run(&events);
+        // Explanation is emitted as a content delta before the terminal chunk.
+        let content_chunk = out
+            .iter()
+            .find(|c| {
+                c["choices"][0]["delta"]["content"].as_str() == Some("I can't help with that.")
+            })
+            .expect("refusal explanation content chunk");
+        assert!(content_chunk["choices"][0]["finish_reason"].is_null());
+        let final_chunk = out.last().unwrap();
+        assert_eq!(final_chunk["choices"][0]["finish_reason"], "content_filter");
+        // message_stop must not emit a second finish chunk.
         assert_eq!(
-            out[2]["choices"][0]["delta"]["reasoning_content"],
-            "reasoning..."
+            out.iter()
+                .filter(|c| c["choices"][0]["finish_reason"].is_string())
+                .count(),
+            1
         );
-        assert_eq!(out[3]["choices"][0]["delta"]["content"], "</think>");
+    }
+
+    #[test]
+    fn refusal_without_explanation_still_maps_to_content_filter() {
+        let events = [
+            json!({"type": "message_start", "message": {"id": "m", "model": "claude"}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}}),
+        ];
+        let out = run(&events);
+        assert_eq!(
+            out.last().unwrap()["choices"][0]["finish_reason"],
+            "content_filter"
+        );
+        assert!(out
+            .iter()
+            .all(|c| c["choices"][0]["delta"]["content"].is_null()));
     }
 
     #[test]

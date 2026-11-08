@@ -58,6 +58,16 @@ fn should_strip(provider: &str, model: &str, field: &str) -> bool {
         }
     }
 
+    // { provider: "opencode-go", match: /^deepseek/i, drop: ["response_format"] }
+    // The relay 400s on response_format for its deepseek family (bare model
+    // echo or "This response_format type is unavailable now").
+    if field == "response_format"
+        && provider == "opencode-go"
+        && model.to_ascii_lowercase().starts_with("deepseek")
+    {
+        return true;
+    }
+
     false
 }
 
@@ -68,6 +78,61 @@ fn is_anthropic_compatible(provider: &str) -> bool {
     )
 }
 
+/// 9router paramSupport.js renameParams: move `from` → `to`. The JS copies
+/// only when `body[to] === undefined` (key absent) — a present target, even
+/// null, is kept. `from` is always removed. (The looser null/empty-string
+/// tolerance applies only to renameMessageFields — see `target_is_empty`.)
+fn rename_param(obj: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
+    let Some(from_val) = obj.remove(from) else {
+        return;
+    };
+    if !obj.contains_key(to) {
+        obj.insert(to.to_string(), from_val);
+    }
+}
+
+/// Whether an existing target value should be overwritten by a rename.
+/// Mirrors the JS check: overwrite when existing is undefined, null, or an
+/// empty/whitespace string; keep it otherwise.
+fn target_is_empty(v: &Value) -> bool {
+    v.is_null() || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false)
+}
+
+/// 9router paramSupport.js renameMessageFields: nvidia NIM treats `reasoning`
+/// and `reasoning_content` as aliases for one field; sending both makes its
+/// deserializer report a duplicate field. Keep the OpenAI canonical spelling
+/// (`reasoning_content`) on assistant history. Only `role == "assistant"`
+/// messages are touched, matching upstream; a present non-empty
+/// `reasoning_content` wins over the renamed `reasoning` value.
+fn apply_message_field_rules(obj: &mut serde_json::Map<String, Value>, provider: &str) {
+    if provider != "nvidia" {
+        return;
+    }
+
+    let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(m) = msg.as_object_mut() else {
+            continue;
+        };
+        // JS: if msg.reasoning !== undefined → maybe set
+        // msg.reasoning_content, then always delete msg.reasoning.
+        if let Some(reasoning) = m.remove("reasoning") {
+            let overwrite = m
+                .get("reasoning_content")
+                .map(target_is_empty)
+                .unwrap_or(true);
+            if overwrite {
+                m.insert("reasoning_content".to_string(), reasoning);
+            }
+        }
+    }
+}
+
 /// Remove unsupported fields from `body` for the given `provider` and `model`.
 ///
 /// Mutates `body` in place. No-op for providers that aren't in the filter map.
@@ -75,6 +140,19 @@ pub fn strip_unsupported_params(provider: &str, model: &str, body: &mut Value) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
+
+    // Upstream paramSupport.js:65 — no rules apply without a model id.
+    if model.is_empty() {
+        return;
+    }
+
+    // 9router paramSupport.js renameParams (port): rename runs before drops,
+    // and keeps an explicit target value if the client already sent one.
+    // { provider: "openai", renameParams: { max_tokens: "max_completion_tokens" } }
+    // (#7c42d8f — gpt-5.x/gpt-6.x 400 on `max_tokens`.)
+    if provider == "openai" {
+        rename_param(obj, "max_tokens", "max_completion_tokens");
+    }
 
     let fields_to_check: Vec<String> = obj.keys().cloned().collect();
     for field in &fields_to_check {
@@ -85,6 +163,9 @@ pub fn strip_unsupported_params(provider: &str, model: &str, body: &mut Value) {
 
     // Also check nested `extra_body` for unsupported fields
     if let Some(extra) = obj.get_mut("extra_body").and_then(|v| v.as_object_mut()) {
+        if provider == "openai" {
+            rename_param(extra, "max_tokens", "max_completion_tokens");
+        }
         let nested_fields: Vec<String> = extra.keys().cloned().collect();
         for field in &nested_fields {
             if should_strip(provider, model, field) {
@@ -92,6 +173,11 @@ pub fn strip_unsupported_params(provider: &str, model: &str, body: &mut Value) {
             }
         }
     }
+
+    // Assistant-message renameMessageFields rules (nvidia reasoning →
+    // reasoning_content); dropMessageFields for groq/mistral/cerebras is
+    // applied below alongside the other provider passes.
+    apply_message_field_rules(obj, provider);
 
     // flattenContent — cloudflare-ai (9router paramSupport.js:16, 47-56):
     // replace each message's content array with the joined text parts.
@@ -113,6 +199,38 @@ pub fn strip_unsupported_params(provider: &str, model: &str, body: &mut Value) {
     // / max_output_tokens to the per-model ceiling when they exceed it.
     if provider == "volcengine-ark" {
         clamp_max_output(obj, model);
+    }
+
+    // dropMessageFields — groq / mistral / cerebras (9router paramSupport.js:
+    // 27-29, 59-66, #4220): strict OpenAI-compatible validators reject unknown
+    // assistant-message fields. Clients echo prior-turn reasoning back on every
+    // assistant message; Groq 400s and Mistral 422s ("extra_forbidden") on it.
+    // Providers that REQUIRE the field (DeepSeek, Kimi) are handled elsewhere
+    // and are deliberately not listed here.
+    if matches!(provider, "groq" | "mistral" | "cerebras") {
+        drop_message_fields(
+            obj,
+            &["reasoning_content", "reasoning", "reasoning_details"],
+        );
+    }
+}
+
+/// 9router paramSupport.js dropMessageFields: remove `keys` from every
+/// assistant-role message in `body.messages`. Non-assistant messages are
+/// untouched, and a missing `messages` array is a no-op.
+fn drop_message_fields(obj: &mut serde_json::Map<String, Value>, keys: &[&str]) {
+    let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(map) = msg.as_object_mut() {
+            for key in keys {
+                map.remove(*key);
+            }
+        }
     }
 }
 
@@ -333,5 +451,161 @@ mod tests {
         });
         strip_unsupported_params("xiaomi-mimo", "mimo-v2.5-pro", &mut body);
         assert!(body["messages"][0]["content"].is_array());
+    }
+
+    fn replayed_reasoning_body() -> Value {
+        json!({
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "thinking out loud",
+                    "reasoning_content": "let me think",
+                    "reasoning": "more thinking",
+                    "reasoning_details": [{"type": "text", "text": "detail"}]
+                },
+                {"role": "tool", "content": "tool result", "reasoning_content": "kept"}
+            ]
+        })
+    }
+
+    #[test]
+    fn strips_replayed_reasoning_fields_for_groq() {
+        let mut body = replayed_reasoning_body();
+        strip_unsupported_params("groq", "llama-3.3-70b-versatile", &mut body);
+        let assistant = &body["messages"][1];
+        assert!(assistant.get("reasoning_content").is_none());
+        assert!(assistant.get("reasoning").is_none());
+        assert!(assistant.get("reasoning_details").is_none());
+        assert_eq!(assistant.get("content"), Some(&json!("thinking out loud")));
+        // Non-assistant messages keep the fields (upstream only touches role==assistant).
+        assert_eq!(body["messages"][2]["reasoning_content"], json!("kept"));
+    }
+
+    #[test]
+    fn strips_replayed_reasoning_fields_for_mistral_and_cerebras() {
+        for provider in ["mistral", "cerebras"] {
+            let mut body = replayed_reasoning_body();
+            strip_unsupported_params(provider, "test-model", &mut body);
+            assert!(body["messages"][1].get("reasoning_content").is_none());
+            assert!(body["messages"][1].get("reasoning").is_none());
+            assert!(body["messages"][1].get("reasoning_details").is_none());
+        }
+    }
+
+    #[test]
+    fn leaves_reasoning_fields_untouched_for_openai() {
+        let mut body = replayed_reasoning_body();
+        let original = body.clone();
+        strip_unsupported_params("openai", "gpt-4o", &mut body);
+        assert_eq!(body, original);
+    }
+
+    // --- 9router paramSupport.js renameParams: openai max_tokens →
+    // max_completion_tokens (bead openproxy-4d5h.26, upstream #7c42d8f) ---
+
+    #[test]
+    fn renames_max_tokens_for_openai() {
+        let mut body = json!({
+            "model": "gpt-5.4",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("openai", "gpt-5.4", &mut body);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
+
+    #[test]
+    fn openai_rename_keeps_explicit_max_completion_tokens() {
+        // JS: body[to] === undefined is the only copy condition — a present
+        // target wins even when max_tokens is also sent.
+        let mut body = json!({
+            "model": "gpt-5.4",
+            "max_tokens": 4096,
+            "max_completion_tokens": 8192,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("openai", "gpt-5.4", &mut body);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 8192);
+    }
+
+    #[test]
+    fn openai_rename_does_not_touch_other_providers() {
+        let mut body = json!({
+            "model": "llama-3",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("groq", "llama-3", &mut body);
+        assert_eq!(body["max_tokens"], 4096);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    // --- 9router paramSupport.js renameMessageFields: nvidia
+    // reasoning → reasoning_content (bead openproxy-4d5h.25) ---
+
+    #[test]
+    fn nvidia_renames_reasoning_on_assistant_messages() {
+        let mut body = json!({
+            "model": "meta/llama-3.1-70b-instruct",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello", "reasoning": "thought"},
+                {"role": "assistant", "content": "more", "reasoning": "t2",
+                 "reasoning_content": "kept"}
+            ]
+        });
+        strip_unsupported_params("nvidia", "meta/llama-3.1-70b-instruct", &mut body);
+        let msgs = body["messages"].as_array().unwrap();
+        // First assistant: reasoning renamed to reasoning_content.
+        assert!(msgs[1].get("reasoning").is_none());
+        assert_eq!(msgs[1]["reasoning_content"], "thought");
+        // Second: existing non-empty reasoning_content wins; reasoning dropped.
+        assert!(msgs[2].get("reasoning").is_none());
+        assert_eq!(msgs[2]["reasoning_content"], "kept");
+        // User messages untouched.
+        assert!(msgs[0].get("reasoning").is_none());
+        assert!(msgs[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn nvidia_rename_overwrites_empty_reasoning_content() {
+        // JS: existing === null or "" → overwritten by the reasoning value.
+        let mut body = json!({
+            "messages": [
+                {"role": "assistant", "content": "a", "reasoning": "real",
+                 "reasoning_content": ""}
+            ]
+        });
+        strip_unsupported_params("nvidia", "some-model", &mut body);
+        assert_eq!(body["messages"][0]["reasoning_content"], "real");
+        assert!(body["messages"][0].get("reasoning").is_none());
+    }
+
+    // --- 9router paramSupport.js: opencode-go deepseek response_format ---
+
+    #[test]
+    fn strips_response_format_for_opencode_go_deepseek() {
+        let mut body = json!({
+            "model": "deepseek-v4.1-flash",
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("opencode-go", "deepseek-v4.1-flash", &mut body);
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn keeps_response_format_for_opencode_go_non_deepseek() {
+        let mut body = json!({
+            "model": "glm-5",
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("opencode-go", "glm-5", &mut body);
+        assert!(body.get("response_format").is_some());
     }
 }

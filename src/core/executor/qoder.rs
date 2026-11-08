@@ -277,14 +277,18 @@ fn stub_model_config(qoder_key: &str) -> Value {
 }
 
 /// Billing/quota error codes that should trigger combo fallback.
-/// 9router `isBillingBlock` (qoder.js) matches string codes only via
-/// `/"code"\s*:\s*"(112|10605)"/` (whitespace-tolerant, strings only).
+/// 9router `isBillingBlock` (qoder.js) matches parsed `code` "110"/"112"
+/// plus the legacy string-only regex `"code"\s*:\s*"112"`.
 /// Rust additionally accepts numeric `{"code":112}` — a benign superset for
 /// live traffic that sends numbers. Both shapes are gated behind the
 /// `statusCodeValue != 200` check in `detect_qoder_billing_block` (9router
-/// qoder.js:376 `statusVal !== 200 && isBillingBlock(inner)`), so a normal
+/// qoder.js `statusVal !== 200 && isBillingBlock(inner)`), so a normal
 /// 200 chunk merely mentioning `"code":"112"` never fires.
-const QODER_BILLING_CODES: &[&str] = &["112", "10605"];
+///
+/// Code 10605 is deliberately NOT here: it is the model-queue capacity
+/// signal (`isQueued` / `RESOURCE_LIMIT`), transient — see the queue
+/// handling ported from `shared/qoder/queue.js` below.
+const QODER_BILLING_CODES: &[&str] = &["110", "112"];
 
 /// Extract the `code` field of a Qoder inner-body JSON object as a string,
 /// accepting both `"112"` and `112` shapes. 9router `isBillingBlock` matches
@@ -352,11 +356,9 @@ pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
         return Some("qoder billing block detected in raw body".to_string());
     }
     let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact.contains("\"code\":\"112\"")
-        || compact.contains("\"code\":112")
-        || compact.contains("\"code\":\"10605\"")
-        || compact.contains("\"code\":10605")
-    {
+    // 10605 is intentionally absent — it is the transient model-queue
+    // capacity code, handled by the queue wait/replay path instead.
+    if compact.contains("\"code\":\"112\"") || compact.contains("\"code\":112") {
         return Some("qoder billing block detected in raw body".to_string());
     }
 
@@ -377,6 +379,306 @@ pub fn check_billing_in_sse_line(line: &str) -> Option<String> {
     detect_qoder_billing_block(payload).map(|err_msg| {
         // Return a synthetic 403 error frame that the chat handler can detect.
         format!("{{\"error\":true,\"status\":403,\"message\":\"{err_msg}\"}}")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Model-queue handling (ported from 9router shared/qoder/queue.js)
+// ---------------------------------------------------------------------------
+//
+// When a model is temporarily out of capacity Qoder answers the inference
+// request with a `{statusCodeValue, body}` SSE envelope whose body carries
+// code 10605 with a nested queue descriptor:
+//
+//   { "code": "10605",
+//     "message": "{\"isQueued\":true,\"modelKey\":\"auto\",\"queueCount\":0,
+//                  \"queueType\":\"p3\",\"retryAfterSeconds\":30,
+//                  \"serviceAvailable\":false,\"subCode\":\"RESOURCE_LIMIT\",
+//                  \"waitTime\":30}",
+//     "subCode": "RESOURCE_LIMIT" }
+//
+// That is a transient capacity signal, not a quota block: the model becomes
+// available again in ~30s windows and the same request then succeeds.
+// qodercli polls `/algo/api/v2/service/ask/queue/status` and replays the
+// inference once the model is ready; the executor mirrors that with a bounded
+// wait (default 600s, `QODER_MODEL_QUEUE_MAX_WAIT_MS` to override) and
+// 15–60s retry clamp.
+
+/// Queue-signal code. The code alone counts as a queue signal even without
+/// the inner descriptor object (queue.js `parseQoderQueueInfo`).
+pub const QODER_QUEUE_CODE: &str = "10605";
+const QODER_MODEL_QUEUE_MAX_WAIT_ENV: &str = "QODER_MODEL_QUEUE_MAX_WAIT_MS";
+/// qodercli caps the wait at 1h; the queue clears in ~30s windows, so 3
+/// minutes covers several of them before returning a retryable 503.
+const DEFAULT_QUEUE_MAX_WAIT_MS: u64 = 600_000;
+const DEFAULT_QUEUE_RETRY_MS: u64 = 30_000;
+// Qoder's queue answers retryAfterSeconds:2 while still refusing; replaying
+// that fast makes the throttle worse, so the floor is a full retry interval.
+const MIN_QUEUE_RETRY_MS: u64 = 15_000;
+const MAX_QUEUE_RETRY_MS: u64 = 60_000;
+// The queue-status endpoint has been observed reporting isQueued:false /
+// retryAfterSeconds:2 while inference is still refused — a status-derived
+// delay never drops below the default interval.
+const STATUS_HINT_FLOOR_MS: u64 = 30_000;
+
+const QODER_QUEUE_NESTED_KEYS: &[&str] = &[
+    "error", "data", "body", "message", "cause", "result", "payload",
+];
+
+/// Normalised model-queue descriptor (queue.js `parseQoderQueueInfo`).
+#[derive(Debug, Clone, Default)]
+pub struct QoderQueueInfo {
+    pub code: Option<String>,
+    pub sub_code: Option<String>,
+    pub is_queued: Option<bool>,
+    pub model_key: Option<String>,
+    pub queue_type: Option<String>,
+    pub queue_count: Option<f64>,
+    pub service_available: Option<bool>,
+    pub retry_after_seconds: Option<f64>,
+    pub wait_time: Option<f64>,
+}
+
+/// Queue-status endpoint response (queue.js `parseQoderQueueStatus`).
+#[derive(Debug, Clone, Default)]
+pub struct QoderQueueStatus {
+    pub is_queued: Option<bool>,
+    pub service_available: Option<bool>,
+    pub model_key: Option<String>,
+    pub queue_type: Option<String>,
+    pub queue_count: Option<f64>,
+    pub retry_after_seconds: Option<f64>,
+    pub wait_time: Option<f64>,
+}
+
+/// Shared delay computation (queue.js `computeQoderQueueDelayMs`).
+fn qoder_queue_delay_ms(
+    retry_after_seconds: Option<f64>,
+    wait_time: Option<f64>,
+    from_status: bool,
+) -> u64 {
+    let hint = retry_after_seconds.or(wait_time);
+    let mut ms = match hint {
+        Some(h) if h.is_finite() => (h * 1000.0) as u64,
+        _ => DEFAULT_QUEUE_RETRY_MS,
+    };
+    if from_status {
+        ms = ms.max(STATUS_HINT_FLOOR_MS);
+    }
+    ms.clamp(MIN_QUEUE_RETRY_MS, MAX_QUEUE_RETRY_MS)
+}
+
+impl QoderQueueInfo {
+    /// Delay before the next replay attempt.
+    pub fn delay_ms(&self, from_status: bool) -> u64 {
+        qoder_queue_delay_ms(self.retry_after_seconds, self.wait_time, from_status)
+    }
+}
+
+impl QoderQueueStatus {
+    /// Delay before the next replay attempt (status hints floored at 30s).
+    pub fn delay_ms(&self, from_status: bool) -> u64 {
+        qoder_queue_delay_ms(self.retry_after_seconds, self.wait_time, from_status)
+    }
+}
+
+/// JS `toString` for queue fields: strings only, trimmed, non-empty.
+fn qoder_queue_str(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// JS `toNumber`: finite numbers, or strings matching /^-?\d+(\.\d+)?$/.
+fn qoder_queue_num(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()),
+        Value::String(s) => {
+            let t = s.trim();
+            let numeric = !t.is_empty()
+                && t.chars()
+                    .all(|c| c.is_ascii_digit() || c == '-' || c == '.')
+                && t.chars().any(|c| c.is_ascii_digit());
+            if numeric {
+                t.parse::<f64>().ok().filter(|f| f.is_finite())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// JS `toBool`: real booleans plus "true"/"false" strings.
+fn qoder_queue_bool(v: Option<&Value>) -> Option<bool> {
+    match v? {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) => match s.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// JS `tryParse`: parse a string that looks like JSON into an object/array.
+fn qoder_try_parse_json(s: &str) -> Option<Value> {
+    let t = s.trim();
+    if !t.starts_with('{') && !t.starts_with('[') {
+        return None;
+    }
+    match serde_json::from_str::<Value>(t) {
+        Ok(v) if v.is_object() || v.is_array() => Some(v),
+        _ => None,
+    }
+}
+
+/// Breadth-first walk over nested objects and JSON-encoded string fields
+/// (queue.js `walkObjects`). Returns every reachable object in BFS order so
+/// first-seen field semantics match the JS implementation.
+fn qoder_walk_objects(root: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen_strings: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<Value> =
+        std::collections::VecDeque::from([root.clone()]);
+    while let Some(node) = queue.pop_front() {
+        if let Some(obj) = node.as_object() {
+            out.push(node.clone());
+            for key in QODER_QUEUE_NESTED_KEYS {
+                match obj.get(*key) {
+                    Some(v) if v.is_object() || v.is_array() => queue.push_back(v.clone()),
+                    Some(Value::String(s)) => {
+                        if seen_strings.insert(s.clone()) {
+                            if let Some(parsed) = qoder_try_parse_json(s) {
+                                queue.push_back(parsed);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else if let Some(arr) = node.as_array() {
+            for item in arr {
+                if item.is_object() || item.is_array() {
+                    queue.push_back(item.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse a queue descriptor out of an already-parsed JSON value
+/// (queue.js `parseQoderQueueInfo` object branch).
+pub fn parse_qoder_queue_info_value(root: &Value) -> Option<QoderQueueInfo> {
+    let objects = qoder_walk_objects(root);
+    let mut info = QoderQueueInfo::default();
+    for obj in &objects {
+        if info.code.is_none() {
+            info.code = qoder_queue_str(obj.get("code"));
+        }
+        if info.sub_code.is_none() {
+            info.sub_code = qoder_queue_str(obj.get("subCode"));
+        }
+        if info.is_queued.is_none() {
+            info.is_queued = qoder_queue_bool(obj.get("isQueued"));
+        }
+        if info.model_key.is_none() {
+            info.model_key = qoder_queue_str(obj.get("modelKey"));
+        }
+        if info.queue_type.is_none() {
+            info.queue_type = qoder_queue_str(obj.get("queueType"));
+        }
+        if info.queue_count.is_none() {
+            info.queue_count = qoder_queue_num(obj.get("queueCount"));
+        }
+        if info.service_available.is_none() {
+            info.service_available = qoder_queue_bool(obj.get("serviceAvailable"));
+        }
+        if info.retry_after_seconds.is_none() {
+            info.retry_after_seconds = qoder_queue_num(obj.get("retryAfterSeconds"));
+        }
+        if info.wait_time.is_none() {
+            info.wait_time = qoder_queue_num(obj.get("waitTime"));
+        }
+    }
+
+    let queued = info.is_queued == Some(true)
+        || info.service_available == Some(false)
+        || info.sub_code.as_deref() == Some("RESOURCE_LIMIT")
+        || info.code.as_deref() == Some(QODER_QUEUE_CODE);
+    if !queued {
+        return None;
+    }
+    Some(info)
+}
+
+/// Parse a queue descriptor from a raw (possibly nested-JSON-encoded) string —
+/// the Qoder SSE envelope `body` field (queue.js `parseQoderQueueInfo` string
+/// branch / `isQoderQueuedBody`).
+pub fn parse_qoder_queue_info_str(input: &str) -> Option<QoderQueueInfo> {
+    let root = qoder_try_parse_json(input)?;
+    parse_qoder_queue_info_value(&root)
+}
+
+/// True when a parsed response body carries the model-queue signal.
+pub fn is_qoder_queued_body(input: &str) -> bool {
+    parse_qoder_queue_info_str(input).is_some()
+}
+
+/// Total budget for holding a request open while its model is queued
+/// (queue.js `qoderQueueMaxWaitMs`).
+pub fn qoder_queue_max_wait_ms() -> u64 {
+    std::env::var(QODER_MODEL_QUEUE_MAX_WAIT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(|n| n as u64)
+        .unwrap_or(DEFAULT_QUEUE_MAX_WAIT_MS)
+}
+
+/// The queue-status endpoint qodercli polls. All parameters are optional but
+/// omitting them answers HTTP 400 upstream (queue.js `qoderQueueStatusUrl`).
+pub fn qoder_queue_status_url(
+    base_url: &str,
+    request_set_id: Option<&str>,
+    model_key: Option<&str>,
+    queue_type: Option<&str>,
+) -> String {
+    let mut url = reqwest::Url::parse(&format!("{base_url}/algo/api/v2/service/ask/queue/status"))
+        .expect("qoder queue status base url is valid");
+    {
+        let mut pairs = url.query_pairs_mut();
+        if let Some(v) = request_set_id.filter(|s| !s.is_empty()) {
+            pairs.append_pair("requestSetId", v);
+        }
+        if let Some(v) = model_key.filter(|s| !s.is_empty()) {
+            pairs.append_pair("modelKey", v);
+        }
+        if let Some(v) = queue_type.filter(|s| !s.is_empty()) {
+            pairs.append_pair("queueType", v);
+        }
+    }
+    url.to_string()
+}
+
+/// Parse the queue-status response; `None` when the body is not the expected
+/// shape, which the caller treats as "status endpoint unusable" and falls
+/// back to timed replays (queue.js `parseQoderQueueStatus`).
+pub fn parse_qoder_queue_status(input: &str) -> Option<QoderQueueStatus> {
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    let obj = v.as_object()?;
+    let is_queued = qoder_queue_bool(obj.get("isQueued"))?;
+    Some(QoderQueueStatus {
+        is_queued: Some(is_queued),
+        service_available: qoder_queue_bool(obj.get("serviceAvailable")),
+        model_key: qoder_queue_str(obj.get("modelKey")),
+        queue_type: qoder_queue_str(obj.get("queueType")),
+        queue_count: qoder_queue_num(obj.get("queueCount")),
+        retry_after_seconds: qoder_queue_num(obj.get("retryAfterSeconds")),
+        wait_time: qoder_queue_num(obj.get("waitTime")),
     })
 }
 
@@ -1618,6 +1920,16 @@ impl QoderExecutor {
             HeaderValue::from_str(model_source).unwrap_or_else(|_| HeaderValue::from_static("")),
         );
 
+        Self::insert_cosy_headers(&mut headers, &cosy);
+
+        Ok(headers)
+    }
+
+    /// Insert the full Cosy-* / Authorization / X-Request-Id header set built
+    /// by `build_cosy_headers`. Shared by the inference POST and the
+    /// queue-status GET (queue.js `fetchQueueStatus` signs with the same
+    /// `buildCosyHeaders`).
+    fn insert_cosy_headers(headers: &mut HeaderMap, cosy: &CosyHeaders) {
         headers.insert(
             "Authorization",
             HeaderValue::from_str(&cosy.authorization)
@@ -1710,8 +2022,6 @@ impl QoderExecutor {
             HeaderValue::from_str(&cosy.x_request_id)
                 .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
-
-        Ok(headers)
     }
 
     // -----------------------------------------------------------------------
@@ -2352,55 +2662,212 @@ impl QoderExecutor {
             &model_entry,
         )?;
 
-        // Encode body with Qoder's WAF-bypass scheme
+        // Encode body with Qoder's WAF-bypass scheme. The payload (including
+        // request_id / request_set_id / session_id) is identical across queue
+        // replays — the queue is keyed by request_set_id — so only the COSY
+        // signature is refreshed per attempt (9router sendOnce).
         let plain_body = serde_json::to_vec(&transformed_body)?;
         let encoded_body_str = Self::qoder_encode_body(&plain_body);
         let encoded_body = encoded_body_str.as_bytes();
 
-        // Build COSY-signed headers from the *encoded* body
-        let headers = self.build_headers(encoded_body, &url, &creds, &qoder_key, &model_source)?;
+        // Model-queue recovery (9router shared/qoder/queue.js): a first frame
+        // carrying 10605/isQueued is transient model-queue capacity, not a
+        // billing block. Poll the queue-status endpoint and replay the
+        // inference until the model drains or the wait budget expires, then
+        // surface a retryable 503 instead of a 403 billing lock.
+        let queue_wait_started = std::time::Instant::now();
+        let queue_max_wait_ms = qoder_queue_max_wait_ms();
+        let mut status_polls_enabled = true;
+        // Guards the "status says ready" fast path: one free replay, then stop
+        // believing an endpoint that has already been contradicted.
+        let mut ready_replay_used = false;
 
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .body(encoded_body.to_vec())
-            .send()
-            .await?;
+        loop {
+            // Build COSY-signed headers from the *encoded* body. Fresh per
+            // attempt: reusing a signature reuses its requestId and upstream
+            // answers 403/code 103.
+            let headers =
+                self.build_headers(encoded_body, &url, &creds, &qoder_key, &model_source)?;
 
-        // Peek the first SSE frame for billing blocks (9router
-        // peekFirstQoderFrame): return a real 403 before streaming so the
-        // combo dispatcher marks the connection unavailable and falls over.
-        // Normal frames are re-attached so nothing is dropped.
-        if response.status().is_success() {
-            match Self::peek_first_frame(response, &url).await {
-                QoderPeek::Billing { response } => {
-                    return Ok(QoderExecutorResponse {
-                        response: UpstreamResponse::Reqwest(response),
-                        url,
-                        headers,
-                        transformed_body,
-                        transport: TransportKind::Reqwest,
-                    });
-                }
-                QoderPeek::Passthrough { response } => {
-                    return Ok(QoderExecutorResponse {
-                        response: UpstreamResponse::Reqwest(response),
-                        url,
-                        headers,
-                        transformed_body,
-                        transport: TransportKind::Reqwest,
-                    });
+            let response = client
+                .post(&url)
+                .headers(headers.clone())
+                .body(encoded_body.to_vec())
+                .send()
+                .await?;
+
+            // Peek the first SSE frame for billing blocks and the queue
+            // signal (9router peekFirstQoderFrame): billing returns a real
+            // 403 before streaming so the combo dispatcher marks the
+            // connection unavailable and falls over; queued models wait and
+            // replay; normal frames are re-attached so nothing is dropped.
+            if response.status().is_success() {
+                match Self::peek_first_frame(response, &url).await {
+                    QoderPeek::Billing { response } => {
+                        return Ok(QoderExecutorResponse {
+                            response: UpstreamResponse::Reqwest(response),
+                            url,
+                            headers,
+                            transformed_body,
+                            transport: TransportKind::Reqwest,
+                        });
+                    }
+                    QoderPeek::Queued { info } => {
+                        let waited_ms = queue_wait_started.elapsed().as_millis() as u64;
+                        if waited_ms >= queue_max_wait_ms {
+                            let waited_s = queue_wait_started.elapsed().as_secs();
+                            let queue_type = info.queue_type.as_deref().unwrap_or("?").to_string();
+                            tracing::warn!(
+                                target: "openproxy::executor",
+                                "qoder model queue wait timed out after {waited_s}s for {qoder_key} (queueType={queue_type})"
+                            );
+                            let msg = format!(
+                                "qoder model \"{qoder_key}\" is still queued after {waited_s}s \
+                                 (queueType={queue_type}); retry shortly"
+                            );
+                            let body = serde_json::json!({
+                                "error": {
+                                    "message": msg,
+                                    "code": "qoder_model_queued",
+                                    "type": "rate_limit_error",
+                                }
+                            })
+                            .to_string();
+                            let http_resp = http::Response::builder()
+                                .status(503)
+                                .header("Content-Type", "application/json")
+                                .body(reqwest::Body::from(body))
+                                .unwrap();
+                            return Ok(QoderExecutorResponse {
+                                response: UpstreamResponse::Reqwest(reqwest::Response::from(
+                                    http_resp,
+                                )),
+                                url,
+                                headers,
+                                transformed_body,
+                                transport: TransportKind::Reqwest,
+                            });
+                        }
+
+                        let mut delay_ms = info.delay_ms(false);
+
+                        if status_polls_enabled {
+                            match Self::fetch_qoder_queue_status(
+                                &client,
+                                &inference_base,
+                                &transformed_body,
+                                &info,
+                                &qoder_key,
+                                &creds,
+                            )
+                            .await
+                            {
+                                Some(polled) => {
+                                    if polled.is_queued == Some(false) {
+                                        // The status endpoint says ready, but
+                                        // it has been observed saying that
+                                        // while inference is still refused.
+                                        // Replay once; if refused again, stop
+                                        // trusting it and fall back to timed
+                                        // replays.
+                                        if ready_replay_used {
+                                            status_polls_enabled = false;
+                                            tracing::info!(
+                                                target: "openproxy::executor",
+                                                "qoder queue status claims ready but \"{qoder_key}\" is still refused; falling back to timed replays"
+                                            );
+                                        } else {
+                                            ready_replay_used = true;
+                                            tracing::info!(
+                                                target: "openproxy::executor",
+                                                "qoder model \"{qoder_key}\" reported ready; replaying"
+                                            );
+                                            delay_ms = 0;
+                                        }
+                                    } else {
+                                        delay_ms = polled.delay_ms(true);
+                                        tracing::info!(
+                                            target: "openproxy::executor",
+                                            "qoder model \"{qoder_key}\" still queued (queueType={}, queueCount={:?}); rechecking in {}s",
+                                            polled.queue_type.as_deref().unwrap_or("?"),
+                                            polled.queue_count,
+                                            delay_ms / 1000,
+                                        );
+                                    }
+                                }
+                                // Endpoint missing/erroring/unknown shape —
+                                // keep the timed-replay behaviour.
+                                None => status_polls_enabled = false,
+                            }
+                        }
+
+                        if delay_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        continue;
+                    }
+                    QoderPeek::Passthrough { response } => {
+                        return Ok(QoderExecutorResponse {
+                            response: UpstreamResponse::Reqwest(response),
+                            url,
+                            headers,
+                            transformed_body,
+                            transport: TransportKind::Reqwest,
+                        });
+                    }
                 }
             }
-        }
 
-        Ok(QoderExecutorResponse {
-            response: UpstreamResponse::Reqwest(response),
-            url,
-            headers,
-            transformed_body,
-            transport: TransportKind::Reqwest,
-        })
+            return Ok(QoderExecutorResponse {
+                response: UpstreamResponse::Reqwest(response),
+                url,
+                headers,
+                transformed_body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+    }
+
+    /// Poll the model-queue status endpoint qodercli uses (queue.js
+    /// `fetchQueueStatus`). Returns `None` when the endpoint is unusable
+    /// (non-2xx, transport error, or an unrecognised body shape) — the caller
+    /// then falls back to timed replays. COSY-signs the empty GET body exactly
+    /// like the inference POST.
+    async fn fetch_qoder_queue_status(
+        client: &reqwest::Client,
+        inference_base: &str,
+        payload: &Value,
+        info: &QoderQueueInfo,
+        qoder_key: &str,
+        creds: &QoderCreds,
+    ) -> Option<QoderQueueStatus> {
+        let status_url = qoder_queue_status_url(
+            inference_base,
+            payload.get("request_set_id").and_then(Value::as_str),
+            info.model_key
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or(Some(qoder_key)),
+            info.queue_type.as_deref(),
+        );
+        let cosy = Self::build_cosy_headers(&[], &status_url, creds).ok()?;
+        let mut headers = HeaderMap::new();
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        headers.insert("Accept-Encoding", HeaderValue::from_static("identity"));
+        // qodercli correlates the poll with the original inference.
+        if let Some(session_id) = payload.get("session_id").and_then(Value::as_str) {
+            if let Ok(v) = HeaderValue::from_str(session_id) {
+                headers.insert("X-Session-ID", v);
+            }
+        }
+        Self::insert_cosy_headers(&mut headers, &cosy);
+
+        let response = client.get(&status_url).headers(headers).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let text = response.text().await.ok()?;
+        parse_qoder_queue_status(&text)
     }
 
     /// Inference host for this credential (api2 for jt-, api3 otherwise).
@@ -2472,6 +2939,29 @@ impl QoderExecutor {
         if let Some(line) = first_line {
             let trimmed = line.trim_end_matches('\r').trim().to_string();
             if trimmed.starts_with("data:") {
+                let payload = trimmed["data:".len()..].trim();
+                // Model-queue check first (queue.js precedence: a queued
+                // body is transient capacity, never a billing block). Only
+                // non-200 envelopes count — same gate as peekFirstQoderFrame's
+                // isError. The response is dropped; the caller replays.
+                if payload != "[DONE]" {
+                    if let Ok(envelope) = serde_json::from_str::<Value>(payload) {
+                        let status_val = envelope
+                            .get("statusCodeValue")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(200);
+                        if status_val != 200 {
+                            let inner = match envelope.get("body") {
+                                Some(Value::String(s)) => s.clone(),
+                                Some(v) => v.to_string(),
+                                None => String::new(),
+                            };
+                            if let Some(info) = parse_qoder_queue_info_str(&inner) {
+                                return QoderPeek::Queued { info };
+                            }
+                        }
+                    }
+                }
                 if let Some(err_msg) = check_billing_in_sse_line(&trimmed)
                     .and_then(|f| serde_json::from_str::<Value>(&f["data: ".len()..]).ok())
                     .and_then(|v| v.get("message").and_then(Value::as_str).map(String::from))
@@ -2892,6 +3382,9 @@ impl QoderSseCoalescer {
 enum QoderPeek {
     /// Billing block → synthetic 403 JSON response (combo fallback).
     Billing { response: reqwest::Response },
+    /// Model-queue capacity signal (10605 / isQueued / RESOURCE_LIMIT) →
+    /// transient; the executor waits and replays instead of failing.
+    Queued { info: QoderQueueInfo },
     /// Normal → original response rebuilt with consumed bytes prepended.
     Passthrough { response: reqwest::Response },
 }
@@ -3180,14 +3673,34 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_billing_block_code_10605() {
+    fn test_detect_billing_block_code_10605_is_transient_queue() {
+        // 10605 is the model-queue capacity signal, NOT billing (9router
+        // qoder.js isBillingBlock excludes it; shared/qoder/queue.js handles
+        // it as a transient wait+replay). It must never produce a 403.
         let body =
             r#"{"statusCodeValue":429,"body":"{\"code\":10605,\"message\":\"Queue throttle\"}"}"#;
         let result = detect_qoder_billing_block(body);
         assert!(
-            result.is_some(),
-            "code 10605 should be detected as billing block"
+            result.is_none(),
+            "code 10605 is transient queue capacity, not a billing block"
         );
+        // And the SSE-line helper must not synthesize a 403 either.
+        let line = r#"data: {"statusCodeValue":429,"body":"{\"code\":10605,\"message\":\"Queue throttle\"}"}"#;
+        assert!(check_billing_in_sse_line(line).is_none());
+    }
+
+    #[test]
+    fn test_detect_billing_block_code_110() {
+        // 9router isBillingBlock matches parsed code "110" (billing daily
+        // count exceeded) alongside "112".
+        let body =
+            r#"{"statusCodeValue":403,"body":"{\"code\":\"110\",\"message\":\"Daily limit\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_some(),
+            "code 110 should be detected as billing block"
+        );
+        assert!(result.unwrap().contains("110"));
     }
 
     #[test]
@@ -3287,6 +3800,152 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Model-queue descriptor tests (shared/qoder/queue.js port)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_queue_info_full_envelope_body() {
+        // The exact shape from queue.js: code 10605 with the queue descriptor
+        // JSON-encoded inside `message`.
+        let inner = r#"{"code":"10605","message":"{\"isQueued\":true,\"modelKey\":\"auto\",\"queueCount\":0,\"queueType\":\"p3\",\"retryAfterSeconds\":30,\"serviceAvailable\":false,\"subCode\":\"RESOURCE_LIMIT\",\"waitTime\":30}","subCode":"RESOURCE_LIMIT"}"#;
+        let info = parse_qoder_queue_info_str(inner).expect("queue info");
+        assert_eq!(info.code.as_deref(), Some("10605"));
+        assert_eq!(info.sub_code.as_deref(), Some("RESOURCE_LIMIT"));
+        assert_eq!(info.is_queued, Some(true));
+        assert_eq!(info.model_key.as_deref(), Some("auto"));
+        assert_eq!(info.queue_type.as_deref(), Some("p3"));
+        assert_eq!(info.service_available, Some(false));
+        assert_eq!(info.retry_after_seconds, Some(30.0));
+        assert_eq!(info.wait_time, Some(30.0));
+        assert_eq!(info.delay_ms(false), 30_000);
+    }
+
+    #[test]
+    fn test_parse_queue_info_double_nested_encoding() {
+        // The descriptor is frequently double/triple-encoded — the queue
+        // object lives inside a JSON string inside a JSON string.
+        let inner = r#"{"code":"10605","message":"{\"error\":\"{\\\"isQueued\\\":true,\\\"serviceAvailable\\\":false}\"}"}"#;
+        let info = parse_qoder_queue_info_str(inner).expect("queue info");
+        assert_eq!(info.is_queued, Some(true));
+        assert_eq!(info.service_available, Some(false));
+    }
+
+    #[test]
+    fn test_parse_queue_info_code_alone_is_signal() {
+        // A bare {"code":"10605"} counts — the code alone is the signal.
+        let info = parse_qoder_queue_info_str(r#"{"code":"10605"}"#)
+            .expect("bare 10605 is a queue signal");
+        assert_eq!(info.code.as_deref(), Some("10605"));
+        // No hints → default 30s retry.
+        assert_eq!(info.delay_ms(false), DEFAULT_QUEUE_RETRY_MS);
+    }
+
+    #[test]
+    fn test_parse_queue_info_each_signal_variant() {
+        // isQueued:true alone
+        assert!(parse_qoder_queue_info_str(r#"{"isQueued":true}"#).is_some());
+        // serviceAvailable:false alone
+        assert!(parse_qoder_queue_info_str(r#"{"serviceAvailable":false}"#).is_some());
+        // subCode RESOURCE_LIMIT alone
+        assert!(parse_qoder_queue_info_str(r#"{"subCode":"RESOURCE_LIMIT"}"#).is_some());
+        // isQueued:"true" string form (JS toBool accepts it)
+        assert!(parse_qoder_queue_info_str(r#"{"isQueued":"true"}"#).is_some());
+    }
+
+    #[test]
+    fn test_parse_queue_info_negative_cases() {
+        // No queue signal → None.
+        assert!(parse_qoder_queue_info_str(r#"{"code":"112","message":"quota"}"#).is_none());
+        assert!(
+            parse_qoder_queue_info_str(r#"{"isQueued":false,"serviceAvailable":true}"#).is_none()
+        );
+        assert!(parse_qoder_queue_info_str("not json at all").is_none());
+        assert!(parse_qoder_queue_info_str("").is_none());
+        // A normal completion chunk is not queued.
+        assert!(
+            parse_qoder_queue_info_str(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).is_none()
+        );
+    }
+
+    #[test]
+    fn test_parse_queue_info_value_branch() {
+        // Object input (already parsed) works like the JS object branch.
+        let v = serde_json::json!({"isQueued": true, "queueType": "p3"});
+        let info = parse_qoder_queue_info_value(&v).expect("queue info");
+        assert_eq!(info.queue_type.as_deref(), Some("p3"));
+    }
+
+    #[test]
+    fn test_queue_delay_clamps() {
+        // retryAfterSeconds:2 must not replay faster than the 15s floor.
+        let low = QoderQueueInfo {
+            retry_after_seconds: Some(2.0),
+            ..Default::default()
+        };
+        assert_eq!(low.delay_ms(false), MIN_QUEUE_RETRY_MS);
+        // Huge hints clamp to 60s.
+        let high = QoderQueueInfo {
+            wait_time: Some(600.0),
+            ..Default::default()
+        };
+        assert_eq!(high.delay_ms(false), MAX_QUEUE_RETRY_MS);
+        // Status-derived hints are floored at 30s even when the inference
+        // hint was smaller.
+        let status = QoderQueueStatus {
+            is_queued: Some(true),
+            retry_after_seconds: Some(2.0),
+            ..Default::default()
+        };
+        assert_eq!(status.delay_ms(true), STATUS_HINT_FLOOR_MS);
+        // waitTime is used when retryAfterSeconds is absent.
+        let wait_only = QoderQueueInfo {
+            wait_time: Some(45.0),
+            ..Default::default()
+        };
+        assert_eq!(wait_only.delay_ms(false), 45_000);
+    }
+
+    #[test]
+    fn test_qoder_queue_status_url_params() {
+        let url = qoder_queue_status_url(
+            "https://api3.qoder.sh",
+            Some("req-set-1"),
+            Some("auto"),
+            Some("p3"),
+        );
+        assert!(url.starts_with("https://api3.qoder.sh/algo/api/v2/service/ask/queue/status?"));
+        assert!(url.contains("requestSetId=req-set-1"));
+        assert!(url.contains("modelKey=auto"));
+        assert!(url.contains("queueType=p3"));
+        // Empty params are omitted.
+        let bare = qoder_queue_status_url("https://api3.qoder.sh", None, Some(""), None);
+        assert!(!bare.contains('?') || !bare.contains("modelKey"));
+    }
+
+    #[test]
+    fn test_parse_qoder_queue_status() {
+        let st = parse_qoder_queue_status(
+            r#"{"isQueued":true,"serviceAvailable":false,"modelKey":"auto","queueType":"p3","queueCount":3,"retryAfterSeconds":30}"#,
+        )
+        .expect("status parses");
+        assert_eq!(st.is_queued, Some(true));
+        assert_eq!(st.queue_count, Some(3.0));
+        assert_eq!(st.retry_after_seconds, Some(30.0));
+        // isQueued:false → ready.
+        let ready = parse_qoder_queue_status(r#"{"isQueued":false}"#).unwrap();
+        assert_eq!(ready.is_queued, Some(false));
+        // Missing isQueued → unusable endpoint.
+        assert!(parse_qoder_queue_status(r#"{"queueType":"p3"}"#).is_none());
+        assert!(parse_qoder_queue_status("garbage").is_none());
+    }
+
+    #[test]
+    fn test_is_qoder_queued_body_helper() {
+        assert!(is_qoder_queued_body(r#"{"code":"10605"}"#));
+        assert!(!is_qoder_queued_body(r#"{"code":"112"}"#));
+    }
+
+    // -----------------------------------------------------------------------
     // Gap 1: COSY RSA is SPKI + PKCS#1 v1.5 (JS cosy.js RSA_PKCS1_PADDING).
     // -----------------------------------------------------------------------
 
@@ -3354,10 +4013,15 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_billing_block_number_code_10605() {
+    fn test_detect_billing_block_number_code_10605_is_transient() {
+        // Numeric 10605 is equally a queue signal, not billing — the raw-body
+        // fallback must not match it either.
         let body = r#"{"statusCodeValue":429,"body":"{\"code\":10605,\"message\":\"throttle\"}"}"#;
         let result = detect_qoder_billing_block(body);
-        assert!(result.is_some(), "numeric code 10605 must be detected");
+        assert!(
+            result.is_none(),
+            "numeric code 10605 is transient queue capacity, not billing"
+        );
     }
 
     #[test]
