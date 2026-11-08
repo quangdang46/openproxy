@@ -546,8 +546,9 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
             }
             false
         }
-        // The capacity adapter's default pool model (oc/mimo-v2.5-free) is a
-        // multimodal free model (9router capabilities.js entry).
+        // The capacity adapter's default pool model (oc/mimo-v2.6-flash-free,
+        // legacy oc/mimo-v2.5-free upgraded) is a multimodal free model
+        // (9router capabilities.js entry).
         "audioInput" => entry_lower.starts_with("oc/mimo"),
         "videoInput" => entry_lower.starts_with("oc/mimo"),
         _ => false,

@@ -229,6 +229,9 @@ mod tests {
         let first = column_names(&conn, "apiKeys").unwrap();
         assert!(first.contains("createdAt"));
         assert!(first.contains("monthly_budget_usd"));
+        // Per-key access control columns land on pre-existing databases too.
+        assert!(first.contains("accessRestricted"));
+        assert!(first.contains("accessAllow"));
 
         // A second pass finds nothing left to do.
         sync_schema_from_tables(&conn).unwrap();

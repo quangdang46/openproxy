@@ -26,6 +26,10 @@ const TOOL_FORBIDDEN_FIELDS: &[&str] = &["strict"];
 const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
 const OPENCODE_GO_DEFAULT_PATH: &str = "/chat/completions";
+/// Responses-only models (Muse Spark, grok-4.6, gpt-5.6-luna, …) live on
+/// `/zen/go/v1/responses` even when a stale runtimeTransport leaks in
+/// (opencode-go.js:17,118-122).
+const OPENCODE_GO_RESPONSES_URL: &str = "https://opencode.ai/zen/go/v1/responses";
 
 /// The gate header the Zen gateway rejects a request without
 /// (`MissingSessionID`). 9router `open-sse/executors/opencode-go.js:12`.
@@ -170,7 +174,119 @@ impl OpenCodeGoExecutor {
         CLAUDE_FORMAT_MODELS.contains(&model)
     }
 
+    /// Strip a trailing thinking suffix `model(level)` and take the
+    /// vendor-prefix base — same normalization the request pipeline and
+    /// `isMuseSparkModel` apply before registry lookups.
+    fn base_model_id(model: &str) -> &str {
+        let mut clean = model.trim();
+        if let Some(open) = clean.rfind('(') {
+            if clean.ends_with(')')
+                && !clean[open + 1..clean.len() - 1].contains(['(', ')'])
+            {
+                clean = clean[..open].trim_end();
+            }
+        }
+        clean.rsplit('/').next().unwrap_or(clean)
+    }
+
+    /// `isMuseSparkModel` (providers/models/helpers.js) — local copy to
+    /// keep the executor free of a core::chat dependency.
+    fn is_muse_spark_model(model_id: &str) -> bool {
+        let base = Self::base_model_id(model_id);
+        let lower = base.to_lowercase();
+        let Some(after_muse) = lower.strip_prefix("muse") else {
+            return false;
+        };
+        let after_sep = after_muse
+            .strip_prefix(['-', '_'])
+            .unwrap_or(after_muse);
+        let Some(after_spark) = after_sep.strip_prefix("spark") else {
+            return false;
+        };
+        after_spark.is_empty() || after_spark.starts_with(['-', '_', ':', '.', ' ', '\t'])
+    }
+
+    /// `isResponsesModel` (opencode-go.js:44-48):
+    /// `getModelTargetFormat("opencode-go", model) === OPENAI_RESPONSES`.
+    /// A curated catalog `targetFormat` wins; unknown ids fall back to the
+    /// family regex (`/^(grok|gpt|muse[-_]?spark)/i` → responses).
+    fn is_responses_model(model: &str) -> bool {
+        let base = Self::base_model_id(model);
+        let catalog = crate::core::model::catalog::provider_catalog();
+        if let Some(entry) = catalog
+            .find_model("opencode-go", base)
+            .or_else(|| catalog.find_model("opencode-go", model.trim()))
+        {
+            match entry.target_format.as_deref() {
+                Some("openai-responses") => return true,
+                Some(_) => return false,
+                None => {}
+            }
+        }
+        let lower = base.to_lowercase();
+        lower.starts_with("grok") || lower.starts_with("gpt") || Self::is_muse_spark_model(base)
+    }
+
+    /// `transformRequest` responses branch (opencode-go.js:158-185):
+    /// `super.transformRequest` (param strip) runs first, then the
+    /// Responses normalization — input shape, output cap, reasoning,
+    /// stream/store, tools, item sanitation.
+    fn transform_responses_body(model: &str, body: &mut Value) {
+        super::strip_unsupported::strip_unsupported_params("opencode-go", model, body);
+        let Some(obj) = body.as_object_mut() else {
+            return;
+        };
+        if let Some(input) = obj.get("input").cloned() {
+            if let Some(normalized) = super::opencode::normalize_responses_input(&input) {
+                obj.insert("input".to_string(), Value::Array(normalized));
+            }
+        }
+        let input_ok = obj
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if !input_ok {
+            obj.insert(
+                "input".to_string(),
+                json!([{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "..." }] }]),
+            );
+        }
+        // Responses names the output cap max_output_tokens, not max_tokens.
+        if !obj.contains_key("max_output_tokens") {
+            let v = obj
+                .remove("max_completion_tokens")
+                .or_else(|| obj.remove("max_tokens"));
+            if let Some(v) = v {
+                obj.insert("max_output_tokens".to_string(), v);
+            }
+        } else {
+            obj.remove("max_tokens");
+            obj.remove("max_completion_tokens");
+        }
+        // reasoning_effort → reasoning{effort, summary:"auto"} (no level
+        // clamping on this lane — upstream opencode-go.js:173-179).
+        let effort = obj.remove("reasoning_effort");
+        let reasoning_absent = obj.get("reasoning").is_none();
+        if let (Some(e), true) = (effort, reasoning_absent) {
+            obj.insert(
+                "reasoning".to_string(),
+                json!({ "effort": e, "summary": "auto" }),
+            );
+        }
+        if let Some(r) = obj.get_mut("reasoning").and_then(Value::as_object_mut) {
+            r.entry("summary".to_string())
+                .or_insert(Value::String("auto".to_string()));
+        }
+        obj.insert("stream".to_string(), Value::Bool(true));
+        obj.insert("store".to_string(), Value::Bool(false));
+        super::opencode::normalize_responses_tools(obj);
+        super::opencode::sanitize_responses_items(obj);
+    }
+
     fn build_url(&self, model: &str) -> String {
+        if Self::is_responses_model(model) {
+            return OPENCODE_GO_RESPONSES_URL.to_string();
+        }
         let path = if Self::is_claude_format(model) {
             OPENCODE_GO_CLAUDE_PATH
         } else {
@@ -262,48 +378,33 @@ impl OpenCodeGoExecutor {
         &self,
         mut request: OpenCodeGoExecutionRequest,
     ) -> Result<OpenCodeGoExecutorResponse, OpenCodeGoExecutorError> {
-        // DECISION (bead openproxy-dgzj, JS e74db4d0): no
-        // `normalizeResponsesTools` equivalent is ported here, deliberately.
-        // The JS helper flattens Chat tool declarations into the Responses
-        // flat shape because the JS opencode-go executor POSTs Muse Spark
-        // bodies to `/zen/go/v1/responses`. This executor instead converts
-        // Responses `input` back to Chat `messages` (see below) and always
-        // POSTs to the Chat endpoints (`/messages` or `/chat/completions`),
-        // so a Chat→Responses tool flattening would be dead code on this
-        // path — the request never carries a Responses-shaped body upstream.
-        // The Chat→Responses tools[] mapping itself (nameless-skip +
-        // 128-char clamp) lives in the translator
-        // (`chat_to_openai_responses_request` in
-        // `core/translator/request/openai_responses.rs`, bead
-        // openproxy-ybo0) and is covered by its unit tests.
-        let url = self.build_url(&request.model);
-        // The client tool feeds the session seed, so it must be detected from
-        // the same headers the caller sent (9router passes `clientTool`
-        // through from its request pipeline).
-        let header_map: std::collections::HashMap<String, String> = request
-            .raw_headers
-            .iter()
-            .map(|(k, v)| (k.to_lowercase(), v.clone()))
-            .collect();
-        let client_tool =
-            crate::core::utils::client_detector::detect_client_tool(&header_map, &request.body)
-                .map(|t| t.as_str());
-        let gate_session = Self::resolve_gate_session(
-            &request.raw_headers,
-            &request.body,
-            &request.credentials.id,
-            client_tool,
-        );
-        let headers = self.build_headers(
-            &request.credentials,
-            request.stream,
-            &request.model,
-            &gate_session,
-        );
+        // Responses-only models (Muse Spark, grok-4.6, gpt-5.6-luna, …) POST
+        // to `/zen/go/v1/responses` with the Responses body shape intact —
+        // upstream opencode-go.js:44-48,118-122,158-185. Everything else
+        // keeps the Chat path below.
+        //
+        // SUPERSEDED DECISION (bead openproxy-4d5h.21, was openproxy-dgzj):
+        // this executor previously converted `input`→`messages` for EVERY
+        // model and always POSTed Chat endpoints, stripping `reasoning`.
+        // Upstream v0.5.111+ routes Responses models to /responses instead;
+        // the Chat→Responses tools[] mapping ported earlier now lives on
+        // that lane via `normalize_responses_tools` /
+        // `sanitize_responses_items` (shared with the opencode executor).
+        let effective_model = request
+            .body
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(request.model.as_str())
+            .to_string();
+        let responses_lane = Self::is_responses_model(&effective_model);
 
         // Normalize developer→system role for providers that reject role:developer (DeepSeek, etc.)
         normalize_developer_role(&mut request.body);
 
+        if responses_lane {
+            Self::transform_responses_body(&effective_model, &mut request.body);
+        } else {
         // Strip forbidden fields that Cloudflare Workers AI / Fireworks reject
         let mut needs_chat_format = false;
         if let Some(obj) = request.body.as_object_mut() {
@@ -395,6 +496,40 @@ impl OpenCodeGoExecutor {
         if needs_chat_format {
             tracing::debug!("Converted Responses API format to chat format for opencode-go");
         }
+        }
+
+        // Upstream DefaultExecutor.transformRequest ends with
+        // injectReasoningContent for every model (default.js:98-107).
+        crate::core::utils::reasoning_content_injector::inject_reasoning_content(
+            "opencode-go",
+            &effective_model,
+            &mut request.body,
+        );
+
+        let url = self.build_url(&effective_model);
+        // The client tool feeds the session seed, so it must be detected from
+        // the same headers the caller sent (9router passes `clientTool`
+        // through from its request pipeline).
+        let header_map: std::collections::HashMap<String, String> = request
+            .raw_headers
+            .iter()
+            .map(|(k, v)| (k.to_lowercase(), v.clone()))
+            .collect();
+        let client_tool =
+            crate::core::utils::client_detector::detect_client_tool(&header_map, &request.body)
+                .map(|t| t.as_str());
+        let gate_session = Self::resolve_gate_session(
+            &request.raw_headers,
+            &request.body,
+            &request.credentials.id,
+            client_tool,
+        );
+        let headers = self.build_headers(
+            &request.credentials,
+            request.stream,
+            &request.model,
+            &gate_session,
+        );
 
         let client = self.pool.get("opencode-go", request.proxy.as_ref())?;
         let response = client

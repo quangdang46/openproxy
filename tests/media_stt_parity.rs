@@ -45,6 +45,7 @@ async fn seeded_state(connections: Vec<ProviderConnection>) -> AppState {
             created_at: None,
             extra: BTreeMap::new(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
         state.provider_connections = connections;
         // Auth is not under test here — disable the login guard so a request

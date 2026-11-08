@@ -47,6 +47,7 @@ fn active_key(key: &str) -> ApiKey {
         created_at: None,
         extra: BTreeMap::new(),
         monthly_budget_usd: None,
+        access: Default::default(),
     }
 }
 
@@ -427,13 +428,12 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
         .unwrap();
     let (status, json) = response_json(delete).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        json,
-        json!({
-            "success": true,
-            "message": "openproxy model block removed"
-        })
-    );
+    assert_eq!(json["success"], true);
+    assert_eq!(json["profile"], "default");
+    assert_eq!(json["removed"]["model"], true);
+    assert_eq!(json["removed"]["delegation"], false);
+    assert_eq!(json["removed"]["stt"], false);
+    assert_eq!(json["message"], "openproxy model blocks removed");
 
     let reset_yaml = std::fs::read_to_string(&config_path).unwrap();
     assert!(!reset_yaml.contains("model:"));
@@ -441,6 +441,271 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
     assert_eq!(
         std::fs::read_to_string(hermes_env_path(home.path())).unwrap(),
         "OPENAI_API_KEY=sk-test\n"
+    );
+}
+
+fn hermes_profile_dir(home: &Path, name: &str) -> PathBuf {
+    home.join(".hermes").join("profiles").join(name)
+}
+
+#[tokio::test]
+async fn hermes_profiles_route_lists_default_and_named_profiles() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    // Default profile config + a named profile with an identity file and display_name.
+    let default_config = hermes_config_path(home.path());
+    std::fs::create_dir_all(default_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &default_config,
+        "model:\n  default: \"oa/gpt-4.1\"\n  provider: \"custom\"\n  base_url: \"http://127.0.0.1:4623/v1\"\n",
+    )
+    .unwrap();
+
+    let worker = hermes_profile_dir(home.path(), "worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::fs::write(
+        worker.join("config.yaml"),
+        "model:\n  default: \"anthropic/claude\"\n  provider: \"anthropic\"\n",
+    )
+    .unwrap();
+    std::fs::write(worker.join("profile.yaml"), "display_name: Worker Bot\n").unwrap();
+
+    // A bare directory without identity files must be ignored (Hermes ignores it too).
+    let bare = hermes_profile_dir(home.path(), "bare");
+    std::fs::create_dir_all(&bare).unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/hermes-profiles",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    let profiles = json["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+
+    let default = &profiles[0];
+    assert_eq!(default["name"], "default");
+    assert_eq!(default["isDefault"], true);
+    assert_eq!(default["command"], "hermes");
+    assert_eq!(default["model"], "oa/gpt-4.1");
+    assert_eq!(default["hasOpenProxy"], true);
+
+    let named = &profiles[1];
+    assert_eq!(named["name"], "worker");
+    assert_eq!(named["isDefault"], false);
+    assert_eq!(named["displayName"], "Worker Bot");
+    assert_eq!(named["command"], "hermes -p worker");
+    assert_eq!(named["model"], "anthropic/claude");
+    assert_eq!(named["hasOpenProxy"], false);
+}
+
+#[tokio::test]
+async fn hermes_settings_profile_selections_audio_and_scoped_reset() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    // Default profile exists so `installed` resolves true.
+    let default_config = hermes_config_path(home.path());
+    std::fs::create_dir_all(default_config.parent().unwrap()).unwrap();
+    std::fs::write(&default_config, "foo: bar\n").unwrap();
+
+    let worker = hermes_profile_dir(home.path(), "worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::fs::write(worker.join("config.yaml"), "keep: me\n").unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+
+    // Apply to a named profile: default + delegation + aux role + audio STT.
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/hermes-settings",
+            Body::from(
+                r#"{
+                    "profile": "worker",
+                    "baseUrl": "http://127.0.0.1:4623",
+                    "apiKey": "sk-test",
+                    "selections": [
+                        {"role": "default", "model": "oa/gpt-4.1"},
+                        {"role": "delegation", "model": "oa/gpt-4.1-mini"},
+                        {"role": "vision", "model": "oa/gpt-4.1-vision"}
+                    ],
+                    "audio": {"enabled": true, "model": "groq/whisper-large-v3"}
+                }"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["profile"]["name"], "worker");
+    assert_eq!(json["sttOpenProxy"], true);
+
+    let worker_config = worker.join("config.yaml");
+    let yaml = std::fs::read_to_string(&worker_config).unwrap();
+    assert!(yaml.contains("default: \"oa/gpt-4.1\""));
+    assert!(yaml.contains("delegation:"));
+    assert!(yaml.contains("model: \"oa/gpt-4.1-mini\""));
+    assert!(yaml.contains("  vision:"));
+    assert!(yaml.contains("model: \"oa/gpt-4.1-vision\""));
+    assert!(yaml.contains("stt:"));
+    assert!(yaml.contains("provider: \"openai\""));
+    assert!(yaml.contains("model: \"groq/whisper-large-v3\""));
+    assert!(yaml.contains("keep: me"));
+    assert_eq!(
+        std::fs::read_to_string(worker.join(".env")).unwrap(),
+        "OPENAI_API_KEY=sk-test\n"
+    );
+
+    // GET ?profile=worker reports the per-profile settings.
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/hermes-settings?profile=worker",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["profile"]["name"], "worker");
+    assert_eq!(json["settings"]["model"]["default"], "oa/gpt-4.1");
+    assert_eq!(json["settings"]["delegation"]["model"], "oa/gpt-4.1-mini");
+    assert_eq!(
+        json["settings"]["auxiliary"]["vision"]["model"],
+        "oa/gpt-4.1-vision"
+    );
+    assert_eq!(json["settings"]["stt"]["model"], "groq/whisper-large-v3");
+    assert_eq!(json["hasOpenProxy"], true);
+    assert_eq!(json["hasOpenProxyStt"], true);
+
+    // Default profile untouched.
+    let default_yaml = std::fs::read_to_string(&default_config).unwrap();
+    assert_eq!(default_yaml.trim(), "foo: bar");
+
+    // Scoped reset removes only the openproxy blocks from the worker profile.
+    let delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/hermes-settings",
+            Body::from(r#"{"profile": "worker"}"#),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["removed"]["model"], true);
+    assert_eq!(json["removed"]["delegation"], true);
+    assert_eq!(json["removed"]["auxiliary"], json!(["vision"]));
+    assert_eq!(json["removed"]["stt"], true);
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("profile \"worker\""));
+
+    let reset_yaml = std::fs::read_to_string(&worker_config).unwrap();
+    assert_eq!(reset_yaml.trim(), "keep: me");
+}
+
+#[tokio::test]
+async fn hermes_settings_apply_to_all_refreshes_only_custom_profiles() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    // default: custom provider → refreshed, keeps its own model.
+    let default_config = hermes_config_path(home.path());
+    std::fs::create_dir_all(default_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &default_config,
+        "model:\n  default: \"oa/gpt-4.1\"\n  provider: \"custom\"\n  base_url: \"http://old.local/v1\"\n",
+    )
+    .unwrap();
+
+    // worker: custom provider with delegation → both blocks refreshed.
+    let worker = hermes_profile_dir(home.path(), "worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::fs::write(
+        worker.join("config.yaml"),
+        "model:\n  default: \"oa/gpt-4.1-mini\"\n  provider: \"custom\"\n  base_url: \"http://old.local/v1\"\ndelegation:\n  model: \"oa/gpt-4.1-nano\"\n  provider: \"custom\"\n  base_url: \"http://old.local/v1\"\n",
+    )
+    .unwrap();
+
+    // foreign: non-custom provider → reported skipped, never rewritten.
+    let foreign = hermes_profile_dir(home.path(), "foreign");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(
+        foreign.join("config.yaml"),
+        "model:\n  default: \"claude-x\"\n  provider: \"anthropic\"\n",
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/hermes-settings",
+            Body::from(
+                r#"{"applyToAll": true, "baseUrl": "http://127.0.0.1:4623", "apiKey": "sk-bulk", "model": "oa/gpt-4.1"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["bulk"], true);
+    assert_eq!(json["updated"], 2);
+    assert_eq!(json["skipped"], 1);
+
+    let results = json["results"].as_array().unwrap();
+    let foreign_result = results.iter().find(|r| r["profile"] == "foreign").unwrap();
+    assert_eq!(foreign_result["status"], "skipped");
+    assert!(foreign_result["reason"]
+        .as_str()
+        .unwrap()
+        .contains("provider \"anthropic\""));
+
+    // Models stay per-profile; only the endpoint + key are refreshed.
+    let default_yaml = std::fs::read_to_string(&default_config).unwrap();
+    assert!(default_yaml.contains("default: \"oa/gpt-4.1\""));
+    assert!(default_yaml.contains("base_url: \"http://127.0.0.1:4623/v1\""));
+    assert!(!default_yaml.contains("old.local"));
+
+    let worker_yaml = std::fs::read_to_string(worker.join("config.yaml")).unwrap();
+    assert!(worker_yaml.contains("default: \"oa/gpt-4.1-mini\""));
+    assert!(worker_yaml.contains("model: \"oa/gpt-4.1-nano\""));
+    assert_eq!(worker_yaml.matches("http://127.0.0.1:4623/v1").count(), 2);
+    assert_eq!(
+        std::fs::read_to_string(worker.join(".env")).unwrap(),
+        "OPENAI_API_KEY=sk-bulk\n"
+    );
+
+    // Foreign profile config untouched.
+    assert_eq!(
+        std::fs::read_to_string(foreign.join("config.yaml"))
+            .unwrap()
+            .trim(),
+        "model:\n  default: \"claude-x\"\n  provider: \"anthropic\""
     );
 }
 
@@ -1389,4 +1654,84 @@ async fn openclaw_settings_post_get_and_delete_match_openproxy_file_behavior() {
     let agents = json["agents"].as_array().unwrap();
     assert_eq!(agents[0]["currentModel"], "oa/gpt-4.1-mini");
     assert_eq!(agents[1]["currentModel"], "oa/gpt-4.1");
+}
+
+fn deepseek_config_path(home: &Path) -> PathBuf {
+    home.join(".deepseek").join("config.toml")
+}
+
+/// 9router commit 06eda8b: the deepseek-tui settings write must resolve the
+/// first active dashboard API key instead of the literal "sk_9router"
+/// placeholder, which was never a real key and caused upstream 401s (#4399).
+#[tokio::test]
+async fn deepseek_tui_settings_post_writes_first_active_api_key() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/deepseek-tui-settings",
+            Body::from(
+                json!({
+                    "baseUrl": "http://127.0.0.1:4623",
+                    "model": "gpt-4o"
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+
+    let written = std::fs::read_to_string(deepseek_config_path(home.path())).unwrap();
+    // The seeded active key ("valid-bearer") is written, never the placeholder.
+    assert!(written.contains("api_key = \"valid-bearer\""), "{written}");
+    assert!(!written.contains("sk_9router"), "{written}");
+    assert!(written.contains("base_url = \"http://127.0.0.1:4623/v1\""));
+}
+
+/// A caller-supplied key still wins over the resolved dashboard key.
+#[tokio::test]
+async fn deepseek_tui_settings_post_prefers_caller_api_key() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/deepseek-tui-settings",
+            Body::from(
+                json!({
+                    "baseUrl": "http://127.0.0.1:4623/v1",
+                    "apiKey": "caller-chosen-key",
+                    "model": "gpt-4o"
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let (status, _) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let written = std::fs::read_to_string(deepseek_config_path(home.path())).unwrap();
+    assert!(
+        written.contains("api_key = \"caller-chosen-key\""),
+        "{written}"
+    );
 }

@@ -122,6 +122,7 @@ async fn test_state(connections: Vec<ProviderConnection>) -> AppState {
             created_at: None,
             extra: BTreeMap::new(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
     })
     .await
@@ -866,6 +867,7 @@ async fn test_client_info_provider_from_settings() {
             created_at: None,
             extra: BTreeMap::new(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
     })
     .await

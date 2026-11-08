@@ -25,6 +25,7 @@ fn api_key(id: &str, name: &str, key: &str) -> ApiKey {
         created_at: None,
         extra: BTreeMap::new(),
         monthly_budget_usd: None,
+        access: Default::default(),
     }
 }
 

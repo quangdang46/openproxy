@@ -15,6 +15,8 @@ use tokio::{fs, process::Command};
 
 use crate::server::state::AppState;
 
+use super::shared::resolve_cli_api_key;
+
 const DEFAULT_CONFIG: &str = "provider = \"deepseek\"\n";
 
 pub fn routes() -> Router<AppState> {
@@ -92,7 +94,7 @@ async fn save_deepseek_tui_settings(
             .into_response();
     }
 
-    match write_deepseek_config(&body).await {
+    match write_deepseek_config(&state, &body).await {
         Ok(()) => Json(json!({
             "success": true,
             "message": "DeepSeek TUI settings applied successfully!",
@@ -222,7 +224,10 @@ fn has_openproxy_config(config: &Option<Value>) -> bool {
         || base_url.contains("openproxy")
 }
 
-async fn write_deepseek_config(body: &SaveDeepSeekSettingsRequest) -> AnyhowResult<()> {
+async fn write_deepseek_config(
+    state: &AppState,
+    body: &SaveDeepSeekSettingsRequest,
+) -> AnyhowResult<()> {
     let config_path = config_path();
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).await?;
@@ -233,11 +238,10 @@ async fn write_deepseek_config(body: &SaveDeepSeekSettingsRequest) -> AnyhowResu
     } else {
         format!("{}/v1", body.base_url)
     };
-    let api_key = body
-        .api_key
-        .clone()
-        .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| "sk_9router".to_string());
+    // 9router commit 06eda8b / resolveApiKey.js: caller key → first active
+    // dashboard API key → "". The "sk_9router" placeholder is NEVER written —
+    // it was never a real key and causes upstream 401s (#4399).
+    let api_key = resolve_cli_api_key(state, body.api_key.as_deref());
 
     let config = format!(
         "provider = \"openai\"\n\

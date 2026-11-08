@@ -8,6 +8,7 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import CacheStatsCard from "@/components/CacheStatsCard";
+import KeyAccessControls, { type KeyAccess } from "@/components/KeyAccessControls";
 import { CAVEMAN_LEVELS, WENYAN_LOCALES } from "@/shared/constants/caveman";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 
@@ -24,6 +25,7 @@ interface ApiKey {
   createdAt: string;
   isActive?: boolean;
   monthlyBudgetUsd?: number | null;
+  access?: KeyAccess;
 }
 
 interface Status {
@@ -175,6 +177,9 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   // browser confirm() and matches the rest of the dashboard chrome).
   const [deleteKeyTarget, setDeleteKeyTarget] = useState<ApiKey | null>(null);
   const [pauseKeyTarget, setPauseKeyTarget] = useState<ApiKey | null>(null);
+  // "Restrict access" confirmation — enabling it can lock a key out of
+  // everything until entries are added, so it asks first (9router parity).
+  const [restrictKeyTarget, setRestrictKeyTarget] = useState<ApiKey | null>(null);
 
   const notify = useNotificationStore();
   const { copied, copy } = useCopyToClipboard();
@@ -940,6 +945,32 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     }
   };
 
+  // Save a key's access (restricted flag + allow list) — PUT /api/keys/{id}
+  // with `{ access }`, same as 9router EndpointPageClient.js:679-695.
+  const handleUpdateKeyAccess = async (id: string, access: KeyAccess): Promise<void> => {
+    try {
+      const res = await fetch(`/api/keys/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.key) {
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === id ? { ...k, access: data.key.access } : k,
+          ),
+        );
+      } else {
+        console.log("Error updating key access:", data.error || res.status);
+        notify.error(data.error || "Failed to update key access");
+      }
+    } catch (error) {
+      console.log("Error updating key access:", error);
+      notify.error("Failed to update key access");
+    }
+  };
+
   const maskKey = (fullKey: string): string => {
     if (!fullKey) return "";
     return fullKey.length > 8 ? fullKey.slice(0, 8) + "..." : fullKey;
@@ -1377,6 +1408,11 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
+                  <KeyAccessControls
+                    apiKey={key}
+                    onChange={(access) => handleUpdateKeyAccess(key.id, access)}
+                    onRequestRestrict={() => setRestrictKeyTarget(key)}
+                  />
                 </div>
                 <div className="flex items-center gap-2">
                   <Toggle
@@ -1645,6 +1681,28 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
         message={deleteKeyTarget ? <>Delete API key <code>{deleteKeyTarget.name}</code>? This cannot be undone.</> : null}
         confirmText="Delete"
         variant="danger"
+      />
+
+      <ConfirmModal
+        isOpen={!!restrictKeyTarget}
+        onClose={() => setRestrictKeyTarget(null)}
+        onConfirm={async () => {
+          if (!restrictKeyTarget) return;
+          await handleUpdateKeyAccess(restrictKeyTarget.id, {
+            restricted: true,
+            allow: restrictKeyTarget.access?.allow || [],
+          });
+          setRestrictKeyTarget(null);
+        }}
+        title="Restrict API Key"
+        message={
+          restrictKeyTarget ? (
+            <span className="whitespace-pre-line">
+              {`Restrict API key "${restrictKeyTarget.name}"?\n\nIt will only be able to call the combos and models you add. Until you add one, it can call nothing.`}
+            </span>
+          ) : null
+        }
+        confirmText="Restrict"
       />
 
       <ConfirmModal

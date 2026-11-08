@@ -21,6 +21,9 @@ pub enum ToolCmd {
     Show {
         /// One of `claude`, `codex`, `copilot`, `openclaw`, `hermes`, `cowork`.
         name: String,
+        /// Hermes profile to inspect (`default` when omitted; hermes only).
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Apply settings to a per-tool integration. Use `--dry-run` to preview
     /// the JSON body without sending it.
@@ -36,12 +39,25 @@ pub enum ToolCmd {
         /// Base URL (defaults to the running server's URL).
         #[arg(long)]
         endpoint: Option<String>,
+        /// Hermes profile to configure (`default` when omitted; hermes only).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Hermes only: refresh endpoint + API key on every profile (models stay per-profile).
+        #[arg(long)]
+        apply_all: bool,
         /// Print the JSON we would POST without actually sending it.
         #[arg(long)]
         dry_run: bool,
     },
     /// Reset / revert a per-tool integration (DELETE the saved settings).
-    Revert { name: String },
+    Revert {
+        name: String,
+        /// Hermes profile to reset (`default` when omitted; hermes only).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// List Hermes profiles (default home + ~/.hermes/profiles/*).
+    HermesProfiles,
     /// Execute an arbitrary command via `/api/cli-tools/execute`.
     Execute {
         /// Command and arguments. Pass `--` before args containing flags.
@@ -87,15 +103,23 @@ pub async fn run(cmd: ToolCmd, cfg: &ResolvedConfig, ctx: OutputCtx) -> anyhow::
     };
     match cmd {
         ToolCmd::List => run_list(&rt, ctx).await,
-        ToolCmd::Show { name } => run_show(&rt, ctx, &name).await,
+        ToolCmd::Show { name, profile } => run_show(&rt, ctx, &name, profile).await,
         ToolCmd::Apply {
             name,
             model,
             api_key,
             endpoint,
+            profile,
+            apply_all,
             dry_run,
-        } => run_apply(&rt, ctx, &name, model, api_key, endpoint, dry_run).await,
-        ToolCmd::Revert { name } => run_revert(&rt, ctx, &name).await,
+        } => {
+            run_apply(
+                &rt, ctx, &name, model, api_key, endpoint, profile, apply_all, dry_run,
+            )
+            .await
+        }
+        ToolCmd::Revert { name, profile } => run_revert(&rt, ctx, &name, profile).await,
+        ToolCmd::HermesProfiles => run_hermes_profiles(&rt, ctx).await,
         ToolCmd::Execute { argv } => run_execute(&rt, ctx, argv).await,
         ToolCmd::Run { name, argv } => run_run(&rt, ctx, &name, argv).await,
         ToolCmd::Doc => run_help(&rt, ctx).await,
@@ -152,7 +176,59 @@ async fn run_list(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
     }
 }
 
-async fn run_show(rt: &Runtime, ctx: OutputCtx, name: &str) -> anyhow::Result<i32> {
+/// `openproxy tool hermes-profiles` — list every Hermes profile on this machine
+/// (default home + ~/.hermes/profiles/*), mirroring the dashboard card and the
+/// 9router CLI "Profile" picker.
+async fn run_hermes_profiles(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
+    match rt.get_json("/api/cli-tools/hermes-profiles").await {
+        Ok(payload) => {
+            if ctx.is_robot() {
+                emit_robot("openproxy.v1.tool.hermes_profiles", payload)?;
+            } else {
+                let profiles = payload
+                    .get("profiles")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for profile in &profiles {
+                    let name = profile
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let state = if profile
+                        .get("hasOpenProxy")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        "openproxy ✓".to_string()
+                    } else if profile.get("baseUrl").and_then(Value::as_str).is_some() {
+                        format!(
+                            "other: {}",
+                            profile.get("baseUrl").and_then(Value::as_str).unwrap_or("")
+                        )
+                    } else {
+                        "not configured".to_string()
+                    };
+                    let model = profile
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(|m| format!(" · {m}"))
+                        .unwrap_or_default();
+                    humanln(ctx, format!("{name} — {state}{model}"));
+                }
+            }
+            Ok(0)
+        }
+        Err(e) => rt_error_to_exit(ctx, e),
+    }
+}
+
+async fn run_show(
+    rt: &Runtime,
+    ctx: OutputCtx,
+    name: &str,
+    profile: Option<String>,
+) -> anyhow::Result<i32> {
     let Some(path) = settings_path(name) else {
         return Ok(emit_error(
             ctx,
@@ -162,6 +238,11 @@ async fn run_show(rt: &Runtime, ctx: OutputCtx, name: &str) -> anyhow::Result<i3
                 SUPPORTED_TOOLS.join(", ")
             ),
         )?);
+    };
+    // Hermes settings accept `?profile=`; other tools ignore unknown query params.
+    let path = match profile.filter(|p| !p.is_empty() && name.eq_ignore_ascii_case("hermes")) {
+        Some(p) => format!("{path}?profile={}", urlencoding::encode(&p)),
+        None => path,
     };
     match rt.get_json(&path).await {
         Ok(payload) => {
@@ -186,6 +267,8 @@ async fn run_apply(
     model: Option<String>,
     api_key: Option<String>,
     endpoint: Option<String>,
+    profile: Option<String>,
+    apply_all: bool,
     dry_run: bool,
 ) -> anyhow::Result<i32> {
     let Some(path) = settings_path(name) else {
@@ -198,7 +281,18 @@ async fn run_apply(
             ),
         )?);
     };
-    let body = build_apply_body(name, &model, api_key.as_deref(), endpoint.as_deref());
+    let mut body = build_apply_body(name, &model, api_key.as_deref(), endpoint.as_deref());
+    // Hermes settings accept `profile` / `applyToAll` in the JSON body.
+    if name.eq_ignore_ascii_case("hermes") {
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(p) = profile.filter(|p| !p.is_empty()) {
+                obj.insert("profile".to_string(), Value::String(p));
+            }
+            if apply_all {
+                obj.insert("applyToAll".to_string(), Value::Bool(true));
+            }
+        }
+    }
 
     if dry_run {
         let preview = json!({"path": path, "body": body});
@@ -286,11 +380,26 @@ pub(crate) fn build_apply_body(
     }
 }
 
-async fn run_revert(rt: &Runtime, ctx: OutputCtx, name: &str) -> anyhow::Result<i32> {
+async fn run_revert(
+    rt: &Runtime,
+    ctx: OutputCtx,
+    name: &str,
+    profile: Option<String>,
+) -> anyhow::Result<i32> {
     let Some(path) = settings_path(name) else {
         return Ok(emit_error(ctx, "usage", &format!("unknown tool `{name}`"))?);
     };
-    match rt.delete_json(&path).await {
+    // Hermes DELETE accepts an optional JSON body carrying `profile`.
+    let result = if name.eq_ignore_ascii_case("hermes") {
+        rt.delete_json_body(
+            &path,
+            &json!({"profile": profile.filter(|p| !p.is_empty()).unwrap_or_else(|| "default".to_string())}),
+        )
+        .await
+    } else {
+        rt.delete_json(&path).await
+    };
+    match result {
         Ok(payload) => {
             if ctx.is_robot() {
                 emit_robot("openproxy.v1.tool.revert", payload)?;

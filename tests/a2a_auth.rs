@@ -28,6 +28,7 @@ async fn app_state() -> AppState {
             created_at: None,
             extra: Default::default(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
     })
     .await

@@ -40,6 +40,7 @@ async fn app_state() -> AppState {
             created_at: None,
             extra: Default::default(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
     })
     .await
@@ -324,6 +325,7 @@ async fn seeded_state_with_credentials() -> AppState {
             created_at: None,
             extra: Default::default(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
     })
     .await

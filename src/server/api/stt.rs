@@ -38,7 +38,7 @@ use tracing::debug;
 use tokio::io::AsyncReadExt;
 
 use crate::core::model::{get_model_info, ModelRouteKind};
-use crate::server::auth::require_api_key_with_reload;
+use crate::server::auth::{extract_api_key, require_api_key_with_reload};
 use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection};
 
@@ -253,6 +253,23 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
 
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(&req.model, &snapshot);
+
+    // Per-key access control (9router stt.js:69 enforceKeyAccessResolved):
+    // gate on the resolved provider/model before any credential lookup.
+    let key_access_ctx = crate::core::key_access::context_for_presented_key(
+        extract_api_key(&headers).as_deref(),
+        &snapshot,
+    );
+    if let Err(message) = crate::core::key_access::enforce_key_access_resolved(
+        key_access_ctx.as_ref(),
+        &req.model,
+        resolved.provider.as_deref(),
+        Some(resolved.model.as_str()),
+        &snapshot,
+    ) {
+        return with_cors_response(json_error(StatusCode::FORBIDDEN, &message));
+    }
+
     match resolved.route_kind {
         ModelRouteKind::Combo => with_cors_response(json_error(
             StatusCode::BAD_REQUEST,

@@ -146,7 +146,7 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
     // API keys
     let api_keys: Vec<Value> = {
         let mut stmt = conn.prepare(
-            "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd FROM apiKeys",
+            "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd, accessRestricted, accessAllow FROM apiKeys",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -159,10 +159,19 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
                 .unwrap_or(None);
             let created_at: String = row.get(5)?;
             let monthly_budget_usd: Option<f64> = row.get(6)?;
+            let access_restricted: Option<i64> = row.get(7)?;
+            let access_allow: Option<String> = row.get(8)?;
+            // Rebuild the `access` object the same way the repo does, so a
+            // snapshot round-trip preserves per-key access control.
+            let access = crate::core::key_access::key_access_from_columns(
+                access_restricted,
+                access_allow.as_deref(),
+            );
             Ok(json!({
                 "id": id, "key": key, "name": name, "machineId": machine_id,
                 "isActive": is_active, "createdAt": created_at,
                 "monthlyBudgetUsd": monthly_budget_usd,
+                "access": access,
             }))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?

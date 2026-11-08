@@ -382,6 +382,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "sambanova"
                 | "nscale"
                 | "baseten"
+                | "runcrate"
                 | "nous"
                 | "nous-research"
                 | "glhf"
@@ -732,6 +733,13 @@ async fn fetch_provider_models_response(
                 "https://inference.baseten.co/v1/models",
             )
             .await
+        }
+        // runcrate's /v1/models is public (answers 200 for any key), but it
+        // still returns the real catalog — fine for import; only credential
+        // validation must use the billing balance endpoint.
+        "runcrate" => {
+            fetch_first_party_openai_style_models(connection, "https://api.runcrate.ai/v1/models")
+                .await
         }
         "nous" | "nous-research" => fetch_nous_models(connection).await,
         "glhf" => {

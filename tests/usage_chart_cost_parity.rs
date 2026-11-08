@@ -62,6 +62,7 @@ async fn build_test_app() -> axum::Router {
             created_at: None,
             extra: Default::default(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
         state.settings.require_login = false;
         state.provider_nodes = vec![ProviderNode {

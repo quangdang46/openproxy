@@ -222,6 +222,15 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("laguna-s-2.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 32000 })),
             ("laguna-xs-2.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 })),
         ]));
+        // Upstream v0.5.111+ PROVIDER_CAPABILITIES["opencode"] (free lane,
+        // /inference/v1): mimo-v2.6-flash-free takes the full OpenAI
+        // reasoning_effort enum verbatim; deepseek-v4.1-flash-free's backend
+        // rejects requests above ~330k prompt tokens (issue #5097), so the
+        // published window is capped at 330000.
+        table.insert("opencode", HashMap::from([
+            ("mimo-v2.6-flash-free", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1048576, "maxOutput": 131072 })),
+            ("deepseek-v4.1-flash-free", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 330000, "maxOutput": 128000 })),
+        ]));
         table
     });
 
@@ -348,6 +357,14 @@ static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::ne
         (
             "muse-spark-1.3-contributor-free",
             serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        // glm-5.3-flash-free (OpenCode free lane): the /inference/v1 backend
+        // validates the body strictly — the zai `thinking` object answers 400
+        // "unknown field thinking" while reasoning_effort is accepted, so it
+        // resolves to the openai shape (upstream capabilities.js exact entry).
+        (
+            "glm-5.3-flash-free",
+            serde_json::json!({ "vision": true, "videoInput": true, "pdf": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 128000 }),
         ),
     ])
 });
@@ -727,7 +744,7 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
 
 /// JS matchPattern: `*` wildcards, anchored to the full model id,
 /// case-insensitive.
-fn match_pattern(pattern: &str, model: &str) -> bool {
+pub(crate) fn match_pattern(pattern: &str, model: &str) -> bool {
     let model_lower = model.to_ascii_lowercase();
     let parts: Vec<&str> = pattern.split('*').collect();
     let mut cursor = 0usize;

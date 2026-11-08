@@ -21,3 +21,4 @@ export { default as BaseUrlSelect } from "./BaseUrlSelect";
 export { default as ApiKeySelect } from "./ApiKeySelect";
 export { matchKnownEndpoint } from "./cliEndpointMatch";
 export { default as ToolSummaryCard } from "./ToolSummaryCard";
+export { default as GenericCliToolCard } from "./GenericCliToolCard";

@@ -407,6 +407,49 @@ mod tests {
         assert_eq!(m.kind, "llm");
     }
 
+    // Bead openproxy-4d5h.39: runcrate (9router v0.5.111 registry/runcrate.js,
+    // alias "runcrate", uiAlias/aliases "rc") must be registered with its six
+    // upstream models so /dashboard/providers lists Runcrate.
+    #[test]
+    fn runcrate_registered_in_static_catalog() {
+        let catalog = provider_catalog();
+
+        let provider = catalog
+            .provider_info("runcrate")
+            .expect("runcrate should have a provider entry in provider_catalog.json");
+        assert_eq!(provider.alias, "runcrate");
+        assert_eq!(provider.service_kinds, vec!["llm"]);
+
+        assert_eq!(
+            catalog.static_alias_for_provider("runcrate"),
+            Some("runcrate")
+        );
+
+        let models = catalog
+            .models_for_alias("runcrate")
+            .expect("runcrate should have models in provider_catalog.json");
+        assert_eq!(models.len(), 6, "expected the 6-model registry list");
+        for id in [
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "zai-org/GLM-5.3",
+            "zai-org/GLM-5.3-Flash",
+            "Qwen/Qwen3.8-Flash",
+            "openai/gpt-oss-120b",
+        ] {
+            let m = catalog
+                .find_model("runcrate", id)
+                .unwrap_or_else(|| panic!("runcrate/{id} should resolve"));
+            assert_eq!(m.kind, "llm");
+        }
+        assert_eq!(
+            catalog
+                .find_model("runcrate", "zai-org/GLM-5.3")
+                .and_then(|m| m.name.as_deref()),
+            Some("GLM 5.3")
+        );
+    }
+
     // providerIdToAlias must resolve provider ids to the JS aliases, and
     // find_model must reach models through them (bead .46).
     #[test]

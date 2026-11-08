@@ -69,13 +69,17 @@ fn skip_dynamic_fetch(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value == "1")
 }
 
-pub async fn list_default_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn list_default_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let skip = skip_dynamic_fetch(&headers);
-    list_models_for_kinds(state, &[LLM_KIND], skip).await
+    list_models_for_kinds(state, headers, &[LLM_KIND], skip).await
 }
 
 pub async fn list_models_by_kind(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(kind): Path<String>,
 ) -> Response {
     let kind_filter = match kind.as_str() {
@@ -88,10 +92,10 @@ pub async fn list_models_by_kind(
         // 9router's `KIND_SLUG_MAP[identifier]` is simply undefined for a
         // single segment that is not a kind slug, so the request falls through
         // to the id lookup — `GET /v1/models/gpt-4o` is a model, not a typo.
-        _ => return model_lookup_response(&state, &kind).await,
+        _ => return model_lookup_response(&state, &headers, &kind).await,
     };
 
-    list_models_for_kinds(state, &kind_filter, false).await
+    list_models_for_kinds(state, headers, &kind_filter, false).await
 }
 
 /// GET /v1/models/{provider}/{model} — single-model lookup.
@@ -101,14 +105,23 @@ pub async fn list_models_by_kind(
 /// `id`/`owned_by` off the top level (9router `[...model]/route.js:52-77`).
 pub async fn get_model_by_id(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((provider, model)): Path<(String, String)>,
 ) -> Response {
-    model_lookup_response(&state, &format!("{provider}/{model}")).await
+    model_lookup_response(&state, &headers, &format!("{provider}/{model}")).await
 }
 
-async fn model_lookup_response(state: &AppState, identifier: &str) -> Response {
+async fn model_lookup_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    identifier: &str,
+) -> Response {
     let snapshot = state.db.snapshot();
-    let models = build_models_list(state, &snapshot, &[LLM_KIND], false).await;
+    let models = filter_models_for_key(
+        &snapshot,
+        headers,
+        build_models_list(state, &snapshot, &[LLM_KIND], false).await,
+    );
 
     match models.into_iter().find(|card| card.id == identifier) {
         Some(card) => with_cors_response(Json(card).into_response()),
@@ -129,11 +142,16 @@ async fn model_lookup_response(state: &AppState, identifier: &str) -> Response {
 
 async fn list_models_for_kinds(
     state: AppState,
+    headers: HeaderMap,
     kind_filter: &[&str],
     skip_dynamic_fetch: bool,
 ) -> Response {
     let snapshot = state.db.snapshot();
-    let data = build_models_list(&state, &snapshot, kind_filter, skip_dynamic_fetch).await;
+    let data = filter_models_for_key(
+        &snapshot,
+        &headers,
+        build_models_list(&state, &snapshot, kind_filter, skip_dynamic_fetch).await,
+    );
 
     with_cors_response(
         Json(ModelListResponse {
@@ -142,6 +160,34 @@ async fn list_models_for_kinds(
         })
         .into_response(),
     )
+}
+
+/// `/v1/models`: a restricted key sees only the combos and models it may
+/// call (9router `filterModelsListForKey`, models/route.js:667). Unrestricted
+/// requests — no key, unknown key, or unrestricted key — get the full list.
+fn filter_models_for_key(
+    snapshot: &AppDb,
+    headers: &HeaderMap,
+    mut data: Vec<ModelCard>,
+) -> Vec<ModelCard> {
+    let ctx = crate::core::key_access::context_for_presented_key(
+        crate::server::auth::extract_api_key(headers).as_deref(),
+        snapshot,
+    );
+    let Some(ctx) = ctx else {
+        return data;
+    };
+    let sets = crate::core::key_access::allow_sets(&ctx, snapshot);
+    data.retain(|card| {
+        crate::core::key_access::model_card_allowed(
+            &sets,
+            &card.id,
+            &card.owned_by,
+            card.kind.as_deref(),
+            snapshot,
+        )
+    });
+    data
 }
 
 async fn build_models_list(

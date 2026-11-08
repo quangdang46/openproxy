@@ -140,6 +140,12 @@ pub struct ResponseTransformState {
     /// an estimated usage block for a provider that reported none; `None`
     /// leaves the input estimate at 0.
     pub request_body: Option<Value>,
+    /// sent (alias) name → original name, recorded by the OpenCode
+    /// fingerprint concealment pass (9router `takeRenamedToolNames` →
+    /// `toolNameMap`). Applied to every emitted chunk by
+    /// `translate_response`/`finish_stream` so a provider that only ever saw
+    /// the fingerprint aliases still answers with the caller's tool names.
+    pub tool_name_map: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -602,6 +608,38 @@ impl TranslationRegistry {
         chunk: &[u8],
         state: &mut ResponseTransformState,
     ) -> Vec<String> {
+        let results = self.translate_response_inner(source, target, chunk, state);
+        Self::restore_tool_names_in_output(results, state)
+    }
+
+    /// 9router `restoreToolNames` post-pass (open-sse/utils/stream.js:198-199):
+    /// every emitted frame is scanned for the fingerprint aliases the
+    /// OpenCode executor concealed and rewritten back to the caller's tool
+    /// names. No-op unless the executor recorded a map.
+    fn restore_tool_names_in_output(
+        results: Vec<String>,
+        state: &ResponseTransformState,
+    ) -> Vec<String> {
+        match state.tool_name_map.as_ref() {
+            Some(map) if !map.is_empty() => results
+                .into_iter()
+                .map(|chunk| {
+                    crate::core::utils::opencode_fingerprint::restore_tool_names_in_sse(
+                        &chunk, map,
+                    )
+                })
+                .collect(),
+            _ => results,
+        }
+    }
+
+    fn translate_response_inner(
+        &self,
+        source: Format,
+        target: Format,
+        chunk: &[u8],
+        state: &mut ResponseTransformState,
+    ) -> Vec<String> {
         if source == target {
             return vec![String::from_utf8_lossy(chunk).to_string()];
         }
@@ -664,6 +702,16 @@ impl TranslationRegistry {
     /// `response.completed`, so a client waiting on `finish_reason` is not left
     /// hanging.
     pub fn finish_stream(
+        &self,
+        source: Format,
+        target: Format,
+        state: &mut ResponseTransformState,
+    ) -> Vec<String> {
+        let results = self.finish_stream_inner(source, target, state);
+        Self::restore_tool_names_in_output(results, state)
+    }
+
+    fn finish_stream_inner(
         &self,
         source: Format,
         target: Format,

@@ -466,6 +466,10 @@ struct OAuthExchangeCompatBody {
     code_verifier: Option<String>,
     state: Option<String>,
     meta: Option<Value>,
+    /// Zed only: the system_id registered for this login attempt, threaded
+    /// through register-session → exchange → stored connection (upstream
+    /// route.js merges it into meta so exchangeTokens does not re-mint one).
+    system_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2531,6 +2535,213 @@ async fn kiro_auto_import_route() -> Response {
     .into_response()
 }
 
+/// GET /api/oauth/zed/auto-import — read the signed-in Zed IDE session from
+/// the OS keyring/keychain (9router zedCredentials.js + auto-import/route.js).
+async fn zed_auto_import_route() -> Response {
+    let result = crate::oauth::zed_credentials::read_zed_ide_credentials();
+    if !result.found {
+        return Json(json!({
+            "found": false,
+            "error": result.error.unwrap_or_else(|| "Zed IDE credentials not found".into()),
+            "credentialsUrl": result.credentials_url,
+        }))
+        .into_response();
+    }
+    Json(json!({
+        "found": true,
+        "userId": result.user_id,
+        "accessToken": result.access_token,
+        "systemId": result.system_id,
+        "credentialsUrl": result.credentials_url,
+    }))
+    .into_response()
+}
+
+/// POST /api/oauth/zed/import — validate + save a Zed session, typically from
+/// IDE auto-import (9router zed/import/route.js). Body:
+/// `{accessToken, userId, systemId?}`.
+async fn zed_import(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    use crate::oauth::zed_auth;
+
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let access_token = body
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let user_id = body
+        .get("userId")
+        .map(|v| match v {
+            Value::String(s) => s.trim().to_string(),
+            other => other.to_string().trim().to_string(),
+        })
+        .unwrap_or_default();
+    let system_id = body
+        .get("systemId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    if access_token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Access token is required" })),
+        )
+            .into_response();
+    }
+    if user_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "User id is required" })),
+        )
+            .into_response();
+    }
+
+    let credentials_psd = std::collections::BTreeMap::from([
+        ("userId".to_string(), Value::String(user_id.clone())),
+        ("systemId".to_string(), Value::String(system_id.clone())),
+    ]);
+
+    // fetchZedAuthenticatedUser validates the token — a 401 surfaces as a 401.
+    let client = reqwest::Client::new();
+    let user_info = match zed_auth::fetch_authenticated_user(
+        &client,
+        &user_id,
+        &access_token,
+        Some(&system_id),
+    )
+    .await
+    {
+        Ok(info) => info,
+        Err(error) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
+
+    let organization_id =
+        zed_auth::resolve_zed_organization_id(&credentials_psd, Some(&user_info));
+    let email = user_info
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let display_name = user_info
+        .get("name")
+        .or_else(|| user_info.get("display_name"))
+        .or_else(|| user_info.get("username"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Zed {user_id}"));
+
+    let connection = ProviderConnection {
+        provider: "zed".to_string(),
+        auth_type: "oauth".to_string(),
+        access_token: Some(access_token),
+        refresh_token: None,
+        expires_at: None,
+        email: email.clone(),
+        display_name: Some(display_name.clone()),
+        provider_specific_data: std::collections::BTreeMap::from([
+            ("authMethod".to_string(), Value::String("imported".into())),
+            ("userId".to_string(), Value::String(user_id)),
+            ("systemId".to_string(), Value::String(system_id)),
+            (
+                "organizationId".to_string(),
+                Value::String(organization_id.unwrap_or_default()),
+            ),
+        ]),
+        test_status: Some("active".to_string()),
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(saved) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": saved.id,
+                "provider": saved.provider,
+                "email": saved.email,
+                "displayName": saved.display_name,
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+/// POST /api/oauth/{provider}/register-session — bind the proxy session to the
+/// authorize response's state + private-key verifier + systemId (9router
+/// [provider]/[action] register-session; zed only — trae/windsurf are not
+/// ported).
+async fn oauth_register_session_compat(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: axum::extract::Request,
+) -> Response {
+    if provider != "zed" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "register-session only supported for zed" })),
+        )
+            .into_response();
+    }
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let state_value = body
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if state_value.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing state" })),
+        )
+            .into_response();
+    }
+    let code_verifier = body
+        .get("codeVerifier")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let system_id = body
+        .get("systemId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let registered = state
+        .zed_proxy
+        .register_session(&state_value, &code_verifier, system_id.as_deref())
+        .await;
+    Json(json!({ "success": registered })).into_response()
+}
+
 /// Kiro IDE profile.json path on Windows:
 /// `%APPDATA%/Kiro/User/globalStorage/kiro.kiroagent/profile.json`.
 fn kiro_profile_path_windows() -> PathBuf {
@@ -3426,7 +3637,9 @@ async fn codex_start_proxy_compat(
             Ok(port) => {
                 let registered = {
                     let mut inner = state.zed_proxy.inner.lock().await;
-                    ZedProxyState::register_session_locked(&mut inner, &state_value, &verifier)
+                    ZedProxyState::register_session_locked(
+                        &mut inner, &state_value, &verifier, None,
+                    )
                 };
                 return Json(json!({
                     "success": true,
@@ -3772,6 +3985,29 @@ async fn authorize_oauth_compat(
             code_challenge,
             redirect_uri,
         ),
+        // Zed RSA native-app flow (9router providers/zed.js prepareConfig +
+        // generateAuthData): mint a fresh RSA-2048 keypair; the private key
+        // rides in the codeVerifier slot as `zed-rsa-pkcs1:<b64url>`. The
+        // native_app_port is derived from the callback URL's port so the
+        // keypair is bound to the port the proxy actually listens on.
+        "zed" => {
+            let native_app_port = url::Url::parse(&redirect_uri)
+                .ok()
+                .and_then(|u| u.port());
+            let auth =
+                crate::oauth::zed_auth::create_native_auth_data(native_app_port, None);
+            Json(json!({
+                "authUrl": auth.auth_url,
+                "state": state,
+                "codeVerifier": auth.private_key_verifier,
+                "codeChallenge": code_challenge,
+                "redirectUri": redirect_uri,
+                "flowType": "authorization_code",
+                "callbackPath": "/",
+                "systemId": auth.system_id,
+            }))
+            .into_response()
+        }
         "xai" => {
             // xAI requires a 96-byte PKCE verifier (not the default 32-byte one).
             let code_verifier = generate_code_verifier_with_len(96);
@@ -4657,6 +4893,73 @@ fn oauth_connection_saved_response(saved: &ProviderConnection) -> Response {
     .into_response()
 }
 
+/// Zed manual/pasted-callback exchange (9router providers/zed.js
+/// exchangeToken + postExchange + mapTokens). `code` is the raw callback
+/// URL/query; `code_verifier` carries the RSA private key; `system_id` is the
+/// login attempt's id (register-session → exchange body), falling back to a
+/// fresh UUID exactly like upstream's re-run of prepareConfig.
+async fn exchange_zed_compat(
+    code: &str,
+    code_verifier: &str,
+    system_id: Option<&str>,
+) -> Result<ProviderConnection, String> {
+    use crate::oauth::zed_auth;
+
+    let (user_id, encrypted) = zed_auth::parse_callback_payload(code)?;
+    let access_token = zed_auth::decrypt_access_token(&encrypted, code_verifier)?;
+    let system_id = system_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // postExchange: best-effort users/me for email + organization id. A failed
+    // probe must not fail the exchange — upstream wraps it in try/catch.
+    let client = reqwest::Client::new();
+    let user_info = zed_auth::fetch_authenticated_user(
+        &client,
+        &user_id,
+        &access_token,
+        Some(&system_id),
+    )
+    .await
+    .ok();
+
+    let mut psd = std::collections::BTreeMap::from([
+        ("authMethod".to_string(), Value::String("oauth".into())),
+        ("userId".to_string(), Value::String(user_id)),
+        ("systemId".to_string(), Value::String(system_id)),
+    ]);
+    let organization_id = zed_auth::resolve_zed_organization_id(&psd, user_info.as_ref());
+    psd.insert(
+        "organizationId".to_string(),
+        Value::String(organization_id.unwrap_or_default()),
+    );
+
+    let email = user_info
+        .as_ref()
+        .and_then(|info| info.get("email"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let display_name = user_info.as_ref().and_then(|info| {
+        info.get("name")
+            .or_else(|| info.get("display_name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+
+    Ok(ProviderConnection {
+        provider: "zed".to_string(),
+        auth_type: "oauth".to_string(),
+        email,
+        display_name,
+        access_token: Some(access_token),
+        test_status: Some("active".to_string()),
+        provider_specific_data: psd,
+        ..Default::default()
+    })
+}
+
 async fn exchange_oauth_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -4775,6 +5078,29 @@ async fn exchange_oauth_compat(
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
+        // Zed: `code` is the pasted native-app callback URL/query carrying
+        // user_id + RSA-encrypted access_token; `code_verifier` is the
+        // private-key verifier from /authorize. systemId comes from the
+        // exchange body (threaded via register-session), else meta, else a
+        // fresh UUID — upstream exchangeTokens re-runs prepareConfig which
+        // would mint an unrelated one, so the registered id must win.
+        "zed" => {
+            let system_id = body
+                .system_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    meta.and_then(|m| m.get("systemId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            match exchange_zed_compat(code, code_verifier, system_id.as_deref()).await {
+                Ok(value) => value,
+                Err(error) => return internal_error_response(error),
+            }
+        }
         _ => {
             return make_error_response(
                 StatusCode::BAD_REQUEST,
@@ -6884,6 +7210,8 @@ pub fn routes() -> Router<AppState> {
             "/api/oauth/cursor/import",
             get(cursor_import_instructions_route).post(cursor_import_auth),
         )
+        .route("/api/oauth/zed/auto-import", get(zed_auto_import_route))
+        .route("/api/oauth/zed/import", post(zed_import))
         .route("/api/oauth/kiro/auto-import", get(kiro_auto_import_route))
         .route("/api/oauth/kiro/import", post(kiro_import_auth))
         .route("/api/oauth/kiro/api-key", post(kiro_api_key_import))
@@ -6937,6 +7265,10 @@ pub fn routes() -> Router<AppState> {
             post(exchange_oauth_compat),
         )
         .route(
+            "/api/oauth/{provider}/register-session",
+            post(oauth_register_session_compat),
+        )
+        .route(
             "/api/oauth/{provider}/device-code",
             get(start_device_code_compat),
         )
@@ -6971,6 +7303,10 @@ struct ZedProxyInner {
 struct ZedPendingLogin {
     state: String,
     private_key_verifier: String,
+    /// The system_id minted by /authorize and threaded through
+    /// register-session (JS zedSession.systemId, server.js:651-660). Preferred
+    /// over the users/me value when storing the connection.
+    system_id: Option<String>,
     status: String,
     created_at: i64,
     connection_id: Option<String>,
@@ -7078,10 +7414,24 @@ impl ZedProxyState {
             })
     }
 
+    /// POST /register-session entry point (JS registerZedSession): bind the
+    /// pending login to the authorize response's state + private-key verifier
+    /// + systemId. Returns false when state or verifier is empty.
+    async fn register_session(
+        &self,
+        state: &str,
+        code_verifier: &str,
+        system_id: Option<&str>,
+    ) -> bool {
+        let mut inner = self.inner.lock().await;
+        Self::register_session_locked(&mut inner, state, code_verifier, system_id)
+    }
+
     fn register_session_locked(
         inner: &mut ZedProxyInner,
         state: &str,
         code_verifier: &str,
+        system_id: Option<&str>,
     ) -> bool {
         if state.trim().is_empty() || code_verifier.trim().is_empty() {
             return false;
@@ -7089,6 +7439,10 @@ impl ZedProxyState {
         inner.session = Some(ZedPendingLogin {
             state: state.to_string(),
             private_key_verifier: code_verifier.to_string(),
+            system_id: system_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             status: "pending".into(),
             created_at: chrono::Utc::now().timestamp_millis(),
             connection_id: None,
@@ -7210,36 +7564,39 @@ async fn handle_zed_proxy_connection(
     // not resolve and persist it produces a connection whose every chat call
     // fails with "No Zed organization selected". The email is a nicety; this
     // is load-bearing.
+    //
+    // system_id precedence (upstream server.js:731 + zed.js exchangeToken):
+    // the id registered for THIS login attempt (register-session) wins; the
+    // users/me value is only a fallback.
+    let session_system_id = session.system_id.clone();
     let client = reqwest::Client::new();
-    let auth = zed_auth::build_user_auth_header(&user_id, &access_token).unwrap_or_default();
     let mut email: Option<String> = None;
-    let mut system_id: Option<String> = None;
     let mut organization_id: Option<String> = None;
-    if let Ok(info) = client
-        .get(format!(
-            "{}{}",
-            crate::oauth::zed_auth::ZED_CLOUD_BASE_URL,
-            "/client/users/me"
-        ))
-        .header("Accept", "application/json")
-        .header("Authorization", auth)
-        .send()
-        .await
+    let mut system_id = session_system_id.clone();
+    if let Ok(data) = zed_auth::fetch_authenticated_user(
+        &client,
+        &user_id,
+        &access_token,
+        system_id.as_deref(),
+    )
+    .await
     {
-        if let Ok(data) = info.json::<Value>().await {
-            email = data.get("email").and_then(Value::as_str).map(String::from);
+        email = data.get("email").and_then(Value::as_str).map(String::from);
+        // Same resolver the executor's fallback uses, so a connection
+        // created here and one resolved later cannot disagree.
+        organization_id = zed_auth::resolve_zed_organization_id(
+            &std::collections::BTreeMap::new(),
+            Some(&data),
+        );
+        // users/me system_id is only a fallback — the login attempt's id
+        // (register-session) is authoritative.
+        if system_id.is_none() {
             system_id = data
                 .get("system_id")
                 .or_else(|| data.get("systemId"))
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(String::from);
-            // Same resolver the executor's fallback uses, so a connection
-            // created here and one resolved later cannot disagree.
-            organization_id = zed_auth::resolve_zed_organization_id(
-                &std::collections::BTreeMap::new(),
-                Some(&data),
-            );
         }
     }
 

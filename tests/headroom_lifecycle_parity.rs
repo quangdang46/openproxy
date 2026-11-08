@@ -35,6 +35,7 @@ async fn app_with(headroom_url: &str) -> (tempfile::TempDir, axum::Router) {
             created_at: None,
             extra: BTreeMap::new(),
             monthly_budget_usd: None,
+            access: Default::default(),
         }];
         state.settings.require_login = true;
         state.settings.headroom_url = headroom_url.into();

@@ -37,6 +37,7 @@ async fn app_state() -> AppState {
             created_at: None,
             monthly_budget_usd: None,
             extra: BTreeMap::new(),
+            access: Default::default(),
         }];
     })
     .await

@@ -491,6 +491,8 @@ mod tests {
             created_at: None,
             monthly_budget_usd: None,
             extra: std::collections::BTreeMap::new(),
+            access: Default::default(),
+
         }];
         db
     }

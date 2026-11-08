@@ -22,6 +22,7 @@ pub mod secret;
 pub mod tests;
 pub mod xiaomi_mimo;
 pub mod zed_auth;
+pub mod zed_credentials;
 
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,

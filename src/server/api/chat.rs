@@ -368,6 +368,20 @@ async fn chat_completions_impl(
             }
         };
 
+    // Per-key access control (9router src/sse/services/keyAccess.js +
+    // src/sse/handlers/chat.js:95-100): a restricted key may call only its
+    // listed combos and models. Checked once on the requested target, before
+    // bypass, combo expansion and any credential lookup; an allowed combo
+    // grants the members it routes to. Runs on the freshest snapshot so a
+    // combo created moments ago is still matched.
+    let key_access_ctx =
+        crate::core::key_access::context_for_presented_key(presented_api_key.as_deref(), &snapshot);
+    if let Err(message) =
+        crate::core::key_access::enforce_key_access(key_access_ctx.as_ref(), model_str, &snapshot)
+    {
+        return json_error_response(StatusCode::FORBIDDEN, &message);
+    }
+
     // Payload-rules + system-prompt override (OmniRoute-style).
     // Applied here, after the model field has been validated but before
     // we fan out into combo / direct dispatch — so both branches see the
@@ -556,11 +570,18 @@ async fn chat_completions_impl(
             // 9router parity (chat.js): augment the combo member list with
             // capacity-adapter pool models when no member satisfies the
             // request's hard capabilities, and remember which models were
-            // added so history stripping only ever applies to them.
-            let augmented_models = augment_models_with_capacity_adapter(
+            // added so history stripping only ever applies to them. A
+            // restricted key keeps only the adapter models it may call
+            // directly (keyAccess.js filterAdapterModels).
+            let augmented_models = crate::core::key_access::filter_adapter_models(
+                key_access_ctx.as_ref(),
+                augment_models_with_capacity_adapter(
+                    &combo_models,
+                    &required_caps,
+                    &snapshot.settings.capacity_adapter,
+                ),
                 &combo_models,
-                &required_caps,
-                &snapshot.settings.capacity_adapter,
+                &snapshot,
             );
             let adapter_added: HashSet<String> = augmented_models
                 .iter()
@@ -940,10 +961,18 @@ async fn chat_completions_impl(
             // the request fails outright, while the same provider sitting
             // inside a combo would have fallen back to the pool.
             let required_caps = detect_required_capabilities(&body);
-            let solo_chain = augment_models_with_capacity_adapter(
+            // Same filterAdapterModels gate as the combo branch: adapter
+            // models the restricted key may not call are dropped, never the
+            // requested target itself.
+            let solo_chain = crate::core::key_access::filter_adapter_models(
+                key_access_ctx.as_ref(),
+                augment_models_with_capacity_adapter(
+                    std::slice::from_ref(&model_str.to_string()),
+                    &required_caps,
+                    &snapshot.settings.capacity_adapter,
+                ),
                 std::slice::from_ref(&model_str.to_string()),
-                &required_caps,
-                &snapshot.settings.capacity_adapter,
+                &snapshot,
             );
             // History stripping applies only to models the adapter added,
             // never to the one the client actually asked for.
@@ -1861,7 +1890,7 @@ async fn forward_with_provider_fallback(
 
     // Extract tool name map from body (set by Claude cloaking).
     // Remove from body before dispatch to avoid serializing it upstream.
-    let tool_name_map: Option<std::collections::BTreeMap<String, String>> = request_body
+    let mut tool_name_map: Option<std::collections::BTreeMap<String, String>> = request_body
         .as_object_mut()
         .and_then(|obj| obj.remove("_toolNameMap"))
         .and_then(|v| serde_json::from_value(v).ok());
@@ -2437,11 +2466,26 @@ async fn forward_with_provider_fallback(
                         upstream_body: None,
                         upstream_headers: Vec::new(),
                     })?;
+                // 9router chatCore.js:413-415 — `takeRenamedToolNames` is
+                // merged into the request's `toolNameMap`. Our executor
+                // returns the map explicitly; stash it on `transformed_body`
+                // (the translatedBody equivalent, never re-sent upstream)
+                // under the same `_toolNameMap` key the claude-cloaking path
+                // already uses, and merge it after dispatch.
+                let mut transformed_body = result.transformed_body;
+                if !result.tool_name_map.is_empty() {
+                    if let Some(obj) = transformed_body.as_object_mut() {
+                        obj.insert(
+                            "_toolNameMap".to_string(),
+                            serde_json::to_value(&result.tool_name_map).unwrap_or(Value::Null),
+                        );
+                    }
+                }
                 Ok(KiroExecutorResponse {
                     response: result.response,
                     url: result.url,
                     headers: result.headers,
-                    transformed_body: result.transformed_body,
+                    transformed_body,
                     transport: result.transport,
                 })
             } else if provider == "opencode-go" {
@@ -2995,6 +3039,19 @@ async fn forward_with_provider_fallback(
 
         match execution {
             Ok(result) => {
+                // Merge any executor-recorded alias map (OpenCode fingerprint
+                // concealment) into the cloaking map before response handling —
+                // 9router chatCore.js:413-415 `toolNameMap = new Map([...toolNameMap, ...renamedToolNames])`.
+                if let Some(raw) = result.transformed_body.get("_toolNameMap").and_then(|v| {
+                    serde_json::from_value::<std::collections::BTreeMap<String, String>>(v.clone())
+                        .ok()
+                }) {
+                    if !raw.is_empty() {
+                        tool_name_map
+                            .get_or_insert_with(std::collections::BTreeMap::new)
+                            .extend(raw);
+                    }
+                }
                 let status = result.response.status();
                 if status.is_success() {
                     if let Some(retry_after) = retry_after_from_headers(result.response.headers()) {
@@ -3041,6 +3098,7 @@ async fn forward_with_provider_fallback(
                             endpoint,
                             plan,
                             compression.clone(),
+                            tool_name_map.as_ref(),
                         )
                         .await;
                         return Ok(crate::server::api::budget_guard::with_in_flight_slot(
@@ -3921,6 +3979,7 @@ async fn proxy_sse_to_json_response(
     endpoint: Option<&str>,
     plan: &RequestPlan,
     compression: Option<CompressionStats>,
+    tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Response {
     use crate::core::media::responses::stream_to_json as collapse;
 
@@ -3988,6 +4047,14 @@ async fn proxy_sse_to_json_response(
             })
         })
     });
+    // 9router sseToJsonHandler.js:235/295/375 — restoreToolNames on the
+    // collapsed JSON before it goes to the client.
+    if let Some(map) = tool_name_map {
+        if !map.is_empty() {
+            json_body =
+                crate::core::utils::opencode_fingerprint::restore_tool_names(&json_body, map);
+        }
+    }
     crate::server::api::sanitization::sanitize_response_object(&mut json_body);
 
     let out = Bytes::from(serde_json::to_vec(&json_body).unwrap_or_default());
@@ -4049,14 +4116,19 @@ async fn proxy_response_with_usage_tracking(
     // in via transport.quirks.clineEnvelope (cline/clinepass).
     let unenveloped_body = unwrap_cline_envelope(&body_bytes, provider);
 
-    // 9router parity: decloak tool names when Claude cloaking was applied.
+    // 9router parity: restore concealed tool names when cloaking/fingerprinting
+    // was applied. `restore_tool_names` is the superset of
+    // `claude_cloaking::decloak_tool_names` — it covers Anthropic content
+    // blocks AND OpenAI `choices[].message.tool_calls`, Responses `output`
+    // items, and Responses SSE `item` events, which is what the OpenCode
+    // fingerprint concealment needs (opencodeFingerprint.js `restoreToolNames`).
     let decloaked_body = if let Some(map) = tool_name_map {
         if !map.is_empty() {
             let body_val: serde_json::Value =
                 serde_json::from_slice(&unenveloped_body).unwrap_or(serde_json::Value::Null);
             if !body_val.is_null() {
                 let decloaked =
-                    crate::core::utils::claude_cloaking::decloak_tool_names(&body_val, map);
+                    crate::core::utils::opencode_fingerprint::restore_tool_names(&body_val, map);
                 serde_json::to_vec(&decloaked)
                     .map(Bytes::from)
                     .unwrap_or_else(|_| unenveloped_body.clone())
@@ -4117,6 +4189,9 @@ async fn proxy_response_with_usage_tracking(
             } else {
                 use crate::core::translator::registry::ResponseTransformState;
                 let mut state = ResponseTransformState::default();
+                // OpenCode fingerprint aliases recorded by the executor ride
+                // along so the translated chunks get their tool names back.
+                state.tool_name_map = tool_name_map.cloned();
                 let chunks = registry::global_registry().translate_response(
                     plan.target_format,
                     plan.source_format,
@@ -4396,6 +4471,7 @@ async fn proxy_response_with_pending_tracking(
             let mut responses_terminal_seen = false;
             let mut passthrough_pending: Vec<u8> = Vec::new();
             let custom_tool_names = custom_tool_names.clone();
+            let tool_name_map_stream = tool_name_map.cloned();
             let request_body = request_body;
             let stream_target = stream_upstream_format;
             let stream = async_stream::stream! {
@@ -4415,9 +4491,20 @@ async fn proxy_response_with_pending_tracking(
                                 }
                             }
                             s.request_body = Some(request_body.clone());
+                            s.tool_name_map = tool_name_map_stream.clone();
                             Some(s)
                         } else {
                             None
+                        };
+                        // 9router stream.js:198-199 — restoreToolNames runs on
+                        // EVERY emitted frame, passthrough included.
+                        let restore_names = |s: String| -> String {
+                            match tool_name_map_stream.as_ref() {
+                                Some(map) if !map.is_empty() => {
+                                    crate::core::utils::opencode_fingerprint::restore_tool_names_in_sse(&s, map)
+                                }
+                                _ => s,
+                            }
                         };
                         // Accumulate usage across EVERY frame, not just the last one.
                         // Anthropic splits usage across events (message_start carries
@@ -4567,7 +4654,7 @@ async fn proxy_response_with_pending_tracking(
                                             yield Ok::<Bytes, std::io::Error>(
                                                 sanitize_sse_chunk(
                                                     &passthrough_frame_bytes(
-                                                        &apply_passthrough_transforms(&line, &provider),
+                                                        &restore_names(apply_passthrough_transforms(&line, &provider)),
                                                     ),
                                                 ),
                                             );
@@ -4638,7 +4725,7 @@ async fn proxy_response_with_pending_tracking(
                         // normalised.
                         let text = String::from_utf8_lossy(&final_frame).into_owned();
                         sanitize_sse_chunk(&passthrough_frame_bytes(
-                            &apply_passthrough_transforms(&text, &provider),
+                            &restore_names(apply_passthrough_transforms(&text, &provider)),
                         ))
                     });
                 let coalescer_lines = if qoder_sse_unwrap {
@@ -4711,6 +4798,7 @@ async fn proxy_response_with_pending_tracking(
             let mut translate_saw_done2 = false;
             let mut responses_terminal_seen = false;
             let custom_tool_names2 = custom_tool_names.clone();
+            let tool_name_map_stream2 = tool_name_map.cloned();
             let request_body2 = request_body;
             let stream_target2 = stream_upstream_format;
             let stream = async_stream::stream! {
@@ -4726,9 +4814,19 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                     s.request_body = Some(request_body2.clone());
+                    s.tool_name_map = tool_name_map_stream2.clone();
                     Some(s)
                 } else {
                     None
+                };
+                // 9router stream.js:198-199 — restoreToolNames on every frame.
+                let restore_names2 = |s: String| -> String {
+                    match tool_name_map_stream2.as_ref() {
+                        Some(map) if !map.is_empty() => {
+                            crate::core::utils::opencode_fingerprint::restore_tool_names_in_sse(&s, map)
+                        }
+                        _ => s,
+                    }
                 };
                 // Accumulate the last data frame for best-effort `usage` extraction
                 // at stream end (streaming SSE responses usually lack a usage field).
@@ -4816,7 +4914,7 @@ async fn proxy_response_with_pending_tracking(
                                         yield Ok::<Bytes, std::io::Error>(
                                             sanitize_sse_chunk(
                                                 &passthrough_frame_bytes(
-                                                    &apply_passthrough_transforms(&line, &provider),
+                                                    &restore_names2(apply_passthrough_transforms(&line, &provider)),
                                                 ),
                                             ),
                                         );
@@ -4869,7 +4967,7 @@ async fn proxy_response_with_pending_tracking(
                         take_terminal_passthrough_frame(&mut passthrough_pending2).map(|final_frame| {
                             let text = String::from_utf8_lossy(&final_frame).into_owned();
                             sanitize_sse_chunk(&passthrough_frame_bytes(
-                                &apply_passthrough_transforms(&text, &provider),
+                                &restore_names2(apply_passthrough_transforms(&text, &provider)),
                             ))
                         });
                     // NOT a pure refactor on this arm. `qoder_sse_unwrap` and
@@ -6239,6 +6337,31 @@ fn payload_text_len(value: &Value) -> Option<usize> {
 fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
     let body = strip_sse_data_prefix(body);
     let value = serde_json::from_slice::<Value>(body).ok()?;
+
+    // Ollama NDJSON done frame: {"done":true,"prompt_eval_count":N,
+    // "eval_count":M,"prompt_eval_cached_count":C}. prompt_eval_cached_count
+    // is a cache-read subset of prompt_eval_count (cache-INCLUSIVE) —
+    // 9router usageTracking.js:304-313 / requestDetail.js:64-76.
+    if value.get("done").and_then(Value::as_bool) == Some(true)
+        && value.get("prompt_eval_count").is_some()
+    {
+        let prompt = value
+            .get("prompt_eval_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let completion = value.get("eval_count").and_then(Value::as_u64).unwrap_or(0);
+        let cached = value
+            .get("prompt_eval_cached_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return Some(TokenUsage {
+            prompt_tokens: Some(prompt),
+            completion_tokens: Some(completion),
+            total_tokens: Some(prompt + completion),
+            cached_tokens: (cached > 0).then_some(cached),
+            ..empty_token_usage(BTreeMap::new())
+        });
+    }
 
     // Claude/Anthropic names every stream event, and splits usage across two
     // shapes (9router extractUsage, usageTracking.js:239-263):
@@ -8272,6 +8395,37 @@ mod extractor_framing_tests {
         assert_eq!(u.input_tokens.or(u.prompt_tokens), Some(1200));
         assert_eq!(u.cache_read_input_tokens, Some(8000));
         assert_eq!(u.cache_creation_input_tokens, Some(400));
+    }
+
+    /// Ollama NDJSON done frame: prompt_eval_cached_count is a cache-read
+    /// subset of prompt_eval_count (cache-INCLUSIVE) and must land in
+    /// TokenUsage.cached_tokens — 9router usageTracking.js:304-313.
+    #[test]
+    fn extractor_reads_ollama_cached_tokens() {
+        let frame = b"{\"model\":\"llama3\",\"done\":true,\"prompt_eval_count\":1200,\"eval_count\":80,\"prompt_eval_cached_count\":900}\n";
+        let u = super::extract_token_usage_from_bytes(frame).expect("usage");
+        assert_eq!(u.prompt_tokens, Some(1200));
+        assert_eq!(u.completion_tokens, Some(80));
+        assert_eq!(u.total_tokens, Some(1280));
+        assert_eq!(u.cached_tokens, Some(900));
+    }
+
+    /// An Ollama done frame without the cached field still yields usage, just
+    /// with no cached counter.
+    #[test]
+    fn extractor_ollama_without_cached_field() {
+        let frame =
+            b"{\"model\":\"llama3\",\"done\":true,\"prompt_eval_count\":50,\"eval_count\":10}\n";
+        let u = super::extract_token_usage_from_bytes(frame).expect("usage");
+        assert_eq!(u.prompt_tokens, Some(50));
+        assert_eq!(u.cached_tokens, None);
+    }
+
+    /// Non-done Ollama chunks carry no counts and must not produce usage.
+    #[test]
+    fn extractor_ignores_ollama_non_done_chunk() {
+        let frame = b"{\"model\":\"llama3\",\"done\":false,\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n";
+        assert!(super::extract_token_usage_from_bytes(frame).is_none());
     }
 
     /// message_delta carries the cumulative output at the TOP level.

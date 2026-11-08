@@ -474,6 +474,25 @@ impl Combo {
     }
 }
 
+/// Per-API-key access control — the `access` object 9router stores on each
+/// `apiKeys` row (`{ restricted, allow }`, see
+/// `.tmp/9router/src/shared/utils/keyAccess.js`). A restricted key may call
+/// only the combos and models named in `allow`; matching is exact and
+/// case-insensitive on resolved identities, enforced by
+/// `crate::core::key_access`.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeyAccess {
+    /// `false` (the default for every key — new, migrated, or restored from a
+    /// backup without the field) means unrestricted: exactly the behaviour
+    /// before this feature existed.
+    #[serde(default)]
+    pub restricted: bool,
+    /// Allow-list entries: combo names or `provider/model` strings (aliases
+    /// and bare model names are resolved at enforcement time).
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKey {
@@ -491,6 +510,10 @@ pub struct ApiKey {
     /// it (free-tier Feature 3: budget caps & hard kill-switch).
     #[serde(default)]
     pub monthly_budget_usd: Option<f64>,
+    /// Per-key access control (9router `accessRestricted`/`accessAllow`
+    /// columns). Defaults to unrestricted.
+    #[serde(default)]
+    pub access: KeyAccess,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

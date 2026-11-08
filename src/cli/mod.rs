@@ -28,6 +28,8 @@ pub mod apply;
 pub mod auth;
 pub mod chat;
 pub mod combo;
+pub mod connect;
+pub mod connect_tools;
 pub mod config;
 pub mod db;
 pub mod doctor;
@@ -228,6 +230,19 @@ pub enum Command {
     Tool {
         #[command(subcommand)]
         cmd: tool::ToolCmd,
+    },
+    /// Point LOCAL CLI tools (claude, codex, opencode, ...) at a remote
+    /// openproxy/9router server and write their config files. Nothing runs
+    /// locally; `--dry-run` previews the payloads, `--reset` removes them.
+    Connect {
+        #[command(flatten)]
+        args: connect::ConnectArgs,
+    },
+    /// Show the server settings written into LOCAL CLI tool configs.
+    /// Read-only and offline — contacts no server, masks API keys.
+    Show {
+        #[command(flatten)]
+        args: connect::ShowArgs,
     },
     /// Translate or pass requests through the format translator.
     Translator {
@@ -880,6 +895,21 @@ impl Cli {
                     }
                     Ok(())
                 }
+                Command::Connect { args } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(connect::run_connect(args, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Show { args } => {
+                    let exit = connect::run_show(args, ctx)?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
                 Command::Translator { cmd } => {
                     let resolved = config::ResolvedConfig::resolve(overrides)?;
                     let exit = rt.block_on(translator::run(cmd, &resolved, ctx))?;
@@ -1418,6 +1448,8 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
                 monthly_budget_usd: None,
                 extra: std::collections::BTreeMap::new(),
+                access: Default::default(),
+
             };
 
             let used_http = try_add_key_via_http(&new_key).await;

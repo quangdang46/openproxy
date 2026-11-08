@@ -13,8 +13,22 @@ use serde_json::Value;
 /// Hard capabilities that a model must support for a request; the adapter
 /// only ever considers these when deciding whether to augment.
 pub const CAPABILITY_KEYS: [&str; 4] = ["vision", "pdf", "audioInput", "videoInput"];
-/// 9router default model used when an enabled pool has no explicit models.
-pub const DEFAULT_FALLBACK_MODEL: &str = "oc/mimo-v2.5-free";
+/// 9router default model used when an enabled pool has no explicit models
+/// (capacityAdapter.js:15 `DEFAULT_FALLBACK_MODEL`).
+pub const DEFAULT_FALLBACK_MODEL: &str = "oc/mimo-v2.6-flash-free";
+/// Legacy pool model auto-upgraded to the current default
+/// (capacityAdapter.js:20 `upgradeLegacyModel`).
+const LEGACY_FALLBACK_MODEL: &str = "oc/mimo-v2.5-free";
+
+/// Upgrade a legacy pool model string to its current replacement
+/// (9router `upgradeLegacyModel`).
+fn upgrade_legacy_model(model: &str) -> &str {
+    if model == LEGACY_FALLBACK_MODEL {
+        DEFAULT_FALLBACK_MODEL
+    } else {
+        model
+    }
+}
 
 /// Context-window default when the target model has no known window
 /// (9router: `contextWindow || 200000`).
@@ -58,6 +72,7 @@ fn normalize_cap_entry(entry: &Value) -> CapEntry {
                     item.get("model")
                         .and_then(Value::as_str)
                         .or_else(|| item.as_str())
+                        .map(upgrade_legacy_model)
                         .map(str::to_string)
                 })
                 .collect();
@@ -78,7 +93,9 @@ fn normalize_cap_entry(entry: &Value) -> CapEntry {
                 .and_then(Value::as_array)
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|m| m.as_str().map(str::to_string))
+                        .filter_map(|m| m.as_str())
+                        .map(upgrade_legacy_model)
+                        .map(str::to_string)
                         .collect()
                 })
                 .unwrap_or_default();
@@ -411,7 +428,9 @@ mod tests {
             &HashSet::from(["vision".to_string()]),
             &settings,
         );
-        assert_eq!(augmented, vec!["oc/mimo-v2.5-free", "openai/gpt-4"]);
+        // The stored legacy model is upgraded to the current default
+        // (upgradeLegacyModel) before it reaches the augmented list.
+        assert_eq!(augmented, vec!["oc/mimo-v2.6-flash-free", "openai/gpt-4"]);
 
         // anthropic/claude satisfies vision, so nothing is added.
         let unchanged = augment_models_with_capacity_adapter(
@@ -487,9 +506,13 @@ mod tests {
         let entry = normalize_cap_entry(&arr);
         assert!(entry.enabled);
         assert!(!entry.round_robin);
+        // Legacy oc/mimo-v2.5-free upgrades to the current default.
         assert_eq!(
             entry.models,
-            vec!["oc/mimo-v2.5-free".to_string(), "openai/gpt-4o".to_string()]
+            vec![
+                "oc/mimo-v2.6-flash-free".to_string(),
+                "openai/gpt-4o".to_string()
+            ]
         );
 
         let obj = json!({"enabled": false, "roundRobin": true, "models": ["x"]});
@@ -526,7 +549,35 @@ mod tests {
         });
         assert_eq!(
             get_capacity_adapter_models(&settings),
-            vec!["oc/mimo-v2.5-free", "openai/gpt-4o"]
+            vec!["oc/mimo-v2.6-flash-free", "openai/gpt-4o"]
+        );
+    }
+
+    #[test]
+    fn legacy_mimo_v25_pool_model_upgrades_to_v26() {
+        // capacityAdapter.js upgradeLegacyModel: every stored
+        // oc/mimo-v2.5-free pool entry resolves to oc/mimo-v2.6-flash-free,
+        // in both the array and object config forms.
+        let arr = json!(["oc/mimo-v2.5-free"]);
+        assert_eq!(
+            normalize_cap_entry(&arr).models,
+            vec![DEFAULT_FALLBACK_MODEL.to_string()]
+        );
+
+        let obj = json!({"enabled": true, "models": ["oc/mimo-v2.5-free", "openai/gpt-4o"]});
+        assert_eq!(
+            normalize_cap_entry(&obj).models,
+            vec![
+                DEFAULT_FALLBACK_MODEL.to_string(),
+                "openai/gpt-4o".to_string()
+            ]
+        );
+
+        // Non-legacy models pass through untouched.
+        let other = json!({"enabled": true, "models": ["oc/mimo-v2.6-flash-free"]});
+        assert_eq!(
+            normalize_cap_entry(&other).models,
+            vec!["oc/mimo-v2.6-flash-free".to_string()]
         );
     }
 

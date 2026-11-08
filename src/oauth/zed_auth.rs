@@ -289,6 +289,60 @@ pub fn resolve_zed_organization_id(
     chosen.get("id").and_then(normalize_organization_id)
 }
 
+/// GET /client/users/me (JS fetchZedAuthenticatedUser, zedAuth.js:196-214).
+/// Used by the login paths (proxy callback, manual exchange, IDE import) to
+/// validate the token and recover email / organization id. The `x-zed-system-id`
+/// header is sent when a system id is known.
+pub async fn fetch_authenticated_user(
+    client: &reqwest::Client,
+    user_id: &str,
+    access_token: &str,
+    system_id: Option<&str>,
+) -> Result<Value, String> {
+    let auth = build_user_auth_header(user_id, access_token)?;
+    let mut request = client
+        .get(format!("{}/client/users/me", zed_cloud_base_url()))
+        .header("Accept", "application/json")
+        .header(AUTHORIZATION, auth);
+    if let Some(sid) = system_id.filter(|s| !s.is_empty()) {
+        request = request.header(ZED_HEADER_SYSTEM_ID, sid);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Zed users/me request failed: {e}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("Zed users/me response read failed: {e}"))?;
+    let data: Value = if text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }))
+    };
+    if !status.is_success() {
+        let message = data
+            .get("message")
+            .or_else(|| data.pointer("/error/message"))
+            .or_else(|| data.get("error"))
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if text.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    text.clone()
+                }
+            });
+        return Err(message);
+    }
+    Ok(data)
+}
+
 /// Exchange the decrypted access token for a short-lived LLM bearer
 /// (JS fetchZedLlmToken): POST /client/llm_tokens with the organization id.
 pub async fn fetch_llm_token(

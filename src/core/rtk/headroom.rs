@@ -978,9 +978,14 @@ pub fn format_headroom_size_log(diag: &HeadroomDiagnostics) -> String {
     )
 }
 
-/// True when the reported savings are "phantom" — the body did not actually
-/// shrink by the minimum ratio (9router `isHeadroomPhantomSavings`, default
-/// 0.05 / 5%).
+/// True when the reported savings are "phantom" — NEITHER the messages NOR
+/// the outbound body actually shrank by the minimum ratio (9router
+/// `isHeadroomPhantomSavings`, headroom.js:545-553, default 0.05 / 5%).
+///
+/// Both `bodyBytes` and `messageBytes` must independently fail the shrink
+/// test (each with positive before/after) for the warning to fire. A large
+/// unchanged tool schema can keep `bodyBytes` nearly flat while
+/// `messageBytes` still shrank — that is real savings, not phantom.
 pub fn is_headroom_phantom_savings(
     stats: &HeadroomStats,
     diag: &HeadroomDiagnostics,
@@ -989,12 +994,12 @@ pub fn is_headroom_phantom_savings(
     if stats.tokens_saved == 0 {
         return false;
     }
-    let before = diag.before.as_ref().map(|s| s.body_bytes).unwrap_or(0);
-    let after = diag.after.as_ref().map(|s| s.body_bytes).unwrap_or(0);
-    if before == 0 || after == 0 {
-        return false;
-    }
-    after as f64 >= before as f64 * (1.0 - min_shrink_ratio)
+    let flat = |pick: fn(&SizeSnapshot) -> usize| -> bool {
+        let before = diag.before.as_ref().map(pick).unwrap_or(0);
+        let after = diag.after.as_ref().map(pick).unwrap_or(0);
+        before > 0 && after > 0 && after as f64 >= before as f64 * (1.0 - min_shrink_ratio)
+    };
+    flat(|s| s.body_bytes) && flat(|s| s.message_bytes)
 }
 
 /// Extract token statistics from the Headroom response, defaulting missing
@@ -1160,8 +1165,8 @@ mod tests {
 
     #[test]
     fn headroom_phantom_savings_detected() {
-        // Acceptance: tokens_saved>0 with before/after where after >= before*0.95
-        // → is_headroom_phantom_savings true.
+        // Acceptance: tokens_saved>0 with before/after where BOTH bodyBytes
+        // and messageBytes shrink < minShrinkRatio → phantom.
         let stats = HeadroomStats {
             tokens_before: 100,
             tokens_after: 98,
@@ -1170,30 +1175,86 @@ mod tests {
         let diag = HeadroomDiagnostics {
             before: Some(SizeSnapshot {
                 body_bytes: 1000,
+                message_bytes: 800,
                 ..Default::default()
             }),
             after: Some(SizeSnapshot {
                 body_bytes: 990,
+                message_bytes: 795,
                 ..Default::default()
             }),
             ..Default::default()
         };
-        // 990 >= 1000 * 0.95 = 950 → phantom.
+        // 990 >= 1000 * 0.95 = 950 and 795 >= 800 * 0.95 = 760 → phantom.
         assert!(is_headroom_phantom_savings(&stats, &diag, 0.05));
 
-        // A real shrink (after 600 < 950) → not phantom.
+        // A real shrink on either metric (after 600 < 950) → not phantom.
         let real = HeadroomDiagnostics {
             before: Some(SizeSnapshot {
                 body_bytes: 1000,
+                message_bytes: 800,
                 ..Default::default()
             }),
             after: Some(SizeSnapshot {
                 body_bytes: 600,
+                message_bytes: 400,
                 ..Default::default()
             }),
             ..Default::default()
         };
         assert!(!is_headroom_phantom_savings(&stats, &real, 0.05));
+    }
+
+    #[test]
+    fn headroom_phantom_savings_ignores_unchanged_tool_schema() {
+        // A huge tool schema keeps bodyBytes nearly flat while the messages
+        // themselves compressed well past 5% — upstream must NOT warn.
+        let stats = HeadroomStats {
+            tokens_before: 100,
+            tokens_after: 60,
+            tokens_saved: 40,
+        };
+        let diag = HeadroomDiagnostics {
+            before: Some(SizeSnapshot {
+                body_bytes: 100_000, // dominated by unchanged tools
+                message_bytes: 10_000,
+                tool_schema_bytes: 90_000,
+                ..Default::default()
+            }),
+            after: Some(SizeSnapshot {
+                body_bytes: 95_000,   // <5% body shrink
+                message_bytes: 5_000, // 50% message shrink → real savings
+                tool_schema_bytes: 90_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!is_headroom_phantom_savings(&stats, &diag, 0.05));
+    }
+
+    #[test]
+    fn headroom_phantom_savings_warns_when_genuinely_flat() {
+        // Both bodyBytes and messageBytes flat (<5%) with a reported token
+        // delta → phantom warning.
+        let stats = HeadroomStats {
+            tokens_before: 100,
+            tokens_after: 98,
+            tokens_saved: 2,
+        };
+        let diag = HeadroomDiagnostics {
+            before: Some(SizeSnapshot {
+                body_bytes: 1000,
+                message_bytes: 800,
+                ..Default::default()
+            }),
+            after: Some(SizeSnapshot {
+                body_bytes: 990,
+                message_bytes: 795,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(is_headroom_phantom_savings(&stats, &diag, 0.05));
     }
 
     #[test]

@@ -187,6 +187,14 @@ async fn validate_provider(
         "siliconflow" => validate_bearer(&client, "https://api.siliconflow.com/v1/models", &api_key).await,
         "hyperbolic" => validate_bearer(&client, "https://api.hyperbolic.xyz/v1/models", &api_key).await,
         "chutes" => validate_bearer(&client, "https://llm.chutes.ai/v1/models", &api_key).await,
+        // 9router registry/runcrate.js:24 — runcrate's public /v1/models
+        // answers 200 for ANY key, so it cannot tell a bad key from a good
+        // one. The registry's validateUrl is the billing balance endpoint,
+        // probed here as a bearer GET exactly as testUtils.js does.
+        "runcrate" | "rc" => {
+            validate_bearer(&client, "https://www.runcrate.ai/api/v1/billing/balance", &api_key)
+                .await
+        }
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,
         // Ported from 9router's probe table (testUtils.js). Only the providers
         // whose reference case is a plain bearer probe are added here — see the

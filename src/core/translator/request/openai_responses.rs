@@ -48,7 +48,7 @@ fn normalize_tool_parameters(params: Option<&Value>) -> Value {
 /// InputValidationError (#393). Mirrors `clampResponsesCallId` in
 /// `open-sse/translator/formats/responsesApi.js:27-37`: non-string/empty ids
 /// get a unique `call_<ms>_<seq>` fallback; overlong ids are truncated.
-fn clamp_call_id(id: Option<&str>) -> String {
+pub(crate) fn clamp_call_id(id: Option<&str>) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     match id {

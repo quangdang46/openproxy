@@ -2138,6 +2138,11 @@ struct CreateKeyRequest {
     key: Option<String>,
     #[serde(default)]
     monthly_budget_usd: Option<f64>,
+    /// Per-key access control (`{ restricted, allow }`) — 9router stores it
+    /// only via PUT /api/keys/{id}, but accepting it here is additive and
+    /// lets a restricted key be minted in one call.
+    #[serde(default)]
+    access: Option<Value>,
 }
 
 async fn create_key_api(
@@ -2216,6 +2221,22 @@ async fn create_key_api(
         ),
     };
 
+    // Per-key access control: validate rather than repair, exactly like
+    // 9router's PUT /api/keys/[id] (keys/[id]/route.js:34-38).
+    let access = match req.access.as_ref() {
+        Some(value) => match crate::core::key_access::validate_key_access_input(value) {
+            Ok(access) => access,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        },
+        None => crate::types::KeyAccess::default(),
+    };
+
     let api_key = ApiKey {
         id,
         name: name.to_string(),
@@ -2224,6 +2245,7 @@ async fn create_key_api(
         is_active: Some(true),
         created_at: Some(now),
         monthly_budget_usd: req.monthly_budget_usd,
+        access,
         extra: std::collections::BTreeMap::new(),
     };
 
@@ -2266,6 +2288,10 @@ struct UpdateKeyRequest {
     name: Option<String>,
     is_active: Option<bool>,
     monthly_budget_usd: Option<f64>,
+    /// Per-key access control (`{ restricted, allow }`) — validated with
+    /// `validate_key_access_input` before it reaches the store.
+    #[serde(default)]
+    access: Option<Value>,
 }
 
 async fn update_key_api(
@@ -2289,6 +2315,23 @@ async fn update_key_api(
             .into_response();
     }
 
+    // Per-key access control: `access` present means replace the whole
+    // { restricted, allow } object (9router PUT semantics — there is no
+    // partial allow-list patch); malformed input is a 400, not a repair.
+    let access = match req.access.as_ref() {
+        Some(value) => match crate::core::key_access::validate_key_access_input(value) {
+            Ok(access) => Some(access),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": error })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
     // Filled by the closure when an existing row was collapsed onto, so the
     // response can describe the row the caller will actually keep using.
     let mut collapsed: Option<crate::types::ProviderConnection> = None;
@@ -2304,6 +2347,9 @@ async fn update_key_api(
                 }
                 if req.monthly_budget_usd.is_some() {
                     key.monthly_budget_usd = req.monthly_budget_usd;
+                }
+                if let Some(access) = access {
+                    key.access = access;
                 }
             }
         })

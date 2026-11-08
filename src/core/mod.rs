@@ -6,6 +6,7 @@ pub mod config;
 pub mod dns;
 pub mod executor;
 pub mod h2c;
+pub mod key_access;
 pub mod mcp;
 pub mod media;
 pub mod mitm;

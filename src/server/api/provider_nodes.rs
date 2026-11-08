@@ -442,6 +442,8 @@ mod node_id_tests {
                 created_at: None,
                 monthly_budget_usd: None,
                 extra: BTreeMap::new(),
+                access: Default::default(),
+
             }];
         })
         .await

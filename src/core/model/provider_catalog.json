@@ -132,7 +132,8 @@
     "tokenrouter": "tokenrouter",
     "agentrouter": "ar",
     "deepseek-web": "deepseek-web",
-    "ds-web": "deepseek-web"
+    "ds-web": "deepseek-web",
+    "runcrate": "runcrate"
   },
   "providerModels": [
     {
@@ -6925,6 +6926,41 @@
       ]
     },
     {
+      "alias": "runcrate",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "name": "DeepSeek V4.1 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+          "name": "DeepSeek V4.1 Flash 1017",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.3",
+          "name": "GLM 5.3",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.3-Flash",
+          "name": "GLM 5.3 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3.8-Flash",
+          "name": "Qwen3.8 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-oss-120b",
+          "name": "gpt-oss 120B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "alias": "nous",
       "models": [
         {
@@ -8662,6 +8698,17 @@
     {
       "id": "deepseek-web",
       "alias": "ds-web",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "runcrate",
+      "alias": "runcrate",
       "serviceKinds": [
         "llm"
       ],

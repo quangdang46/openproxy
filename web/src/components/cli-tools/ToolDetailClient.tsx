@@ -20,6 +20,7 @@ import {
   DeepSeekTuiToolCard,
   JcodeToolCard,
   GrokBuildToolCard,
+  GenericCliToolCard,
   MitmLinkCard,
 } from "@/components/cli-tools";
 
@@ -38,6 +39,12 @@ const STATUS_ENDPOINTS: Record<string, string> = {
   "deepseek-tui": "/api/cli-tools/deepseek-tui-settings",
   jcode: "/api/cli-tools/jcode-settings",
   "grok-build": "/api/cli-tools/grok-build-settings",
+  pi: "/api/cli-tools/pi-settings",
+  omp: "/api/cli-tools/omp-settings",
+  crush: "/api/cli-tools/crush-settings",
+  forge: "/api/cli-tools/forge-settings",
+  smelt: "/api/cli-tools/smelt-settings",
+  codewhale: "/api/cli-tools/codewhale-settings",
 };
 
 export default function ToolDetailClient() {
@@ -232,6 +239,13 @@ export default function ToolDetailClient() {
             initialStatus={toolStatus}
           />
         );
+      case "pi":
+      case "omp":
+      case "crush":
+      case "forge":
+      case "smelt":
+      case "codewhale":
+        return <GenericCliToolCard {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} initialStatus={toolStatus} />;
       default:
         return <DefaultToolCard toolId={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} tunnelEnabled={tunnelEnabled} />;
     }

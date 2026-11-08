@@ -393,12 +393,21 @@ pub fn ollama_to_openai_non_streaming(response: &mut Value) -> bool {
         .get("eval_count")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    // prompt_eval_cached_count is a cache-read subset of prompt_eval_count
+    // (cache-INCLUSIVE) — 9router requestDetail.js:64-76 / usage.js ollama.
+    let cached_tokens = response
+        .get("prompt_eval_cached_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
-    let usage = serde_json::json!({
+    let mut usage = serde_json::json!({
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens
     });
+    if cached_tokens > 0 {
+        usage["prompt_tokens_details"] = serde_json::json!({ "cached_tokens": cached_tokens });
+    }
 
     let created = chrono::Utc::now().timestamp();
     let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
@@ -818,6 +827,25 @@ mod tests {
         assert_eq!(resp["choices"][0]["finish_reason"], "stop");
         assert_eq!(resp["usage"]["prompt_tokens"], 10);
         assert_eq!(resp["usage"]["completion_tokens"], 20);
+    }
+
+    #[test]
+    fn test_ollama_to_openai_cached_tokens() {
+        // prompt_eval_cached_count is a cache-read subset of prompt_eval_count
+        // (cache-INCLUSIVE) — must surface as prompt_tokens_details.cached_tokens.
+        let mut resp = json!({
+            "model": "llama3",
+            "message": {"role": "assistant", "content": "hi"},
+            "done": true,
+            "prompt_eval_count": 1200,
+            "eval_count": 80,
+            "prompt_eval_cached_count": 900
+        });
+        let result = ollama_to_openai_non_streaming(&mut resp);
+        assert!(result);
+        assert_eq!(resp["usage"]["prompt_tokens"], 1200);
+        assert_eq!(resp["usage"]["total_tokens"], 1280);
+        assert_eq!(resp["usage"]["prompt_tokens_details"]["cached_tokens"], 900);
     }
 
     #[test]

@@ -104,7 +104,9 @@ pub const TABLES_SQL: &[&str] = &[
         machineId   TEXT,
         isActive    INTEGER NOT NULL DEFAULT 1,
         createdAt   TEXT NOT NULL,
-        monthly_budget_usd REAL
+        monthly_budget_usd REAL,
+        accessRestricted INTEGER DEFAULT 0,
+        accessAllow TEXT
     )
     "#,
     r#"
@@ -297,6 +299,10 @@ pub const DECLARED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("isActive", "INTEGER NOT NULL DEFAULT 1"),
             ("createdAt", "TEXT NOT NULL"),
             ("monthly_budget_usd", "REAL"),
+            // Per-key access control (9router schema.js:86-89) — additive
+            // columns picked up by sync_schema_from_tables on existing DBs.
+            ("accessRestricted", "INTEGER DEFAULT 0"),
+            ("accessAllow", "TEXT"),
         ],
     ),
     (

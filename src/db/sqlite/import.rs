@@ -210,8 +210,30 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     // API keys
     if let Some(arr) = payload.get("apiKeys").and_then(Value::as_array) {
         for item in arr {
+            // Per-key access (9router index.js:140-153): a backup without
+            // `access` restores unrestricted, exactly as before; a malformed
+            // `access` is refused rather than silently repaired.
+            let access = match item.get("access") {
+                Some(value) if !value.is_null() => {
+                    match crate::core::key_access::validate_key_access_input(value) {
+                        Ok(access) => access,
+                        Err(error) => {
+                            let id = item.get("id").and_then(Value::as_str).unwrap_or("?");
+                            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("apiKeys {id}: {error}"),
+                                ),
+                            )));
+                        }
+                    }
+                }
+                _ => crate::types::KeyAccess::default(),
+            };
+            let (access_restricted, access_allow) =
+                crate::core::key_access::key_access_to_columns(&access);
             conn.execute(
-                "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt, monthly_budget_usd) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt, monthly_budget_usd, accessRestricted, accessAllow) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 rusqlite::params![
                     item.get("id").and_then(Value::as_str).unwrap_or(""),
                     item.get("key").and_then(Value::as_str).unwrap_or(""),
@@ -220,6 +242,8 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                     item.get("monthlyBudgetUsd").and_then(Value::as_f64),
+                    access_restricted,
+                    access_allow,
                 ],
             )?;
         }

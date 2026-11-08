@@ -439,6 +439,8 @@ pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyh
         created_at: Some(chrono::Utc::now().to_rfc3339()),
         monthly_budget_usd: None,
         extra: std::collections::BTreeMap::new(),
+        access: Default::default(),
+
     };
 
     let db = Db::load().await?;

@@ -32,6 +32,7 @@ fn key_with_budget(budget: Option<f64>) -> ApiKey {
         created_at: Some("2026-01-01T00:00:00Z".into()),
         monthly_budget_usd: budget,
         extra: BTreeMap::new(),
+        access: Default::default(),
     }
 }
 

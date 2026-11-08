@@ -24,6 +24,7 @@ async fn app_state() -> AppState {
             created_at: None,
             monthly_budget_usd: None,
             extra: Default::default(),
+            access: Default::default(),
         });
         state.pricing = BTreeMap::from([(
             "openai".to_string(),

@@ -65,6 +65,7 @@ interface CLITool {
   notes?: Note[];
   guideSteps?: GuideStep[];
   codeBlock?: CodeBlock;
+  roles?: { id: string; label: string }[];
 }
 
 export const MITM_TOOLS: Record<string, MITMTool> = {
@@ -200,6 +201,30 @@ export const CLI_TOOLS: Record<string, CLITool> = {
     color: "#8B5CF6",
     description: "Nous Research self-improving AI agent",
     configType: "custom",
+    // Model slots Hermes supports besides the default ("model:" block).
+    // "default" is not listed — the card renders it as the main model picker.
+    // Mirrors the "auxiliary" defaults in hermes_cli/config_defaults.py (Hermes 0.21.5):
+    // web_extract/session_search no longer call an LLM (their leftover blocks are ignored,
+    // so exposing them only invites dead config), MoA slots are preset-driven and not listed.
+    roles: [
+      { id: "delegation", label: "Delegation (subagents)" },
+      { id: "vision", label: "Vision" },
+      { id: "compression", label: "Compression" },
+      { id: "title_generation", label: "Title Generation" },
+      { id: "approval", label: "Approval" },
+      { id: "skills_hub", label: "Skills Hub" },
+      { id: "mcp", label: "MCP" },
+      { id: "review", label: "Review (/review subagent)" },
+      { id: "memory_query_rewrite", label: "Memory Query Rewrite" },
+      { id: "background_review", label: "Background Review" },
+      { id: "curator", label: "Curator" },
+      { id: "monitor", label: "Monitor" },
+      { id: "tts_audio_tags", label: "TTS Audio Tags" },
+      { id: "triage_specifier", label: "Triage Specifier" },
+      { id: "kanban_decomposer", label: "Kanban Decomposer" },
+      { id: "profile_describer", label: "Profile Describer" },
+      { id: "goal_judge", label: "Goal Judge" },
+    ],
   },
   droid: {
     id: "droid",
@@ -533,6 +558,96 @@ gemini extensions install https://github.com/manalkaff/opendesign
 # OpenCode
 # Fetch and follow .opencode/INSTALL.md from the repo`,
     },
+  },
+  pi: {
+    id: "pi",
+    name: "Pi (pi-coding-agent)",
+    image: "/providers/pi.svg",
+    color: "#6366F1",
+    description: "Pi coding agent — minimal, extensible agent harness (pi.dev)",
+    configType: "custom",
+    docsUrl: "https://pi.dev",
+    notes: [
+      {
+        type: "info",
+        text: "Pi uses ~/.pi/agent/models.json. OpenProxy is configured under providers.9router as an OpenAI-compatible endpoint.",
+      },
+    ],
+  },
+  omp: {
+    id: "omp",
+    name: "Oh My Pi",
+    image: "/providers/omp.png",
+    color: "#EC4899",
+    description: "Oh My Pi terminal AI agent with auto-discovery support",
+    configType: "custom",
+    docsUrl: "https://github.com/can1357/oh-my-pi",
+    notes: [
+      {
+        type: "info",
+        text: "Oh My Pi uses ~/.omp/agent/models.yml and agent.db. OpenProxy is configured with proxy discovery so all models appear automatically under /model.",
+      },
+    ],
+  },
+  crush: {
+    id: "crush",
+    name: "Crush",
+    image: "/providers/crush.png",
+    color: "#FB923C",
+    description: "Charm Crush terminal AI coding agent",
+    configType: "custom",
+    docsUrl: "https://github.com/charmbracelet/crush",
+    notes: [
+      {
+        type: "info",
+        text: "Crush uses ~/.config/crush/crush.json. OpenProxy registers as an openai-compat provider.",
+      },
+    ],
+  },
+  forge: {
+    id: "forge",
+    name: "ForgeCode",
+    image: "/providers/forge.png",
+    color: "#EAB308",
+    description: "Antinomy HQ ForgeCode agent harness",
+    configType: "custom",
+    docsUrl: "https://github.com/antinomyhq/forge",
+    notes: [
+      {
+        type: "info",
+        text: "ForgeCode uses ~/.forge/config.toml. OpenProxy updates the [openai] section with your baseUrl, apiKey, and model.",
+      },
+    ],
+  },
+  smelt: {
+    id: "smelt",
+    name: "Smelt",
+    image: "/providers/smelt.svg",
+    color: "#EF4444",
+    description: "Smelt terminal AI coding assistant",
+    configType: "custom",
+    docsUrl: "https://github.com/leonardcser/smelt",
+    notes: [
+      {
+        type: "info",
+        text: "Smelt uses ~/.smelt/config.json for OpenAI-compatible endpoint configuration.",
+      },
+    ],
+  },
+  codewhale: {
+    id: "codewhale",
+    name: "CodeWhale",
+    image: "/providers/codewhale.svg",
+    color: "#4F46E5",
+    description: "CodeWhale terminal coding agent (successor to DeepSeek TUI)",
+    configType: "custom",
+    docsUrl: "https://github.com/Hmbown/CodeWhale",
+    notes: [
+      {
+        type: "info",
+        text: "CodeWhale uses ~/.codewhale/config.toml. OpenProxy configures the [openai] provider with your base_url, api_key, and model.",
+      },
+    ],
   },
 };
 

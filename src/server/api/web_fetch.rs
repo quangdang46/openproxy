@@ -111,6 +111,21 @@ async fn handle_web_fetch(
     let max_chars = req.max_characters.unwrap_or(usize::MAX);
     let snapshot = state.db.snapshot();
 
+    // Per-key access control (9router fetch.js:98 enforceKeyAccessProvider):
+    // the provider IS the model here, so a restricted key needs the provider
+    // id (or the combo) on its list. Runs before combo expansion.
+    let key_access_ctx = crate::core::key_access::context_for_presented_key(
+        crate::server::auth::extract_api_key(&headers).as_deref(),
+        &snapshot,
+    );
+    if let Err(message) = crate::core::key_access::enforce_key_access_provider(
+        key_access_ctx.as_ref(),
+        &provider_input,
+        &snapshot,
+    ) {
+        return fetch_error(StatusCode::FORBIDDEN, &message);
+    }
+
     // ── 4. Combo detection (baseline parity) ────────────────────────────────
     if let Some(combo_models) = get_combo_models_from_data(&provider_input, &snapshot.combos) {
         let strategy = strategy_for_combo(&snapshot, &provider_input);

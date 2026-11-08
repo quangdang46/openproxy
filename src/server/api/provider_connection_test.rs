@@ -794,6 +794,20 @@ async fn test_api_key_connection(
             )
             .await
         }
+        // runcrate's public /v1/models answers 200 for any key, so the generic
+        // {base}/models fallback below would rubber-stamp a bad credential.
+        // 9router registry/runcrate.js:24 validates against the billing
+        // balance endpoint instead (Bearer, valid when the GET succeeds).
+        "runcrate" | "rc" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://www.runcrate.ai/api/v1/billing/balance",
+                "Invalid API key",
+            )
+            .await
+        }
         "xiaomi-tokenplan" => {
             let region =
                 provider_specific_string(connection, "region").unwrap_or("sgp".to_string());

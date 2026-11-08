@@ -20,7 +20,11 @@ const STRATEGY_OPTIONS: ComboStrategyOption[] = [
 ];
 
 export type { Combo, ComboFormProvider, ComboHealthEntry } from "@/shared/components/ComboFormModal";
-import type { ComboFormProvider as Provider } from "@/shared/components/ComboFormModal";
+import type {
+  Combo,
+  ComboFormProvider as Provider,
+  ComboHealthEntry,
+} from "@/shared/components/ComboFormModal";
 
 // Capacity adapter entry (one capability pool). Entry form mirrors
 // 9router EMPTY_CAP_ENTRY; legacy array form normalized on load.

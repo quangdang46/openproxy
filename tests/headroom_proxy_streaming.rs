@@ -43,6 +43,7 @@ async fn app_for(base_url: &str) -> Router {
             created_at: None,
             monthly_budget_usd: None,
             extra: BTreeMap::new(),
+            access: Default::default(),
         }];
         state.settings.require_login = false;
         state.settings.headroom_url = base_url.to_string();

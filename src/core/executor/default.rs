@@ -289,6 +289,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
         ),
         (
+            // 9router registry/runcrate.js:22 — OpenAI-compatible
+            // DeepSeek/GLM/Qwen/gpt-oss. Its public /v1/models answers 200 for
+            // any key, so credential checks must use the billing balance
+            // endpoint (see provider_validate.rs / provider_connection_test.rs).
+            "runcrate",
+            ProviderConfig::openai("https://api.runcrate.ai/v1/chat/completions"),
+        ),
+        (
             "venice",
             // /api/v1 (double path) — do NOT "fix" to /v1.
             ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),
@@ -4192,6 +4200,17 @@ mod tests {
                 "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn runcrate_base_url_matches_js_registry() {
+        // 9router registry/runcrate.js:22 — transport.baseUrl. Note its
+        // /v1/models is public (answers 200 for any key); credential checks
+        // use the billing balance endpoint instead — see provider_validate.rs.
+        assert_eq!(
+            provider_config_base_url("runcrate"),
+            Some("https://api.runcrate.ai/v1/chat/completions".to_string())
         );
     }
 

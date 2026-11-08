@@ -24,6 +24,7 @@ fn active_key(key: &str) -> ApiKey {
         created_at: None,
         extra: std::collections::BTreeMap::new(),
         monthly_budget_usd: None,
+        access: Default::default(),
     }
 }
 

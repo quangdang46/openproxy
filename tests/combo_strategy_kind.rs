@@ -284,6 +284,7 @@ async fn seeded_app() -> (Router, Arc<Db>) {
             created_at: None,
             monthly_budget_usd: None,
             extra: BTreeMap::new(),
+            access: Default::default(),
         }];
     })
     .await

@@ -1,13 +1,22 @@
 mod claude_settings;
 mod cline_settings;
+mod codewhale_settings;
 mod cowork_settings;
+mod crush_settings;
 mod deepseek_tui_settings;
 mod devin_settings;
+mod forge_settings;
 mod grok_build_settings;
+mod hermes_profiles;
 mod hermes_settings;
+mod hermes_yaml;
 mod jcode_settings;
 mod kilo_settings;
+mod omp_settings;
 mod openclaw_settings;
+mod pi_settings;
+mod shared;
+mod smelt_settings;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -456,6 +465,240 @@ async fn delete_codex_settings(State(state): State<AppState>, headers: HeaderMap
             Json(json!({ "error": format!("Failed to reset codex settings: {error}") })),
         )
             .into_response(),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Codex CLI Profiles (multiple model profiles)
+// GET/POST/DELETE /api/cli-tools/codex-profiles
+// 9router parity: src/app/api/cli-tools/codex-profiles/route.js (v0.5.112).
+// Codex CLI loads `~/.codex/<name>.config.toml` when invoked as
+// `codex -p <name>`; each profile file pins a `model` + `model_provider` and
+// inherits the provider table (base_url, http_headers) from config.toml.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexProfile {
+    name: String,
+    model: String,
+    command: String,
+}
+
+fn codex_profile_command(name: &str) -> String {
+    format!("codex -p {name}")
+}
+
+/// Upstream: /^[a-zA-Z0-9_-]+$/ && len <= 64 && lowercased != "config".
+fn is_valid_codex_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !name.eq_ignore_ascii_case("config")
+}
+
+/// Upstream: non-empty after trim, <= 256 chars, no CR/LF/quote.
+fn is_valid_codex_profile_model(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 256
+        && !model.contains(['\r', '\n', '"'])
+}
+
+/// Extract the `model = "..."` line from a profile TOML file.
+fn parse_codex_profile_model(content: &str) -> String {
+    let re = regex::Regex::new(r#"(?m)^\s*model\s*=\s*["']([^"'\n]+)["']"#).unwrap();
+    re.captures(content)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default()
+}
+
+/// GET /api/cli-tools/codex-profiles — list `~/.codex/*.config.toml` profiles.
+async fn get_codex_profiles(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let dir = codex_dir();
+    let mut read_dir = match fs::read_dir(&dir).await {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Json(json!({ "profiles": [] })).into_response();
+        }
+        Err(error) => {
+            tracing::warn!(?error, "failed to read codex profiles dir");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to read profiles" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        match read_dir.next_entry().await {
+            Ok(Some(entry)) => {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.ends_with(".config.toml") && file_name != "config.toml" {
+                    if let Some(name) = file_name
+                        .strip_suffix(".config.toml")
+                        .map(str::to_string)
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(?error, "failed to read codex profiles dir entry");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "Failed to read profiles" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    names.sort();
+
+    let mut profiles = Vec::with_capacity(names.len());
+    for name in names {
+        let model = match fs::read_to_string(dir.join(format!("{name}.config.toml"))).await {
+            Ok(content) => parse_codex_profile_model(&content),
+            Err(_) => String::new(),
+        };
+        profiles.push(CodexProfile {
+            command: codex_profile_command(&name),
+            name,
+            model,
+        });
+    }
+
+    Json(json!({ "profiles": profiles })).into_response()
+}
+
+/// POST /api/cli-tools/codex-profiles — create/update `~/.codex/<name>.config.toml`.
+async fn save_codex_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !is_valid_codex_profile_name(&name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Profile name can only contain alphanumeric characters, dashes, underscores and cannot be 'config'" })),
+        )
+            .into_response();
+    }
+
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_valid_codex_profile_model(&model) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid model name" })),
+        )
+            .into_response();
+    }
+
+    let dir = codex_dir();
+    if let Err(error) = fs::create_dir_all(&dir).await {
+        tracing::warn!(?error, "failed to create codex dir for profile");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Failed to save profile" })),
+        )
+            .into_response();
+    }
+
+    let file_path = dir.join(format!("{name}.config.toml"));
+    // Upstream writes model_provider = "9router"; openproxy's provider key is
+    // "openproxy" (see write_codex_settings / codex_openproxy_provider_table),
+    // so the profile must point at that table in config.toml.
+    let content = format!(
+        "# codex -p {name}\nmodel = \"{model}\"\nmodel_provider = \"openproxy\"\n"
+    );
+    if let Err(error) = fs::write(&file_path, content).await {
+        tracing::warn!(?error, "failed to write codex profile");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Failed to save profile" })),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "success": true,
+        "profile": CodexProfile {
+            command: codex_profile_command(&name),
+            name,
+            model,
+        },
+    }))
+    .into_response()
+}
+
+/// DELETE /api/cli-tools/codex-profiles — remove `~/.codex/<name>.config.toml`.
+async fn delete_codex_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !is_valid_codex_profile_name(&name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid profile name" })),
+        )
+            .into_response();
+    }
+
+    let file_path = codex_dir().join(format!("{name}.config.toml"));
+    match fs::remove_file(&file_path).await {
+        Ok(()) => Json(json!({
+            "success": true,
+            "message": format!("Profile {name} deleted"),
+        }))
+        .into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Profile not found" })),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!(?error, "failed to delete codex profile");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to delete profile" })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -3022,6 +3265,12 @@ pub fn routes() -> Router<AppState> {
         .merge(jcode_settings::routes())
         .merge(kilo_settings::routes())
         .merge(openclaw_settings::routes())
+        .merge(pi_settings::routes())
+        .merge(omp_settings::routes())
+        .merge(crush_settings::routes())
+        .merge(forge_settings::routes())
+        .merge(smelt_settings::routes())
+        .merge(codewhale_settings::routes())
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
@@ -3033,6 +3282,13 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/cli-tools/codex-settings",
             delete(delete_codex_settings),
+        )
+        // Codex profiles (multiple model profiles)
+        .route("/api/cli-tools/codex-profiles", get(get_codex_profiles))
+        .route("/api/cli-tools/codex-profiles", post(save_codex_profile))
+        .route(
+            "/api/cli-tools/codex-profiles",
+            delete(delete_codex_profile),
         )
         .route("/api/cli-tools/copilot-settings", get(get_copilot_settings))
         .route(
@@ -3586,6 +3842,12 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
         jcode,
         copilot,
         grok_build,
+        pi,
+        omp,
+        crush,
+        forge,
+        smelt,
+        codewhale,
     ) = tokio::join!(
         async {
             response_json_value(
@@ -3623,7 +3885,12 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
         },
         async {
             response_json_value(
-                hermes_settings::get_hermes_settings(State(state.clone()), headers.clone()).await,
+                hermes_settings::get_hermes_settings(
+                    State(state.clone()),
+                    headers.clone(),
+                    Query(std::collections::HashMap::new()),
+                )
+                .await,
             )
             .await
         },
@@ -3660,6 +3927,43 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
             )
             .await
         },
+        async {
+            response_json_value(
+                pi_settings::get_pi_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                omp_settings::get_omp_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                crush_settings::get_crush_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                forge_settings::get_forge_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                smelt_settings::get_smelt_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                codewhale_settings::get_codewhale_settings(State(state.clone()), headers.clone())
+                    .await,
+            )
+            .await
+        },
     );
 
     let mut statuses = serde_json::Map::new();
@@ -3676,6 +3980,12 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
     statuses.insert("jcode".into(), jcode);
     statuses.insert("copilot".into(), copilot);
     statuses.insert("grok-build".into(), grok_build);
+    statuses.insert("pi".into(), pi);
+    statuses.insert("omp".into(), omp);
+    statuses.insert("crush".into(), crush);
+    statuses.insert("forge".into(), forge);
+    statuses.insert("smelt".into(), smelt);
+    statuses.insert("codewhale".into(), codewhale);
 
     Json(Value::Object(statuses)).into_response()
 }
@@ -3793,6 +4103,40 @@ mod tests {
             Some("Bearer sk-abc123"),
             "Codex only sends auth for a custom provider via http_headers.Authorization"
         );
+    }
+
+    #[test]
+    fn codex_profile_name_validation_matches_upstream() {
+        assert!(is_valid_codex_profile_name("claude"));
+        assert!(is_valid_codex_profile_name("my-model_2"));
+        assert!(is_valid_codex_profile_name(&"a".repeat(64)));
+        assert!(!is_valid_codex_profile_name(""));
+        assert!(!is_valid_codex_profile_name(&"a".repeat(65)));
+        assert!(!is_valid_codex_profile_name("bad name"));
+        assert!(!is_valid_codex_profile_name("bad/name"));
+        assert!(!is_valid_codex_profile_name("config"));
+        assert!(!is_valid_codex_profile_name("CONFIG"));
+        assert!(!is_valid_codex_profile_name("cönfig"));
+    }
+
+    #[test]
+    fn codex_profile_model_validation_matches_upstream() {
+        assert!(is_valid_codex_profile_model("openai/gpt-5"));
+        assert!(!is_valid_codex_profile_model(""));
+        assert!(!is_valid_codex_profile_model("has\nnewline"));
+        assert!(!is_valid_codex_profile_model("has\"quote"));
+        assert!(!is_valid_codex_profile_model(&"m".repeat(257)));
+    }
+
+    #[test]
+    fn parse_codex_profile_model_extracts_model_line() {
+        let content = "# codex -p claude\nmodel = \"anthropic/claude-sonnet-4\"\nmodel_provider = \"openproxy\"\n";
+        assert_eq!(
+            parse_codex_profile_model(content),
+            "anthropic/claude-sonnet-4"
+        );
+        assert_eq!(parse_codex_profile_model("model_provider = \"x\"\n"), "");
+        assert_eq!(parse_codex_profile_model(""), "");
     }
 
     #[test]

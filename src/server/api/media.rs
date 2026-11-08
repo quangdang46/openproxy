@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::core::model::{get_model_info, ModelRouteKind, ResolvedModel};
 use crate::core::proxy::resolve_proxy_target;
-use crate::server::auth::require_api_key_with_reload;
+use crate::server::auth::{extract_api_key, require_api_key_with_reload};
 use crate::server::state::AppState;
 use crate::types::AppDb;
 
@@ -533,6 +533,24 @@ async fn video_create_proxy(
             Err(_) => video_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
         }
     } else {
+        // Multipart / other: the model cannot be verified without parsing
+        // the form, so a restricted key is denied outright — upstream's
+        // `bodyInfo.parsed?.model` is empty on this arm and
+        // enforceKeyAccessResolved fails closed the same way.
+        let snapshot = state.db.snapshot();
+        let key_access_ctx = crate::core::key_access::context_for_presented_key(
+            extract_api_key(&headers).as_deref(),
+            &snapshot,
+        );
+        if let Err(message) = crate::core::key_access::enforce_key_access_resolved(
+            key_access_ctx.as_ref(),
+            "",
+            Some(DEFAULT_VIDEO_PROVIDER),
+            None,
+            &snapshot,
+        ) {
+            return video_error_response(StatusCode::FORBIDDEN, &message);
+        }
         // Multipart / other: forward raw bytes verbatim.
         let raw_body = match axum::body::to_bytes(request.into_body(), 512 * 1024 * 1024).await {
             Ok(b) => b,
@@ -939,6 +957,45 @@ async fn generic_media_handler(
         }
         None => get_model_info(model_str, &snapshot),
     };
+
+    // Per-key access control (9router src/sse/services/keyAccess.js), placed
+    // exactly where each upstream handler puts it:
+    //   * combo-capable kinds (tts, image generation) gate on the requested
+    //     `model` string BEFORE combo expansion — an allowed combo grants
+    //     its members;
+    //   * search/fetch treat the provider AS the model;
+    //   * everything else resolves provider/model first and gates on that
+    //     resolved pair (a combo on a non-expanding route denies, matching
+    //     upstream's null-provider outcome).
+    let key_access_ctx = crate::core::key_access::context_for_presented_key(
+        extract_api_key(&headers).as_deref(),
+        &snapshot,
+    );
+    let key_access_denied = if combo_expands(route_kind) || route_kind == "images/edits" {
+        crate::core::key_access::enforce_key_access(
+            key_access_ctx.as_ref(),
+            model_str,
+            &snapshot,
+        )
+    } else if route_kind == "search" {
+        // Upstream `body.provider || body.model` is the provider input.
+        crate::core::key_access::enforce_key_access_provider(
+            key_access_ctx.as_ref(),
+            explicit_provider.unwrap_or(model_str),
+            &snapshot,
+        )
+    } else {
+        crate::core::key_access::enforce_key_access_resolved(
+            key_access_ctx.as_ref(),
+            model_str,
+            resolved.provider.as_deref(),
+            Some(resolved.model.as_str()),
+            &snapshot,
+        )
+    };
+    if let Err(message) = key_access_denied {
+        return json_error_response(StatusCode::FORBIDDEN, &message);
+    }
 
     match resolved.route_kind {
         ModelRouteKind::Combo if combo_expands(route_kind) => {
@@ -2018,6 +2075,29 @@ async fn video_create_handler(
         Ok(resolved) => resolved,
         Err(resp) => return resp,
     };
+
+    // Per-key access control (9router videoGeneration.js:125-128
+    // enforceKeyAccessResolved): gate on the resolved provider/model. A
+    // restricted key whose target cannot be verified (no model field) is
+    // denied — an unverifiable target is not an allowed one.
+    let snapshot = state.db.snapshot();
+    let key_access_ctx = crate::core::key_access::context_for_presented_key(
+        extract_api_key(&headers).as_deref(),
+        &snapshot,
+    );
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Err(message) = crate::core::key_access::enforce_key_access_resolved(
+        key_access_ctx.as_ref(),
+        requested_model,
+        Some(provider.as_str()),
+        model.as_deref(),
+        &snapshot,
+    ) {
+        return video_error_response(StatusCode::FORBIDDEN, &message);
+    }
 
     // Adapter dispatch (9router `videoProviders/index.js getVideoAdapter`):
     // the default (xAI) shape forwards the raw body to {base}/{action};

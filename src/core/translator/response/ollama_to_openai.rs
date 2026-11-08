@@ -33,12 +33,28 @@ pub fn ollama_to_openai_response(
     let created = state.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
 
     if chunk.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let usage = serde_json::json!({
-            "prompt_tokens": chunk.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0),
-            "completion_tokens": chunk.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0),
-            "total_tokens": chunk.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0)
-                + chunk.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0)
+        let prompt_tokens = chunk
+            .get("prompt_eval_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = chunk
+            .get("eval_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        // prompt_eval_cached_count is a cache-read subset of prompt_eval_count
+        // (cache-INCLUSIVE) — 9router usage.js ollama extractor.
+        let cached_tokens = chunk
+            .get("prompt_eval_cached_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut usage = serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
         });
+        if cached_tokens > 0 {
+            usage["prompt_tokens_details"] = serde_json::json!({ "cached_tokens": cached_tokens });
+        }
 
         let mut finish_reason = "stop";
         if chunk.get("done_reason").and_then(|v| v.as_str()) == Some("tool_calls")
