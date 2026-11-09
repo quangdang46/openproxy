@@ -970,6 +970,62 @@ impl UpstreamResponse {
     }
 }
 
+/// 9router `minimax-code` executor `normalizeQuotaResponse` + `QUOTA_RE`:
+/// MiniMax Code reports credit/quota exhaustion as 402/403 (and 429) with a
+/// body that names the balance. chatCore treats 401/403 as refresh-and-retry
+/// and 429 as switch-to-the-next-account, so a credits refusal left at 402/403
+/// would keep retrying a half-spent account instead of failing over. Only
+/// 402/403 bodies that name the balance are rewritten — a 403 that does NOT
+/// match is a real auth refusal and must keep its status.
+///
+/// Returns the client-facing `rate_limit_error` message when the body is a
+/// quota refusal, `None` otherwise (pass-through).
+fn minimax_quota_message(provider: &str, status: u16, body: &str) -> Option<String> {
+    if !matches!(provider, "minimax-code" | "minimax-code-global") {
+        return None;
+    }
+    if status != 402 && status != 403 {
+        return None;
+    }
+    // QUOTA_RE = /insufficient|balance|credit|quota|exhaust|limit|余额|积分|额度|不足|用完|上限/i
+    const NEEDLES: &[&str] = &[
+        "insufficient",
+        "balance",
+        "credit",
+        "quota",
+        "exhaust",
+        "limit",
+        "余额",
+        "积分",
+        "额度",
+        "不足",
+        "用完",
+        "上限",
+    ];
+    let lower = body.to_lowercase();
+    if !NEEDLES.iter().any(|n| lower.contains(n)) {
+        return None;
+    }
+    // Message extraction mirrors upstream: error.message ?? message ?? msg ??
+    // base_resp.status_msg ?? raw trimmed text.
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let msg = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| parsed.as_ref().and_then(|v| v.get("message").and_then(Value::as_str)))
+        .or_else(|| parsed.as_ref().and_then(|v| v.get("msg").and_then(Value::as_str)))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.pointer("/base_resp/status_msg").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| body.trim().chars().take(500).collect());
+    Some(format!("usage limit reached: {msg}"))
+}
+
 #[derive(Debug)]
 pub enum ExecutorError {
     UnsupportedProvider(String),
@@ -2740,6 +2796,16 @@ impl DefaultExecutor {
                 // 401 / 403: try credential refresh and retry once with new creds.
                 if status == http::StatusCode::UNAUTHORIZED || status == http::StatusCode::FORBIDDEN
                 {
+                    // MiniMax Code quota rewrite (9router minimax-code executor
+                    // normalizeQuotaResponse): a 403 whose body names the
+                    // balance is a credits refusal, not an auth failure — it
+                    // must surface as 429 so fallback rotates accounts. The
+                    // body is only read for minimax-code providers on 403.
+                    let mut quota_body: Option<String> = None;
+                    let is_minimax_code = matches!(
+                        self.provider.as_str(),
+                        "minimax-code" | "minimax-code-global"
+                    );
                     if retry == 0 {
                         if let Some(new_creds) =
                             self.try_refresh_credentials(&request.credentials).await
@@ -2791,15 +2857,38 @@ impl DefaultExecutor {
                             // that became a 429 is a quota problem, and the
                             // caller picks cooldown and backoff from this.
                             status = retry_resp.status();
+                            if is_minimax_code
+                                && status == http::StatusCode::FORBIDDEN
+                            {
+                                quota_body = Some(
+                                    retry_resp.text().await.chars().take(4000).collect(),
+                                );
+                            }
                         }
                     }
-                    // No refresh or refresh didn't help — try next fallback URL,
-                    // but keep the status so exhaustion does not report a
-                    // blanket 500 for what upstream actually answered.
-                    last_failure = Some(ExecutorError::UpstreamStatus(
-                        status,
-                        format!("upstream returned {} for URL {}", status.as_u16(), url),
-                    ));
+                    // No refresh or refresh didn't help — inspect the original
+                    // response for the MiniMax quota signature, then try the
+                    // next fallback URL while keeping the real status so
+                    // exhaustion does not report a blanket 500.
+                    if quota_body.is_none()
+                        && is_minimax_code
+                        && status == http::StatusCode::FORBIDDEN
+                    {
+                        quota_body = Some(
+                            upstream.text().await.chars().take(4000).collect(),
+                        );
+                    }
+                    let (err_status, err_detail) = match quota_body
+                        .as_deref()
+                        .and_then(|b| minimax_quota_message(&self.provider, status.as_u16(), b))
+                    {
+                        Some(msg) => (http::StatusCode::TOO_MANY_REQUESTS, msg),
+                        None => (
+                            status,
+                            format!("upstream returned {} for URL {}", status.as_u16(), url),
+                        ),
+                    };
+                    last_failure = Some(ExecutorError::UpstreamStatus(err_status, err_detail));
                     break;
                 }
 
@@ -2904,6 +2993,17 @@ impl DefaultExecutor {
                 // the body here blinded check_fallback_error's message matching).
                 let body_text = upstream.text().await;
                 let body_text = body_text.chars().take(2000).collect::<String>();
+                // MiniMax Code quota rewrite: a 402 (or any other status that
+                // reaches this fallthrough) whose body names the balance is a
+                // credits refusal — surface 429 so account fallback rotates.
+                if let Some(msg) =
+                    minimax_quota_message(&self.provider, status.as_u16(), &body_text)
+                {
+                    return Err(ExecutorError::UpstreamStatus(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        msg,
+                    ));
+                }
                 return Err(ExecutorError::UpstreamStatus(
                     status,
                     if body_text.is_empty() {
