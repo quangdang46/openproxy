@@ -202,7 +202,8 @@ fn now_ms() -> i64 {
 /// (Distinct from the v2 `opencode/<channel>/<version>/<client>` check in
 /// `opencode.rs`.)
 fn has_valid_opencode_version(ua: &str) -> bool {
-    let Some(rest) = ua.trim().to_lowercase().strip_prefix("opencode/") else {
+    let lower = ua.trim().to_lowercase();
+    let Some(rest) = lower.strip_prefix("opencode/") else {
         return false;
     };
     let ver = rest.split('/').next().unwrap_or("");

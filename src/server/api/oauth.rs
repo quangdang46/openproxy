@@ -7507,6 +7507,152 @@ async fn xai_manual_code(
     }
 }
 
+/// GET /api/oauth/{provider}/lease-status — MiniMax Code desktop broker
+/// probe (9router `[action]` route `lease-status`): is the desktop app
+/// installed, running and signed in on this machine? Read-only — leases
+/// nothing.
+async fn minimax_lease_status(
+    State(_state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    const MCODE_LEASE_PROVIDERS: [&str; 2] = ["minimax-code", "minimax-code-global"];
+    if !MCODE_LEASE_PROVIDERS.contains(&provider.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "lease-status only supported for minimax-code/minimax-code-global" })),
+        )
+            .into_response();
+    }
+    let data_dir = params
+        .get("data_dir")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::oauth::minimax_lease::resolve_mcode_data_dir(None));
+    match crate::oauth::minimax_lease::request_status(&data_dir, 5_000).await {
+        Ok(status) => Json(json!({
+            "found": true,
+            "dataDir": data_dir.to_string_lossy(),
+            "status": status.status,
+            "generation": status.generation,
+            "expiresAtMs": status.expires_at_ms,
+        }))
+        .into_response(),
+        Err(error) => Json(json!({
+            "found": false,
+            "dataDir": data_dir.to_string_lossy(),
+            "error": error.code,
+            "message": error.message,
+        }))
+        .into_response(),
+    }
+}
+
+/// POST /api/oauth/{provider}/lease-connect — MiniMax Code: create a
+/// connection that borrows the desktop app's sign-in over the local
+/// auth-lease pipe (authType "mcode-lease"). The router stores no tokens
+/// for it — the desktop broker owns refresh.
+async fn minimax_lease_connect(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    const MCODE_LEASE_PROVIDERS: [&str; 2] = ["minimax-code", "minimax-code-global"];
+    if !MCODE_LEASE_PROVIDERS.contains(&provider.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "lease-connect only supported for minimax-code/minimax-code-global" })),
+        )
+            .into_response();
+    }
+    let data_dir = body
+        .get("dataDir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::oauth::minimax_lease::resolve_mcode_data_dir(None));
+    // Validate availability up front so the user gets the broker's exact
+    // failure reason instead of a dead connection.
+    if let Err(error) =
+        crate::oauth::minimax_lease::request_lease(&data_dir, 0, 10_000).await
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": error.message, "code": error.code })),
+        )
+            .into_response();
+    }
+
+    let data_dir_key = data_dir.to_string_lossy().to_string();
+    let snapshot = state.db.snapshot();
+    // Idempotent: one lease connection per (provider, data dir).
+    if let Some(existing) = snapshot.provider_connections.iter().find(|c| {
+        c.provider == provider
+            && c.auth_type == "mcode-lease"
+            && c.provider_specific_data
+                .get("mcodeDataDir")
+                .and_then(Value::as_str)
+                .map(|s| s.trim() == data_dir_key)
+                .unwrap_or(false)
+    }) {
+        return Json(json!({
+            "success": true,
+            "connection": { "id": existing.id, "provider": existing.provider },
+            "reused": true,
+        }))
+        .into_response();
+    }
+    drop(snapshot);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let connection = ProviderConnection {
+        id: Uuid::new_v4().to_string(),
+        provider: provider.clone(),
+        auth_type: "mcode-lease".to_string(),
+        name: Some(if provider == "minimax-code-global" {
+            "MiniMax Desktop (Lease, Global)".to_string()
+        } else {
+            "MiniMax Desktop (Lease)".to_string()
+        }),
+        is_active: Some(true),
+        test_status: Some("active".to_string()),
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        provider_specific_data: std::collections::BTreeMap::from([(
+            "mcodeDataDir".to_string(),
+            Value::String(data_dir_key),
+        )]),
+        ..Default::default()
+    };
+    let conn_id = connection.id.clone();
+    let conn_provider = connection.provider.clone();
+    let conn_id_resp = conn_id.clone();
+    let conn_provider_resp = conn_provider.clone();
+    match state
+        .db
+        .update(move |db| {
+            if db
+                .provider_connections
+                .iter()
+                .any(|c| c.id == conn_id && c.provider == conn_provider)
+            {
+                return;
+            }
+            db.provider_connections.push(connection);
+        })
+        .await
+    {
+        Ok(_) => Json(json!({
+            "success": true,
+            "connection": { "id": conn_id_resp, "provider": conn_provider_resp },
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/oauth/codex/bulk-import", post(codex_bulk_import))
@@ -7585,6 +7731,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/{provider}/poll", post(poll_device_code))
         .route("/api/oauth/{provider}/refresh", post(refresh_token))
         .route("/api/oauth/{provider}/status", get(oauth_status))
+        .route(
+            "/api/oauth/{provider}/lease-status",
+            get(minimax_lease_status),
+        )
+        .route(
+            "/api/oauth/{provider}/lease-connect",
+            post(minimax_lease_connect),
+        )
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -441,6 +441,18 @@ pub struct ComboStrategyConfig {
     pub judge_model: Option<String>,
     #[serde(default)]
     pub fusion_tuning: Option<Value>,
+    /// Smart Router knobs (9router `comboStrategies[name].routerModel` /
+    /// `smartPolicy` / `sessionSticky` / `confidenceThreshold`, read by
+    /// chat.js:154-156,249-251). Only consulted when the strategy is
+    /// `"smart"`.
+    #[serde(default)]
+    pub router_model: Option<String>,
+    #[serde(default)]
+    pub smart_policy: Option<String>,
+    #[serde(default)]
+    pub session_sticky: Option<bool>,
+    #[serde(default)]
+    pub confidence_threshold: Option<f64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

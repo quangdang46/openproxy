@@ -1973,6 +1973,16 @@
           "kind": "image"
         },
         {
+          "id": "gpt-image-2.6-flare",
+          "name": "GPT Image 2.6 Flare",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.6-sunburst",
+          "name": "GPT Image 2.6 Sunburst",
+          "kind": "image"
+        },
+        {
           "id": "gpt-image-2",
           "name": "GPT Image 2",
           "kind": "image"

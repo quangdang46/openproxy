@@ -395,7 +395,6 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "kilocode"
                 | "deepseek-web"
                 | "ds-web"
-                | "qoder-cn"
                 | "tokenharbor"
                 | "minimax-code"
                 | "minimax-code-global"

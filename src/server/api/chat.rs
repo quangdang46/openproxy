@@ -628,6 +628,23 @@ async fn chat_completions_impl(
                 };
             }
             let sticky_limit = snapshot.settings.combo_sticky_round_robin_limit.max(1);
+            // Smart Router pre-pass (9router combo.js:372-448 +
+            // src/sse/services/systemoneRouter.js): a System One decision
+            // model orders the members before fallback iteration. Fails
+            // open to the configured order on any router error.
+            let dispatch_models = if strategy == ComboStrategy::Smart {
+                smart_order_combo_models(
+                    &state,
+                    &snapshot,
+                    &combo_name,
+                    &augmented_models,
+                    &body,
+                    &headers_map,
+                )
+                .await
+            } else {
+                augmented_models.clone()
+            };
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -883,7 +900,7 @@ async fn chat_completions_impl(
                 let attempted_members = attempted_members.clone();
                 let combo_headers = headers_map.clone();
                 execute_combo_strategy_full(
-                    &augmented_models,
+                    &dispatch_models,
                     Some(&combo_name),
                     strategy,
                     &disabled_members,
@@ -10431,4 +10448,172 @@ mod client_raw_header_map_tests {
     fn absent_headers_yield_an_empty_map() {
         assert!(client_raw_header_map(None).is_empty());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Smart Router combo strategy (bead openproxy-4d5h.9) — backend port of
+// 9router `comboStrategy === "smart"`: System One decision call +
+// smart/strict/per-turn policies + session stickiness. Web/dashboard
+// surface intentionally untouched per task constraints.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Resolve the per-combo smart-router knobs from
+/// `settings.comboStrategies[name]` (chat.js:140,154-156,249-251).
+fn combo_smart_config(
+    snapshot: &crate::types::AppDb,
+    combo_name: &str,
+) -> crate::core::combo::smart::SmartRouterConfig {
+    use crate::core::combo::smart::SmartRouterConfig;
+    let mut cfg = SmartRouterConfig::default();
+    if let Some(crate::types::ComboStrategyEntry::Config(entry)) =
+        snapshot.settings.combo_strategies.get(combo_name)
+    {
+        if let Some(v) = entry.router_model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            cfg.router_model = v.to_string();
+        }
+        if let Some(v) = entry.smart_policy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            cfg.smart_policy = v.to_string();
+        }
+        if let Some(v) = entry.session_sticky {
+            cfg.session_sticky = v;
+        }
+        if let Some(v) = entry.confidence_threshold {
+            cfg.confidence_threshold = v;
+        }
+    }
+    cfg
+}
+
+/// Client-provided session id — port of `extractClientSessionId`
+/// (open-sse/utils/sessionManager.js:138-157): Claude Code header /
+/// `metadata.user_id`, the generic session headers, `x-client-request-id`,
+/// then `prompt_cache_key` / `session_id` / `conversation_id` /
+/// `metadata.user_id` in the body. Returns `None` when the client sent no
+/// session signal (stickiness then stays off, matching upstream's
+/// `sessionId` gate).
+fn combo_session_id(
+    headers: &std::collections::HashMap<String, String>,
+    body: &Value,
+) -> Option<String> {
+    fn norm(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .map(str::to_string)
+    }
+    let header = |key: &str| norm(headers.get(key).map(String::as_str));
+
+    // Claude Code: `_session_{uuid}` suffix in metadata.user_id or the
+    // dedicated header.
+    let claude_from_body = body
+        .get("metadata")
+        .and_then(|m| m.get("user_id"))
+        .and_then(Value::as_str)
+        .and_then(|uid| {
+            uid.rsplit("_session_")
+                .next()
+                .filter(|_| uid.contains("_session_"))
+                .map(str::to_string)
+                .or_else(|| {
+                    uid.strip_prefix('{')
+                        .and_then(|_| serde_json::from_str::<Value>(uid).ok())
+                        .and_then(|v| {
+                            v.get("session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                })
+        });
+    if let Some(id) = claude_from_body.or_else(|| header("x-claude-code-session-id")) {
+        return Some(format!("claude:{id}"));
+    }
+    for key in [
+        "x-session-id",
+        "session-id",
+        "session_id",
+        "x-amp-thread-id",
+    ] {
+        if let Some(v) = header(key) {
+            return Some(v);
+        }
+    }
+    if let Some(v) = header("x-client-request-id") {
+        return Some(v);
+    }
+    norm(body.get("prompt_cache_key").and_then(Value::as_str))
+        .or_else(|| norm(body.get("session_id").and_then(Value::as_str)))
+        .or_else(|| norm(body.get("conversation_id").and_then(Value::as_str)))
+        .or_else(|| {
+            norm(body
+                .get("metadata")
+                .and_then(|m| m.get("user_id"))
+                .and_then(Value::as_str))
+        })
+}
+
+/// Smart Router ordering pre-pass — the async half of
+/// `handleComboChat`'s `comboStrategy === "smart"` block. Resolves the
+/// router model's System One credentials, evaluates the route question,
+/// and returns the reordered member list. Every failure path returns the
+/// configured order untouched (upstream fails open identically).
+async fn smart_order_combo_models(
+    state: &AppState,
+    snapshot: &crate::types::AppDb,
+    combo_name: &str,
+    models: &[String],
+    body: &Value,
+    headers: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    use crate::core::combo::smart;
+
+    if models.len() <= 1 {
+        return models.to_vec();
+    }
+    let cfg = combo_smart_config(snapshot, combo_name);
+    let session_id = combo_session_id(headers, body);
+    let policy = cfg.smart_policy.to_lowercase();
+    let is_per_turn = policy == "per-turn" || !cfg.session_sticky;
+    let is_strict = policy == "strict";
+
+    // Strict Lock with a warm session skips the router call entirely
+    // (combo.js:394-396 — "0ms, 0 extra tokens").
+    let sticky = if !is_per_turn {
+        session_id.as_deref().and_then(|sid| {
+            smart::get_sticky_combo_model(combo_name, sid, models)
+        })
+    } else {
+        None
+    };
+    let need_eval = !(is_strict && sticky.is_some());
+
+    let choice = if need_eval {
+        let state_text = smart::extract_prompt_state(body, smart::MAX_STATE_CHARS);
+        let criteria = smart::build_choice_criteria(models);
+        if state_text.is_empty() || criteria.is_empty() {
+            None
+        } else {
+            let decision_body = json!({
+                "state": state_text,
+                "questions": {
+                    "route": {
+                        "type": "choice",
+                        "instructions": "Which of these configured models is the most appropriate for this request?",
+                        "criteria": criteria,
+                    }
+                }
+            });
+            crate::server::api::media::systemone_decision(
+                state,
+                &cfg.router_model,
+                &decision_body,
+            )
+            .await
+            .and_then(|json| smart::parse_systemone_route_answer(&json))
+        }
+    } else {
+        None
+    };
+
+    smart::apply_smart_ordering(models, combo_name, session_id.as_deref(), &cfg, choice.as_ref())
+        .models
 }

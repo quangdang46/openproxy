@@ -147,7 +147,11 @@
     "muse": "muse",
     "bedrock": "br",
     "bedrock-xai": "brx",
-    "v1m": "v1m"
+    "v1m": "v1m",
+    "nace": "nace",
+    "drex": "nace",
+    "uc-web": "uc-web",
+    "veoaifree-web": "veoaifree-web"
   },
   "providerModels": [
     {
@@ -491,6 +495,16 @@
         {
           "id": "gpt-image-2.5-sunburst",
           "name": "GPT Image 2.5 Sunburst",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.6-flare",
+          "name": "GPT Image 2.6 Flare",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.6-sunburst",
+          "name": "GPT Image 2.6 Sunburst",
           "kind": "image"
         },
         {
@@ -4184,17 +4198,17 @@
         {
           "id": "clef",
           "name": "Clef",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "clef-flash",
           "name": "Clef Flash",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "clef:cloud",
           "name": "Clef (Cloud)",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -8861,6 +8875,316 @@
           "kind": "systemone"
         }
       ]
+    },
+    {
+      "alias": "nace",
+      "models": [
+        {
+          "id": "drex-max",
+          "name": "Drex Max",
+          "kind": "systemone"
+        },
+        {
+          "id": "drex-v2.0",
+          "name": "Drex 2.0",
+          "kind": "systemone"
+        }
+      ]
+    },
+    {
+      "alias": "uc-web",
+      "models": [
+        {
+          "id": "seedream-v4.5",
+          "name": "seedream-v4.5",
+          "kind": "image"
+        },
+        {
+          "id": "seedream-v5",
+          "name": "seedream-v5",
+          "kind": "image"
+        },
+        {
+          "id": "seedream-v5-flash",
+          "name": "seedream-v5-flash",
+          "kind": "image"
+        },
+        {
+          "id": "nano-banana-pro-ultra",
+          "name": "nano-banana-pro-ultra",
+          "kind": "image"
+        },
+        {
+          "id": "nano-banana-pro",
+          "name": "nano-banana-pro",
+          "kind": "image"
+        },
+        {
+          "id": "nano-banana",
+          "name": "nano-banana",
+          "kind": "image"
+        },
+        {
+          "id": "nano-banana-2",
+          "name": "nano-banana-2",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image",
+          "name": "gpt-image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2",
+          "name": "gpt-image-2",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.5-flare",
+          "name": "gpt-image-2.5-flare",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.5-sunburst",
+          "name": "gpt-image-2.5-sunburst",
+          "kind": "image"
+        },
+        {
+          "id": "wan-2.6-image",
+          "name": "wan-2.6-image",
+          "kind": "image"
+        },
+        {
+          "id": "wan-2.7-text-to-image",
+          "name": "wan-2.7-text-to-image",
+          "kind": "image"
+        },
+        {
+          "id": "wan-2.7-text-to-image-pro",
+          "name": "wan-2.7-text-to-image-pro",
+          "kind": "image"
+        },
+        {
+          "id": "prefect-pony-xl",
+          "name": "prefect-pony-xl",
+          "kind": "image"
+        },
+        {
+          "id": "1.0",
+          "name": "1.0",
+          "kind": "image"
+        },
+        {
+          "id": "1.1",
+          "name": "1.1",
+          "kind": "image"
+        },
+        {
+          "id": "1.2",
+          "name": "1.2",
+          "kind": "image"
+        },
+        {
+          "id": "2.0",
+          "name": "2.0",
+          "kind": "image"
+        },
+        {
+          "id": "flux-2-max",
+          "name": "flux-2-max",
+          "kind": "image"
+        },
+        {
+          "id": "SDXL",
+          "name": "SDXL",
+          "kind": "image"
+        },
+        {
+          "id": "realism",
+          "name": "realism",
+          "kind": "image"
+        },
+        {
+          "id": "realism-2",
+          "name": "realism-2",
+          "kind": "image"
+        },
+        {
+          "id": "z-image-turbo",
+          "name": "z-image-turbo",
+          "kind": "image"
+        },
+        {
+          "id": "default",
+          "name": "default",
+          "kind": "video"
+        },
+        {
+          "id": "turbo",
+          "name": "turbo",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.2-uncensored",
+          "name": "wan-2.2-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.2-uncensored-v2",
+          "name": "wan-2.2-uncensored-v2",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.6",
+          "name": "wan-2.6",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.6-ultra",
+          "name": "wan-2.6-ultra",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.7",
+          "name": "wan-2.7",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.7-pro",
+          "name": "wan-2.7-pro",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.7-uncensored",
+          "name": "wan-2.7-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "wan-2.7-uncensored-v2",
+          "name": "wan-2.7-uncensored-v2",
+          "kind": "video"
+        },
+        {
+          "id": "wan-3.0",
+          "name": "wan-3.0",
+          "kind": "video"
+        },
+        {
+          "id": "wan-3.0-uncensored",
+          "name": "wan-3.0-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "wan-3.0-uncensored-pro",
+          "name": "wan-3.0-uncensored-pro",
+          "kind": "video"
+        },
+        {
+          "id": "sora-2",
+          "name": "sora-2",
+          "kind": "video"
+        },
+        {
+          "id": "sora-2-pro",
+          "name": "sora-2-pro",
+          "kind": "video"
+        },
+        {
+          "id": "grok-imagine-video",
+          "name": "grok-imagine-video",
+          "kind": "video"
+        },
+        {
+          "id": "bytedance-seedance-2.0",
+          "name": "bytedance-seedance-2.0",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.0-fast",
+          "name": "seedance-2.0-fast",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.0-uncensored",
+          "name": "seedance-2.0-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.0-fast-uncensored",
+          "name": "seedance-2.0-fast-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.0-mini-uncensored",
+          "name": "seedance-2.0-mini-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.0-mini-turbo",
+          "name": "seedance-2.0-mini-turbo",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-v1.5-pro-uncensored",
+          "name": "seedance-v1.5-pro-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.5-uncensored",
+          "name": "seedance-2.5-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "seedance-2.5",
+          "name": "seedance-2.5",
+          "kind": "video"
+        },
+        {
+          "id": "vidu-q3-uncensored",
+          "name": "vidu-q3-uncensored",
+          "kind": "video"
+        },
+        {
+          "id": "av-gen-v2",
+          "name": "av-gen-v2",
+          "kind": "video"
+        },
+        {
+          "id": "cosmos-predict",
+          "name": "cosmos-predict",
+          "kind": "video"
+        },
+        {
+          "id": "minimax-h3",
+          "name": "minimax-h3",
+          "kind": "video"
+        },
+        {
+          "id": "happyhorse-1.0",
+          "name": "happyhorse-1.0",
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "alias": "veoaifree-web",
+      "models": [
+        {
+          "id": "veo",
+          "name": "VEO 3.1 (Free)",
+          "kind": "video"
+        },
+        {
+          "id": "seedance",
+          "name": "Seedance (Free)",
+          "kind": "video"
+        },
+        {
+          "id": "nano-banana",
+          "name": "Nano Banana (Free)",
+          "kind": "image"
+        }
+      ]
     }
   ],
   "providers": [
@@ -8978,7 +9302,8 @@
       "id": "ollama",
       "alias": "ollama",
       "serviceKinds": [
-        "llm"
+        "llm",
+        "systemone"
       ],
       "ttsModels": [],
       "embeddingModels": [],
@@ -10717,6 +11042,41 @@
       "alias": "v1m",
       "serviceKinds": [
         "systemone"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "nace",
+      "alias": "nace",
+      "serviceKinds": [
+        "systemone"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "uc-web",
+      "alias": "uc",
+      "serviceKinds": [
+        "image",
+        "video"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "veoaifree-web",
+      "alias": "veo-free",
+      "serviceKinds": [
+        "image",
+        "video"
       ],
       "ttsModels": [],
       "embeddingModels": [],

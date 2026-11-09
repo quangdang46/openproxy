@@ -1452,9 +1452,16 @@ fn apply_projected_headroom_messages(
     }
     let mut updates: Vec<(Vec<TargetSeg>, String)> = Vec::new();
     for (i, (expected, actual)) in proj.messages.iter().zip(compressed.iter()).enumerate() {
+        // Missing and explicit-null `tool_call_id` are the same thing to the
+        // proxy round-trip (9router compares `!==` on undefined; a JSON null
+        // must not fail an otherwise-matching pair).
+        fn non_null(v: Option<&Value>) -> Option<&Value> {
+            v.filter(|x| !x.is_null())
+        }
         let role_ok = actual.get("role").and_then(Value::as_str)
             == expected.get("role").and_then(Value::as_str);
-        let tc_ok = actual.get("tool_call_id") == expected.get("tool_call_id");
+        let tc_ok = non_null(actual.get("tool_call_id"))
+            == non_null(expected.get("tool_call_id"));
         if !role_ok || !tc_ok {
             if let Some(d) = diagnostics.as_deref_mut() {
                 d.set_reason(format!(
@@ -2971,11 +2978,12 @@ mod tests {
         assert_eq!(proj.messages[4]["role"], "tool");
         assert_eq!(proj.messages[4]["tool_call_id"], "tu1");
         assert_eq!(proj.messages[4]["content"], "file contents here");
-        // Image / thinking blocks never become targets.
+        // Image / thinking blocks never become targets: every writable
+        // target must carry a non-empty write-back path.
         assert!(proj
             .targets
             .iter()
-            .all(|t| t.as_ref().map(|t| t.path.len()).unwrap_or(0) > 0 || t.is_some()));
+            .all(|t| t.as_ref().map_or(true, |t| !t.path.is_empty())));
     }
 
     #[test]

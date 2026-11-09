@@ -30,6 +30,8 @@ mod provider;
 pub mod qoder;
 mod strip_unsupported;
 mod trae;
+pub mod uc_web;
+mod veoaifree_web;
 mod vertex;
 mod windsurf;
 mod xai;
@@ -55,9 +57,8 @@ pub use chatgpt_web::{
     ChatGptWebExecutorResponse, DEFAULT_USER_AGENT as CHATGPT_WEB_DEFAULT_USER_AGENT,
 };
 pub use client_pool::{
-    ClientPool, ClientTimeout, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT,
-    CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_STREAM_TIMEOUT,
+    ClientPool, ClientTimeout, DirectHyperClient, CLIENT_POOL_MAX_IDLE_PER_HOST,
+    CLIENT_POOL_TCP_KEEPALIVE, DEFAULT_CONNECT_TIMEOUT, DEFAULT_STREAM_TIMEOUT,
 };
 pub use codebuddy_cn::CodeBuddyCNExecutor;
 pub use codebuddy_intl::CodeBuddyIntlExecutor;
@@ -137,6 +138,8 @@ pub use provider::{
 };
 pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderExecutorResponse};
 pub use trae::{TraeExecutionRequest, TraeExecutor, TraeExecutorError, TraeExecutorResponse};
+pub use uc_web::{UcMediaAsset, UcMediaResult, UcWebError, UcWebExecutor};
+pub use veoaifree_web::{VeoAiFreeWebExecutor, VeoError};
 pub use vertex::{
     VertexExecutionRequest, VertexExecutor, VertexExecutorError, VertexExecutorResponse,
 };

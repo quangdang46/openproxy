@@ -123,6 +123,8 @@ impl ModelCapabilities {
                 "minimax" => Some("minimax"),
                 "hunyuan" => Some("hunyuan"),
                 "step" => Some("step"),
+                "nous" => Some("nous"),
+                "commandcode" => Some("commandcode"),
                 _ => None,
             };
         } else if obj.contains_key("thinkingFormat")
@@ -270,6 +272,100 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
         // synced catalog's github entry.
         table.insert("github", HashMap::from([
             ("claude-haiku-5.5", serde_json::json!({ "vision": true, "pdf": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
+        ]));
+        // Upstream PROVIDER_CAPABILITIES["opencode-go"]: the paid lane's
+        // glm-5.3-flash backend rejects the z.ai `thinking` object (400
+        // unknown field) and wants reasoning_effort; claude-haiku-5-5 is
+        // adaptive-only on this gateway.
+        table.insert("opencode-go", HashMap::from([
+            ("glm-5.3-flash", serde_json::json!({ "vision": true, "videoInput": true, "pdf": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 131072 })),
+            ("claude-haiku-5-5", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
+        ]));
+        // Upstream PROVIDER_CAPABILITIES["commandcode"]: authoritative
+        // per-model metadata; every other model falls through to the
+        // commandcode default in hand_capabilities_for_model.
+        table.insert("commandcode", HashMap::from([
+            ("claude-haiku-5-5", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "commandcode", "thinkingEffortSupported": true, "contextWindow": 1000000, "maxOutput": 128000 })),
+        ]));
+        // Upstream PROVIDER_CAPABILITIES["devin-cli"] (aliases dv/devin
+        // resolve to this id): Devin CLI's registry declares a 200k context
+        // window for these GPT variants.
+        let devin_cli_gpt = serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 128000 });
+        table.insert("devin-cli", HashMap::from([
+            ("gpt-5.4-high", devin_cli_gpt.clone()),
+            ("gpt-5.4-medium", devin_cli_gpt.clone()),
+            ("gpt-5.4-low", devin_cli_gpt.clone()),
+            ("gpt-5.5-xhigh", devin_cli_gpt.clone()),
+            ("gpt-5.5-high", devin_cli_gpt.clone()),
+            ("gpt-5.5-medium", devin_cli_gpt.clone()),
+            ("gpt-5.5-low", devin_cli_gpt),
+        ]));
+        // Upstream PROVIDER_CAPABILITIES["minimax-code"] — MCode credits
+        // lane (Anthropic messages on mavis; claude-adaptive effort).
+        // minimax-code-global serves the same catalog upstream.
+        let minimax_code_caps = |ctx: u64, vision: bool| {
+            serde_json::json!({ "vision": vision, "reasoning": true, "thinkingFormat": "claude-adaptive", "thinkingCanDisable": false, "contextWindow": ctx, "maxOutput": 128000 })
+        };
+        let minimax_code_table = || {
+            HashMap::from([
+                ("MiniMax-M3.1-Flash-Preview", minimax_code_caps(512000, true)),
+                ("MiniMax-M3", minimax_code_caps(512000, true)),
+                ("MiniMax-M2.7", minimax_code_caps(200000, false)),
+                ("MiniMax-M2.7-highspeed", minimax_code_caps(200000, false)),
+            ])
+        };
+        table.insert("minimax-code", minimax_code_table());
+        table.insert("minimax-code-global", minimax_code_table());
+        // Upstream PROVIDER_CAPABILITIES["nous"] — free-tier models probed
+        // live against inference-api.nousresearch.com.
+        table.insert("nous", HashMap::from([
+            ("meituan/longcat-2.0:free", serde_json::json!({ "tools": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 1048756, "maxOutput": 262144 })),
+            ("meituan/longcat-2.5-preview:free", serde_json::json!({ "tools": true, "vision": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 1048576, "maxOutput": 131072 })),
+            ("stepfun/step-5-preview:free", serde_json::json!({ "tools": true, "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 1000000, "maxOutput": 64000 })),
+            ("upstage/solar-mini4:free", serde_json::json!({ "tools": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 524288, "maxOutput": 131072 })),
+            ("stepfun/step-3.7-flash:free", serde_json::json!({ "tools": true, "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 262144, "maxOutput": 256000 })),
+            ("poolside/laguna-s-2.1:free", serde_json::json!({ "tools": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 262144, "maxOutput": 131072 })),
+            ("poolside/laguna-xs-2.1:free", serde_json::json!({ "tools": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 262144, "maxOutput": 32768 })),
+            ("stealth/missingno", serde_json::json!({ "tools": true, "reasoning": true, "thinkingFormat": "nous", "contextWindow": 262144, "maxOutput": 131072 })),
+        ]));
+        // Upstream PROVIDER_CAPABILITIES["qoder"] — opaque model ids match
+        // no name heuristic, so the table carries vision/reasoning/limits
+        // verbatim from /algo/api/v2/model/list. qoder-cn shares it.
+        let qoder_caps = |vision: bool, reasoning: bool, ctx: u64, out: u64| {
+            serde_json::json!({ "vision": vision, "reasoning": reasoning, "contextWindow": ctx, "maxOutput": out })
+        };
+        let qoder_table = || {
+            HashMap::from([
+                // Tier aliases resolve to a variable target upstream; keep
+                // them text-only on the default window.
+                ("auto", qoder_caps(false, false, 200000, 32768)),
+                ("efficient", qoder_caps(false, false, 200000, 32768)),
+                ("lite", qoder_caps(false, false, 200000, 32768)),
+                ("ultimate", qoder_caps(true, true, 200000, 65536)),
+                ("performance", qoder_caps(true, false, 200000, 65536)),
+                ("qmodel_38max", qoder_caps(true, true, 200000, 65536)),
+                ("qmodel_latest", qoder_caps(true, false, 200000, 65536)),
+                ("qmodel", qoder_caps(true, false, 200000, 65536)),
+                ("qfmodel", qoder_caps(true, true, 200000, 65536)),
+                ("kmodel_latest", qoder_caps(true, false, 200000, 65536)),
+                ("kmodel", qoder_caps(true, false, 200000, 65536)),
+                ("gmodel", qoder_caps(true, true, 200000, 65536)),
+                ("gfmodel", qoder_caps(true, true, 200000, 65536)),
+                ("dmodel", qoder_caps(true, true, 200000, 65536)),
+                ("dfmodel", qoder_caps(true, true, 200000, 65536)),
+                ("mmodel", qoder_caps(true, false, 200000, 65536)),
+                // Frontier reasoning pair routed via static model_config.
+                ("smodel", qoder_caps(true, true, 180000, 65536)),
+                ("cmodel", qoder_caps(true, true, 180000, 65536)),
+            ])
+        };
+        table.insert("qoder", qoder_table());
+        table.insert("qoder-cn", qoder_table());
+        // Upstream PROVIDER_CAPABILITIES["ollama"] — the generic
+        // *deepseek-v4* pattern misses the vision badge + 1M window the
+        // library page publishes for the cloud id.
+        table.insert("ollama", HashMap::from([
+            ("deepseek-v4.1-flash:cloud", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 })),
         ]));
         table
     });
@@ -1111,7 +1207,36 @@ pub fn hand_capabilities_for_model(provider: &str, model: &str) -> ModelCapabili
     if model.is_empty() {
         return ModelCapabilities::default();
     }
+    // Provider may arrive as a display alias ("ocg", "dv"); the tables are
+    // keyed by canonical id — resolve once, exactly like upstream
+    // `parseModel → resolveProviderAlias` before getCapabilitiesForModel.
+    let resolved_provider;
+    let provider = if provider.is_empty() {
+        provider
+    } else {
+        resolved_provider = crate::core::model::resolve_provider_alias(provider);
+        resolved_provider.as_str()
+    };
     let base_model = model.rsplit('/').next().unwrap_or(model);
+
+    // CommandCode wire is /alpha/generate for every model — family patterns
+    // (deepseek-v4 → thinkingFormat:deepseek, vision:false) must not win
+    // here (upstream capabilities.js commandcode/cmc branch).
+    if provider == "commandcode" || provider == "cmc" {
+        if let Some(table) = PROVIDER_CAPABILITIES.get("commandcode") {
+            if let Some(entry) = table.get(model).or_else(|| table.get(base_model)) {
+                return ModelCapabilities::from_value(entry);
+            }
+        }
+        let mut caps = ModelCapabilities::default();
+        caps.reasoning = true;
+        caps.thinking_format = Some("commandcode");
+        caps.thinking_effort_supported = true;
+        caps.vision = !is_commandcode_text_only(model);
+        caps.context_window = 1_000_000;
+        caps.max_output = 384_000;
+        return caps;
+    }
 
     // 1. Provider-specific override.
     if !provider.is_empty() {
@@ -1297,7 +1422,19 @@ fn refine_capabilities(
     provider: &str,
     model: &str,
 ) -> ModelCapabilities {
-    if let Some(modalities) = crate::core::model::catalog_overlay::catalog_modalities(model) {
+    // Overlay keys are filed under canonical provider ids; requests may
+    // arrive with a display alias ("ocg", "dv") — resolve once, same as the
+    // hand lookup does.
+    let resolved_provider;
+    let provider = if provider.is_empty() {
+        provider
+    } else {
+        resolved_provider = crate::core::model::resolve_provider_alias(provider);
+        resolved_provider.as_str()
+    };
+    if let Some(modalities) =
+        crate::core::model::catalog_overlay::catalog_modalities(provider, model)
+    {
         if modalities.vision {
             caps.vision = true;
         }
@@ -1323,6 +1460,46 @@ fn refine_capabilities(
         caps.vision = true;
     }
     caps
+}
+
+/// Mirrors Command Code CLI `isKnownTextOnlyModel` (no image input). New
+/// models default to vision; only this denylist stays text-only
+/// (upstream capabilities.js COMMANDCODE_TEXT_ONLY).
+const COMMANDCODE_TEXT_ONLY: &[&str] = &[
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-fast",
+    "zai-org/glm-5.3",
+    "zai-org/glm-5.2",
+    "zai-org/glm-5.2-fast",
+    "zai-org/glm-5.1",
+    "zai-org/glm-5",
+    "minimaxai/minimax-m2.7",
+    "minimax/minimax-m2.7-free",
+    "minimaxai/minimax-m2.5",
+    "xiaomi/mimo-v2.5-pro",
+    "qwen/qwen3.6-max-preview",
+    "qwen/qwen3.7-max",
+    "meituan/longcat-2.0:free",
+    "stepfun/step-3.5-flash",
+    "tencent/hy4-preview",
+    "tencent/hy3",
+    "tencent/hy3-paid",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "poolside/laguna-s-2.1-free",
+    "inclusionai/ling-3.0-flash-free",
+    "inclusionai/ling-3.0-flash-sante:free",
+];
+
+fn is_commandcode_text_only(model: &str) -> bool {
+    let key = model.to_lowercase();
+    if COMMANDCODE_TEXT_ONLY.contains(&key.as_str()) {
+        return true;
+    }
+    COMMANDCODE_TEXT_ONLY.iter().any(|id| {
+        let base = id.rsplit('/').next().unwrap_or(id);
+        key == base || key.ends_with(&format!("/{base}"))
+    })
 }
 
 /// Name-based vision detection — last resort when neither the catalog file

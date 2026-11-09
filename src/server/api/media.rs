@@ -145,6 +145,28 @@ async fn persist_video_token(state: &AppState, connection_id: &str, access_token
         .await;
 }
 
+/// Persist a rotated credential value (e.g. UC Clerk `__client` cookie) so
+/// the rotation chain does not drift — upstream `onCredentialsRefreshed`
+/// parity (videoCore.js:66-70).
+async fn persist_connection_api_key(state: &AppState, connection_id: &str, api_key: &str) {
+    let conn_id = connection_id.to_string();
+    let key = api_key.to_string();
+    let _ = state
+        .db
+        .update(move |app| {
+            if let Some(idx) = app
+                .provider_connections
+                .iter()
+                .position(|c| c.id == conn_id)
+            {
+                app.provider_connections[idx].api_key = Some(key);
+                app.provider_connections[idx].updated_at =
+                    Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await;
+}
+
 /// Cooldown a video account takes after an upstream failure, by status.
 /// 9router's `markAccountUnavailable` derives the window from the status
 /// class (auth.js:239-296) and ALSO sets a per-model lock, so a rate-limited
@@ -470,6 +492,125 @@ async fn systemone_handler(
         last_error = Some(response);
     }
     last_error.expect("the connection list was checked non-empty above")
+}
+
+/// Smart Router decision call — port of 9router `resolveSmartChoice`
+/// (src/sse/services/systemoneRouter.js): resolve `model_str` to its
+/// provider, pick credentials, POST the System One body, return the parsed
+/// JSON. `None` on any failure — the smart strategy fails open to the
+/// configured model order, exactly like upstream.
+///
+/// Not metered: upstream `onRequestSuccess: () => {}` skips usage tracking
+/// for router evaluations.
+pub(crate) async fn systemone_decision(
+    state: &AppState,
+    model_str: &str,
+    body: &Value,
+) -> Option<Value> {
+    let snapshot = state.db.snapshot();
+    let resolved = crate::core::model::get_model_info(model_str, &snapshot);
+    let provider = resolved.provider.clone()?;
+    let cfg = crate::core::media::systemone::systemone_config(&provider)?;
+    let upstream_model = crate::core::model::catalog::provider_catalog()
+        .find_model(&provider, &resolved.model)
+        .and_then(|entry| entry.upstream_model_id.clone())
+        .unwrap_or_else(|| resolved.model.clone());
+
+    let mut connections = select_media_connections(&snapshot, &provider);
+    if connections.is_empty() {
+        if matches!(provider.as_str(), "opencode" | "opencode-zen" | "ollama-local") {
+            connections.push(
+                snapshot
+                    .provider_connections
+                    .iter()
+                    .find(|c| c.provider == provider && c.is_active())
+                    .cloned()
+                    .unwrap_or_else(|| crate::types::ProviderConnection {
+                        id: provider.clone(),
+                        provider: provider.clone(),
+                        auth_type: "apikey".to_string(),
+                        ..Default::default()
+                    }),
+            );
+        } else {
+            return None;
+        }
+    }
+
+    for connection in &connections {
+        let provider_specific_data = &connection.provider_specific_data;
+        let url = crate::core::media::systemone::build_systemone_url(
+            provider_specific_data.get("baseUrl").and_then(Value::as_str),
+            &cfg,
+        );
+        let Ok(url) = crate::core::media::systemone::expand_systemone_url(
+            &url,
+            provider_specific_data.get("accountId").and_then(Value::as_str),
+            &resolved.model,
+        ) else {
+            return None;
+        };
+        let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
+        let Ok(client) = state.client_pool.get(&provider, proxy.as_ref()) else {
+            continue;
+        };
+        let token = connection
+            .api_key
+            .as_deref()
+            .or(connection.access_token.as_deref())
+            .map(str::to_string)
+            .or_else(|| {
+                matches!(provider.as_str(), "opencode" | "opencode-zen")
+                    .then(|| "public".to_string())
+            });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        if let Some(token) = token {
+            if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                headers.insert(header::AUTHORIZATION, value);
+            }
+        }
+        for &(name, value) in cfg.headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        if cfg.opencode_session {
+            if let Ok(value) =
+                HeaderValue::from_str(&crate::core::executor::opencode_generate_session_id())
+            {
+                headers.insert(HeaderName::from_static("x-opencode-session"), value);
+            }
+        }
+        let mut request_body = body.clone();
+        if let Some(obj) = request_body.as_object_mut() {
+            obj.insert("model".to_string(), json!(upstream_model));
+        }
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_millis(
+                crate::core::combo::smart::DEFAULT_SYSTEMONE_TIMEOUT_MS,
+            ),
+            client.post(&url).headers(headers).json(&request_body).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) if response.status().is_success() => response,
+            _ => continue, // rotate to the next connection on failure
+        };
+        let Ok(bytes) = response.bytes().await else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_slice::<Value>(&bytes) {
+            return Some(parsed);
+        }
+    }
+    None
 }
 
 /// One System One attempt against a single connection — the Rust port of
@@ -2269,7 +2410,7 @@ async fn try_provider_adapter(
             // Executor-driven providers first (9router `imageProviders/*`
             // with `useExecutor: true` → `executor.generateMedia`).
             if let Some(result) =
-                try_executor_driven_image(state, connection, provider, request_body, proxy.as_ref())
+                try_executor_driven_image(state, connection, provider, model, request_body, proxy.as_ref())
                     .await
             {
                 return Some(result);
@@ -2321,12 +2462,16 @@ async fn try_executor_driven_image(
     state: &AppState,
     connection: &crate::types::ProviderConnection,
     provider: &str,
+    model: &str,
     request_body: &Value,
     proxy: Option<&crate::core::proxy::ProxyTarget>,
 ) -> Option<Result<Value, crate::core::media::MediaError>> {
     use crate::core::media::MediaError;
 
-    let is_executor_driven = matches!(provider, "grok-web" | "chatgpt-web" | "cg");
+    let is_executor_driven = matches!(
+        provider,
+        "grok-web" | "chatgpt-web" | "cg" | "uc-web" | "veoaifree-web"
+    );
     if !is_executor_driven {
         return None;
     }
@@ -2345,7 +2490,9 @@ async fn try_executor_driven_image(
         .unwrap_or(1)
         .clamp(1, 4) as usize;
 
-    let assets: Result<Vec<(String, String)>, (u16, String)> = match provider {
+    // Executor media calls return data entries directly (`b64_json` /
+    // `url`) so URL-returning providers (veoaifree) keep upstream shape.
+    let assets: Result<Vec<Value>, (u16, String)> = match provider {
         "grok-web" => {
             let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
             executor
@@ -2359,8 +2506,96 @@ async fn try_executor_driven_image(
                     proxy,
                 )
                 .await
-                .map(|v| v.into_iter().map(|a| (a.b64, a.mime)).collect::<Vec<_>>())
+                .map(|v| {
+                    v.into_iter()
+                        .map(|a| {
+                            json!({ "b64_json": a.b64, "mime_type": a.mime })
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
+        }
+        "uc-web" => {
+            let executor = crate::core::executor::UcWebExecutor::new(state.client_pool.clone());
+            let duration = request_body.get("seconds").and_then(Value::as_f64)
+                .or_else(|| request_body.get("duration").and_then(Value::as_f64));
+            let resolution = request_body.get("resolution").and_then(Value::as_str);
+            let images: Vec<String> = request_body
+                .get("image")
+                .and_then(Value::as_str)
+                .map(|s| vec![s.to_string()])
+                .or_else(|| {
+                    request_body
+                        .get("images")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                })
+                .unwrap_or_default();
+            match executor
+                .generate_media(
+                    &prompt,
+                    "image",
+                    size.as_deref(),
+                    Some(model),
+                    duration,
+                    resolution,
+                    &images,
+                    connection,
+                    proxy,
+                )
+                .await
+            {
+                Ok(result) => {
+                    // Persist the rotated Clerk `__client` cookie (upstream
+                    // mutates credentials.apiKey in place + onCredentialsRefreshed).
+                    if let Some(rotated) = result.rotated_cookie_header {
+                        persist_connection_api_key(state, &connection.id, &rotated).await;
+                    }
+                    Ok(result
+                        .assets
+                        .into_iter()
+                        .map(|a| {
+                            json!({ "b64_json": a.b64, "mime_type": a.mime })
+                        })
+                        .collect())
+                }
+                Err(e) => Err((e.status, e.to_string())),
+            }
+        }
+        "veoaifree-web" => {
+            let executor =
+                crate::core::executor::VeoAiFreeWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_media(
+                    &prompt,
+                    "image",
+                    size.as_deref(),
+                    None,
+                    None,
+                    None,
+                    &[],
+                    connection,
+                    proxy,
+                )
+                .await
+                .map(|assets| {
+                    assets
+                        .into_iter()
+                        .map(|a| {
+                            if let Some(url) = a.url {
+                                json!({ "url": url })
+                            } else {
+                                json!({ "b64_json": a.b64, "mime_type": a.mime })
+                            }
+                        })
+                        .collect()
+                })
+                .map_err(|e| (e.status, e.to_string()))
         }
         _ => {
             let executor =
@@ -2368,7 +2603,11 @@ async fn try_executor_driven_image(
             executor
                 .generate_image(&prompt, size.as_deref(), n, connection, proxy)
                 .await
-                .map(|v| v.into_iter().map(|a| (a.b64, a.mime)).collect::<Vec<_>>())
+                .map(|v| {
+                    v.into_iter()
+                        .map(|a| json!({ "b64_json": a.b64, "mime_type": a.mime }))
+                        .collect::<Vec<_>>()
+                })
                 .map_err(|e| {
                     let (status, message) = match &e {
                         crate::core::executor::ChatGptWebError::Http { status, message } => {
@@ -2384,10 +2623,7 @@ async fn try_executor_driven_image(
     Some(match assets {
         Ok(items) if !items.is_empty() => Ok(json!({
             "created": chrono::Utc::now().timestamp(),
-            "data": items
-                .iter()
-                .map(|(b64, mime)| json!({ "b64_json": b64, "mime_type": mime }))
-                .collect::<Vec<_>>(),
+            "data": items,
         })),
         Ok(_) => Err(MediaError::Upstream(
             "media generation produced no assets".into(),
@@ -2498,6 +2734,7 @@ async fn executor_driven_video(
     connection: &crate::types::ProviderConnection,
     body: &Value,
 ) -> Result<Response, Response> {
+    let provider = connection.provider.as_str();
     let prompt = body
         .get("prompt")
         .and_then(Value::as_str)
@@ -2507,7 +2744,7 @@ async fn executor_driven_video(
     if prompt.is_empty() {
         return Err(video_error_response(
             StatusCode::BAD_REQUEST,
-            "[grok-web] video request requires a prompt",
+            &format!("[{provider}] video request requires a prompt"),
         ));
     }
     let size = body.get("size").and_then(Value::as_str);
@@ -2518,53 +2755,168 @@ async fn executor_driven_video(
     let model = body
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or("grok-web");
+        .unwrap_or(provider);
+    // Image-to-video refs (9router videoCore.js:37-42): `image`/`image_url`
+    // string or `images`/`image_urls` arrays.
+    let mut images: Vec<String> = Vec::new();
+    for key in ["image", "image_url"] {
+        if let Some(s) = body.get(key).and_then(Value::as_str) {
+            if !s.is_empty() {
+                images.push(s.to_string());
+            }
+        }
+    }
+    for key in ["images", "image_urls"] {
+        if let Some(arr) = body.get(key).and_then(Value::as_array) {
+            images.extend(
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    let resolution = body.get("resolution").and_then(Value::as_str);
 
     let snapshot = state.db.snapshot();
     let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
-    let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
-    match executor
-        .generate_media(
-            prompt.trim(),
-            "video",
-            size,
-            duration,
-            1,
-            connection,
-            proxy.as_ref(),
-        )
-        .await
-    {
-        Ok(assets) => {
-            let asset = assets.into_iter().next().ok_or_else(|| {
-                video_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "[grok-web] video generation produced no asset",
+    drop(snapshot);
+
+    // Each executor returns (asset, explicit_status, rotated_api_key).
+    let outcome: Result<
+        (crate::core::executor::UcMediaAsset, Option<u16>, Option<String>),
+        (u16, String),
+    > = match provider {
+        "grok-web" => {
+            let executor =
+                crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_media(prompt.trim(), "video", size, duration, 1, connection, proxy.as_ref())
+                .await
+                .map(|mut v| {
+                    let asset = v
+                        .drain(..)
+                        .next()
+                        .unwrap_or(crate::core::executor::GrokMediaAsset {
+                            b64: String::new(),
+                            mime: String::new(),
+                        });
+                    (
+                        crate::core::executor::UcMediaAsset {
+                            b64: asset.b64,
+                            mime: asset.mime,
+                            url: None,
+                        },
+                        None,
+                        None,
+                    )
+                })
+                .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
+        }
+        "uc-web" => {
+            let executor =
+                crate::core::executor::UcWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_media(
+                    prompt.trim(),
+                    "video",
+                    size,
+                    Some(model),
+                    duration,
+                    resolution,
+                    &images,
+                    connection,
+                    proxy.as_ref(),
                 )
-            })?;
+                .await
+                .map(|r| {
+                    let asset = r.assets.into_iter().next().unwrap_or(
+                        crate::core::executor::UcMediaAsset {
+                            b64: String::new(),
+                            mime: String::new(),
+                            url: None,
+                        },
+                    );
+                    (asset, None, r.rotated_cookie_header)
+                })
+                .map_err(|e| (e.status, e.to_string()))
+        }
+        "veoaifree-web" => {
+            let executor =
+                crate::core::executor::VeoAiFreeWebExecutor::new(state.client_pool.clone());
+            executor
+                .generate_media(
+                    prompt.trim(),
+                    "video",
+                    size,
+                    Some(model),
+                    duration,
+                    resolution,
+                    &images,
+                    connection,
+                    proxy.as_ref(),
+                )
+                .await
+                .map(|mut v| {
+                    let asset = v.drain(..).next().unwrap_or(
+                        crate::core::executor::UcMediaAsset {
+                            b64: String::new(),
+                            mime: String::new(),
+                            url: None,
+                        },
+                    );
+                    (asset, None, None)
+                })
+                .map_err(|e| (e.status, e.to_string()))
+        }
+        _ => unreachable!("executor_driven_video only called for executor-driven providers"),
+    };
+
+    match outcome {
+        Ok((asset, explicit_status, rotated)) => {
+            // Persist rotated cookies (UC Clerk __client) — upstream
+            // onCredentialsRefreshed parity.
+            if let Some(key) = rotated {
+                persist_connection_api_key(state, &connection.id, &key).await;
+            }
+            if asset.b64.is_empty() && asset.url.is_none() {
+                return Err(video_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("[{provider}] video generation produced no asset"),
+                ));
+            }
             let mime = if asset.mime.is_empty() {
                 "video/mp4"
             } else {
                 asset.mime.as_str()
             };
+            let video_url = if let Some(url) = asset.url {
+                url
+            } else {
+                format!("data:{mime};base64,{}", asset.b64)
+            };
+            let _ = explicit_status;
             Ok(with_cors_response(
                 Json(json!({
-                    "id": format!("video-grok-web-{}", chrono::Utc::now().timestamp_millis()),
+                    "id": format!("video-{provider}-{}", chrono::Utc::now().timestamp_millis()),
                     "object": "video.generation",
                     "created": chrono::Utc::now().timestamp(),
                     "model": model,
                     "status": "completed",
-                    "video": { "url": format!("data:{mime};base64,{}", asset.b64) },
+                    "video": { "url": video_url },
                 }))
                 .into_response(),
             ))
         }
-        Err(e) => {
-            let message = e.to_string();
-            let status = executor_media_status(&message);
+        Err((status, message)) => {
+            let status = if status == 0 {
+                executor_media_status(&message)
+            } else {
+                status
+            };
             Err(video_error_response(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                &format!("[grok-web] {message}"),
+                &format!("[{provider}] {message}"),
             ))
         }
     }
@@ -2787,7 +3139,9 @@ async fn video_create_handler(
         // executorDriven` flag routes generations/edits through
         // `executor.generateMedia({kind:"video"})`, which returns the mp4
         // synchronously as base64 — no async job, no polling.
-        if canonical_provider == "grok-web" && matches!(action, "generations" | "edits") {
+        if matches!(canonical_provider.as_str(), "grok-web" | "uc-web" | "veoaifree-web")
+            && matches!(action, "generations" | "edits")
+        {
             match executor_driven_video(&state, connection, &body).await {
                 Ok(mut resp) => {
                     with_connection_header(&mut resp, &connection.id);
@@ -3173,7 +3527,10 @@ fn video_provider_supported(provider: &str) -> bool {
     // getVideoConfig returns null and videoGeneration.js rejects it.
     // `grok-web` is executor-driven (videoConfig.executorDriven) — handled
     // inside the connection loop before any upstream HTTP call.
-    matches!(provider, "xai" | "openrouter" | "vertex" | "grok-web")
+    matches!(
+        provider,
+        "xai" | "openrouter" | "vertex" | "grok-web" | "uc-web" | "veoaifree-web"
+    )
 }
 
 /// Video request headers: registry `headers` merged over the bearer auth

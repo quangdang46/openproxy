@@ -42,17 +42,53 @@ const KIRO_CODEWHISPERER_TARGET: &str =
 const KIRO_REGION: &str = "us-east-1";
 const KIRO_SERVICE: &str = "codewhisperer";
 
+/// Regions each Amazon service host actually serves (9router
+/// `KIRO_SERVICE_REGIONS`, kiro.js). A requested region outside the set is
+/// never spliced into the hostname — the us-east-1 host is kept instead of
+/// an NXDOMAIN that burns the 502 retry ladder and could redirect the
+/// bearer token to an attacker origin.
+fn kiro_service_serves_region(service: &str, region: &str) -> bool {
+    match service {
+        "q" | "runtime" => matches!(region, "us-east-1" | "eu-central-1"),
+        "codewhisperer" => region == "us-east-1",
+        _ => false,
+    }
+}
+
 /// Rewrite the AWS region segment of an amazonaws.com host, e.g.
-/// `q.us-east-1.amazonaws.com` → `q.{region}.amazonaws.com`.
-/// 9router getOrderedBaseUrls parity: `([a-z]+)\.[a-z0-9-]+\.amazonaws\.com`
-/// → `$1.{region}.amazonaws.com`.
+/// `q.us-east-1.amazonaws.com` → `q.{region}.amazonaws.com` — but ONLY when
+/// that service actually serves the requested region (9router v0.5.116
+/// `regionalize`, kiro.js). Uncovered or hostile region values leave the
+/// URL untouched.
 fn regionalize_host(host_url: &str, region: &str) -> String {
+    static SERVICE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let service_re = SERVICE_RE.get_or_init(|| {
+        regex::Regex::new(r"//([a-z]+)\.[a-z0-9-]+\.amazonaws\.com").expect("static regex")
+    });
+    let Some(service) = service_re
+        .captures(host_url)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+    else {
+        return host_url.to_string();
+    };
+    if !kiro_service_serves_region(service, region) {
+        return host_url.to_string();
+    }
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
         regex::Regex::new(r"([a-z]+)\.[a-z0-9-]+\.amazonaws\.com").expect("static regex")
     });
     re.replace(host_url, format!("$1.{region}.amazonaws.com"))
         .into_owned()
+}
+
+/// 9router `KIRO_INTEGRITY_GATE=off` escape hatch (kiro.js `execute`): when
+/// set to exactly `off`, the EventStream streams through without the
+/// integrity gate's full-turn buffering/repair (which forfeits the
+/// tool-call repair retry). Any other value — or unset — keeps the gate on.
+fn kiro_integrity_gate_off() -> bool {
+    std::env::var("KIRO_INTEGRITY_GATE").ok().as_deref() == Some("off")
 }
 
 fn normalize_kiro_model(model: &str) -> String {
@@ -699,18 +735,20 @@ impl KiroExecutor {
         let base_urls: Vec<String> = KIRO_BASE_URLS.iter().map(|s| (*s).to_string()).collect();
 
         // 9router getOrderedBaseUrls regionalization: rewrite the AWS region
-        // segment of every amazonaws.com host to the token's region.
-        // `([a-z]+)\.[a-z0-9-]+\.amazonaws\.com` → `$1.{region}.amazonaws.com`.
+        // segment of an amazonaws.com host ONLY when that service serves the
+        // requested region (KIRO_SERVICE_REGIONS). Uncovered or injected
+        // region values keep the us-east-1 host — never an NXDOMAIN or
+        // attacker-controlled hostname that would receive the bearer token.
         let region = credentials
             .provider_specific_data
             .get("region")
             .and_then(|v| v.as_str())
             .map(|s| s.trim())
-            .filter(|r| !r.is_empty() && *r != "us-east-1")
-            .unwrap_or("");
+            .filter(|r| !r.is_empty())
+            .unwrap_or("us-east-1");
 
         let regionalize = |u: &str| -> String {
-            if region.is_empty() || !u.contains("amazonaws.com") {
+            if !u.contains("amazonaws.com") {
                 return u.to_string();
             }
             regionalize_host(u, region)
@@ -958,8 +996,12 @@ impl KiroExecutor {
                     .get("kiroToolCallRepair")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
+                // KIRO_INTEGRITY_GATE=off (9router kiro.js execute): stream the
+                // EventStream through without the integrity gate's full-turn
+                // buffering — forfeits the tool-call repair retry.
+                let integrity_gate_off = kiro_integrity_gate_off();
 
-                if repair_enabled && status == 200 {
+                if repair_enabled && status == 200 && !integrity_gate_off {
                     // Buffer the body with a bounded cap (JS KIRO_REPAIR_BUFFER_MAX_BYTES).
                     let mut full = Vec::new();
                     {
@@ -1696,25 +1738,28 @@ mod tests {
     }
 
     #[test]
-    fn test_regionalize_host_eu_west_1() {
+    fn test_regionalize_host_covered_region() {
+        // 9router v0.5.116 KIRO_SERVICE_REGIONS: q serves us-east-1 and
+        // eu-central-1; codewhisperer only us-east-1.
         assert_eq!(
             regionalize_host(
                 "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-                "eu-west-1"
+                "eu-central-1"
             ),
-            "https://q.eu-west-1.amazonaws.com/generateAssistantResponse"
+            "https://q.eu-central-1.amazonaws.com/generateAssistantResponse"
         );
+        // codewhisperer has no eu-central-1 host → stays us-east-1.
         assert_eq!(
             regionalize_host(
                 "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-                "eu-west-1"
+                "eu-central-1"
             ),
-            "https://codewhisperer.eu-west-1.amazonaws.com/generateAssistantResponse"
+            "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
         );
     }
 
     #[test]
-    fn test_regionalize_host_noop_for_us_east_1_or_non_aws() {
+    fn test_regionalize_host_noop_for_uncovered_or_non_aws() {
         // Default region (us-east-1) leaves the host unchanged.
         assert_eq!(
             regionalize_host(
@@ -1723,24 +1768,68 @@ mod tests {
             ),
             "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
         );
+        // ap-southeast-1 has no Kiro host → no splice for any service.
+        assert_eq!(
+            regionalize_host(
+                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+                "ap-southeast-1"
+            ),
+            "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+        );
+        assert_eq!(
+            regionalize_host(
+                "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+                "eu-west-1"
+            ),
+            "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+        );
         // Non-amazonaws host is untouched.
         assert_eq!(
             regionalize_host(
                 "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
-                "eu-west-1"
+                "eu-central-1"
             ),
             "https://runtime.us-east-1.kiro.dev/generateAssistantResponse"
         );
     }
 
     #[test]
+    fn test_regionalize_host_refuses_hostile_region() {
+        // The stored region is interpolated into a host that receives the
+        // bearer token — an attacker-controlled value must never reach it.
+        let hostile = "x.attacker.tld#";
+        for url in [
+            "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+            "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+            "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+        ] {
+            let out = regionalize_host(url, hostile);
+            assert_eq!(out, url);
+            assert!(!out.contains("attacker"));
+        }
+    }
+
+    #[test]
+    fn test_kiro_integrity_gate_off_env() {
+        // KIRO_INTEGRITY_GATE=off (exact match) disables the gate; anything
+        // else keeps the default.
+        std::env::set_var("KIRO_INTEGRITY_GATE", "off");
+        assert!(kiro_integrity_gate_off());
+        std::env::set_var("KIRO_INTEGRITY_GATE", "OFF");
+        assert!(!kiro_integrity_gate_off());
+        std::env::remove_var("KIRO_INTEGRITY_GATE");
+        assert!(!kiro_integrity_gate_off());
+    }
+
+    #[test]
     fn test_build_url_regionalizes_q_host() {
         // 9router getOrderedBaseUrls: api_key surface regionalizes the AWS
-        // host to the account's region and orders the q.* surface first.
+        // host to the account's region (when that service serves it) and
+        // orders the q.* surface first.
         let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
         let mut psd = std::collections::BTreeMap::new();
         psd.insert("authMethod".to_string(), serde_json::json!("api_key"));
-        psd.insert("region".to_string(), serde_json::json!("eu-west-1"));
+        psd.insert("region".to_string(), serde_json::json!("eu-central-1"));
         let credentials = ProviderConnection {
             provider_specific_data: psd,
             api_key: Some("key".to_string()),
@@ -1750,12 +1839,58 @@ mod tests {
         let urls = executor.build_url("amazon-nova-pro-v1.0", false, &credentials);
         assert_eq!(
             urls[0],
-            "https://q.eu-west-1.amazonaws.com/generateAssistantResponse"
+            "https://q.eu-central-1.amazonaws.com/generateAssistantResponse"
         );
-        assert!(urls[0].contains("q.eu-west-1.amazonaws.com"));
+        assert!(urls[0].contains("q.eu-central-1.amazonaws.com"));
+        // codewhisperer only serves us-east-1 → never regionalized.
         assert!(urls
             .iter()
-            .any(|u| u.contains("codewhisperer.eu-west-1.amazonaws.com")));
+            .any(|u| u.contains("codewhisperer.us-east-1.amazonaws.com")));
+        assert!(!urls
+            .iter()
+            .any(|u| u.contains("codewhisperer.eu-central-1")));
+    }
+
+    #[test]
+    fn test_build_url_uncovered_region_keeps_us_east_1() {
+        // ap-southeast-1 is not served by any Kiro host → all amazonaws.com
+        // URLs keep us-east-1 (upstream v0.5.116 behaviour).
+        let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert("authMethod".to_string(), serde_json::json!("api_key"));
+        psd.insert("region".to_string(), serde_json::json!("ap-southeast-1"));
+        let credentials = ProviderConnection {
+            provider_specific_data: psd,
+            api_key: Some("key".to_string()),
+            access_token: None,
+            ..Default::default()
+        };
+        let urls = executor.build_url("amazon-nova-pro-v1.0", false, &credentials);
+        assert_eq!(urls.len(), 3);
+        for u in &urls {
+            assert!(!u.contains("ap-southeast-1"), "unexpected splice: {u}");
+        }
+        assert!(urls.iter().any(|u| u.contains("q.us-east-1.amazonaws.com")));
+    }
+
+    #[test]
+    fn test_build_url_hostile_region_never_reaches_hostname() {
+        // Attacker-controlled stored region must not be spliced into a host
+        // that receives the bearer token.
+        let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert("authMethod".to_string(), serde_json::json!("api_key"));
+        psd.insert("region".to_string(), serde_json::json!("x.attacker.tld#"));
+        let credentials = ProviderConnection {
+            provider_specific_data: psd,
+            api_key: Some("key".to_string()),
+            access_token: None,
+            ..Default::default()
+        };
+        for u in executor.build_url("amazon-nova-pro-v1.0", false, &credentials) {
+            assert!(!u.contains("attacker"), "hostile region leaked: {u}");
+            assert!(u.contains("amazonaws.com") || u.contains("kiro.dev"));
+        }
     }
 
     #[test]

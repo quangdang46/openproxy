@@ -14,11 +14,12 @@
 //! Two layers, both strictly additive and sitting BELOW the hand-written
 //! tables (which short-circuit first — a capability already true stays
 //! true):
-//! - modalities (vision/pdf/audio/video) belong to the MODEL — every
-//!   gateway serving it has the same weights — keyed by model id and shared.
-//!   A majority of sources must declare one (MIN_SHARE), keeping out lone
-//!   mis-declarations.
-//! - context/output limits belong to the GATEWAY — each truncates
+//! - modalities (vision/pdf/audio/video) belong to the GATEWAY serving the
+//!   model — upstream providers disagree about the same weights (some do not
+//!   proxy images at all) — keyed `provider:model` in the local provider id
+//!   space (9router v2 catalog, 912ed29). Keying by model id alone let short
+//!   ids like "auto"/"free" collide across vendors.
+//! - context/output limits belong to the GATEWAY too — each truncates
 //!   differently — keyed by provider + model, trusting only the matching
 //!   provider's own numbers, and only when they differ beyond LIMIT_TOLERANCE
 //!   (gateways round 200000 vs 202752).
@@ -45,8 +46,12 @@ pub const RETRY_DELAY_SECS: u64 = 30 * 60;
 /// Upstream fetch deadline (9router `FETCH_TIMEOUT_MS`).
 pub const FETCH_TIMEOUT_SECS: u64 = 60;
 
-/// A modality needs this share of sources to declare it (9router `MIN_SHARE`).
-const MIN_SHARE: f64 = 0.5;
+/// Schema of the file this module reads/writes (9router `CATALOG_VERSION`).
+/// v2 keys modalities `provider:model`; a v1 file's bare model-id keys are
+/// never looked up, so the sync rebuilds it instead of asking upstream for
+/// a 304 (the etag is only sent when the on-disk file is current).
+pub const CATALOG_VERSION: u64 = 2;
+
 /// Ignore limit differences below this (9router `LIMIT_TOLERANCE`).
 const LIMIT_TOLERANCE: f64 = 0.1;
 
@@ -66,6 +71,7 @@ fn modality_key(input: &str) -> Option<&'static str> {
 /// (9router `PROVIDER_ALIASES`.)
 fn provider_alias(provider: &str) -> Option<&'static str> {
     match provider {
+        "github" => Some("github-copilot"),
         "glm" => Some("zai"),
         "glm-cn" => Some("zhipuai"),
         "claude" => Some("anthropic"),
@@ -220,10 +226,19 @@ fn load() -> OverlayFile {
     file
 }
 
-/// Modality overlay for one model id (shared across providers).
-/// Returns `None` when the synced file has no entry.
-pub fn catalog_modalities(model: &str) -> Option<CatalogModalities> {
-    load().models.get(&base_id(model)).cloned()
+/// Modality overlay for one provider + model (9router v2
+/// `getCatalogModalities(provider, model)` — 912ed29). The key is
+/// `provider:baseId(model)` in the local provider id space; gateways
+/// disagree about the same weights, so there is deliberately no
+/// model-only fallback — a missing provider yields `None`.
+pub fn catalog_modalities(provider: &str, model: &str) -> Option<CatalogModalities> {
+    if provider.is_empty() {
+        return None;
+    }
+    load()
+        .models
+        .get(&format!("{}:{}", provider, base_id(model)))
+        .cloned()
 }
 
 /// Limit overlay for one provider + model. Falls back to the base model id
@@ -323,14 +338,20 @@ fn slim_catalog(catalog: &Value) -> Value {
 }
 
 /// Build the `{ models, providers }` delta against the hand-written
-/// baseline. `baseline` maps `(provider, model)` → `(context_length,
-/// current_caps)`; it MUST be collected with the overlay detached (i.e.
+/// baseline — port of 9router `build()` in `src/lib/modelCatalog/sync.js`
+/// at catalog v2 (912ed29). `baseline` maps `(provider, model)` →
+/// `(context_length, current_caps)` with `provider` the CANONICAL local
+/// provider id; it MUST be collected with the overlay detached (i.e.
 /// from the hand-written tables alone) — otherwise every delta is measured
 /// against the last sync and the file erases itself over two runs
 /// (9router e6f5724b).
 ///
-/// - Modalities: one vote per provider per normalized model id; a modality
-///   needs ≥ MIN_SHARE of sources declaring it.
+/// - Modalities (v2): recorded PER GATEWAY, verbatim — upstream providers
+///   disagree about the same weights, so there is no majority vote anymore.
+///   Each declaration is filed under every local provider id that maps to
+///   the upstream provider (`local:baseId`), plus the upstream id itself
+///   when it is not one of the locals (custom provider nodes can carry the
+///   upstream name without appearing in the registry).
 /// - Limits: only the matching provider's own numbers, only when they differ
 ///   beyond LIMIT_TOLERANCE, and only when the hand-written value is absent
 ///   (`context_length` None) for context.
@@ -346,34 +367,68 @@ pub fn build_delta(
     HashMap<String, CatalogModalities>,
     HashMap<String, HashMap<String, CatalogLimits>>,
 ) {
-    // Index upstream once: per-provider models + cross-provider modality tally.
+    // Upstream provider id -> the local (canonical) provider ids it backs,
+    // taken from the baseline so a gateway listed upstream under another
+    // name is still filed under the name requests arrive with. One upstream
+    // name can back more than one local id (glm-cn and zhipu are both
+    // zhipuai) and each has to resolve; an upstream provider the baseline
+    // does not mention keeps its own name (9router `localIds`).
+    let mut local_ids: HashMap<String, Vec<String>> = HashMap::new();
+    for (provider, _, _, _) in baseline {
+        let upstream_id = provider_alias(provider).unwrap_or(provider).to_string();
+        let locals = local_ids.entry(upstream_id).or_default();
+        if !locals.contains(provider) {
+            locals.push(provider.clone());
+        }
+    }
+
+    // Index upstream once: per-provider models by base id (first id wins —
+    // several upstream ids can normalize to the same model and must not
+    // stack, e6f5724b) plus each provider's own modality declaration.
     let mut by_provider: HashMap<String, HashMap<String, &Value>> = HashMap::new();
-    let mut tally: HashMap<String, (u64, HashMap<&'static str, u64>)> = HashMap::new();
+    let mut declared: HashMap<(String, String), CatalogModalities> = HashMap::new();
     if let Some(providers) = catalog.as_object() {
         for (provider_id, provider) in providers {
             let mut models: HashMap<String, &Value> = HashMap::new();
-            let mut counted = std::collections::HashSet::new();
+            let mut seen = std::collections::HashSet::new();
             if let Some(entries) = provider.get("models").and_then(|v| v.as_object()) {
                 for (model_id, model) in entries {
                     let id = base_id(model_id);
                     models.insert(id.clone(), model);
-                    // One vote per provider: several ids can normalize to
-                    // the same model and must not stack (e6f5724b).
-                    if !counted.insert(id.clone()) {
+                    if !seen.insert(id.clone()) {
                         continue;
                     }
-                    let entry = tally.entry(id).or_insert((0, HashMap::new()));
-                    entry.0 += 1;
+                    let mut m = CatalogModalities::default();
+                    let mut any = false;
                     if let Some(inputs) = model
                         .get("modalities")
                         .and_then(|v| v.get("input"))
                         .and_then(|v| v.as_array())
                     {
                         for input in inputs {
-                            if let Some(key) = input.as_str().and_then(modality_key) {
-                                *entry.1.entry(key).or_insert(0) += 1;
+                            match input.as_str().and_then(modality_key) {
+                                Some("vision") => {
+                                    m.vision = true;
+                                    any = true;
+                                }
+                                Some("pdf") => {
+                                    m.pdf = true;
+                                    any = true;
+                                }
+                                Some("audioInput") => {
+                                    m.audio_input = true;
+                                    any = true;
+                                }
+                                Some("videoInput") => {
+                                    m.video_input = true;
+                                    any = true;
+                                }
+                                _ => {}
                             }
                         }
+                    }
+                    if any {
+                        declared.insert((provider_id.clone(), id), m);
                     }
                 }
             }
@@ -381,27 +436,19 @@ pub fn build_delta(
         }
     }
 
+    // File every declaration under each local id requests arrive with, and
+    // under the upstream id too when it is not already one of the locals.
     let mut models_out: HashMap<String, CatalogModalities> = HashMap::new();
-    for (id, (total, counts)) in &tally {
-        if *total == 0 {
-            continue;
+    for ((provider_id, id), caps) in &declared {
+        let locals = local_ids
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| vec![provider_id.clone()]);
+        for local in &locals {
+            models_out.insert(format!("{}:{}", local, id), caps.clone());
         }
-        let mut m = CatalogModalities::default();
-        let mut any = false;
-        for key in ["vision", "pdf", "audioInput", "videoInput"] {
-            if counts.get(key).copied().unwrap_or(0) as f64 / *total as f64 >= MIN_SHARE {
-                match key {
-                    "vision" => m.vision = true,
-                    "pdf" => m.pdf = true,
-                    "audioInput" => m.audio_input = true,
-                    "videoInput" => m.video_input = true,
-                    _ => {}
-                }
-                any = true;
-            }
-        }
-        if any {
-            models_out.insert(id.clone(), m);
+        if !locals.iter().any(|l| l == provider_id) {
+            models_out.insert(format!("{}:{}", provider_id, id), caps.clone());
         }
     }
 
@@ -437,9 +484,10 @@ pub fn build_delta(
         {
             // Context is only filled when the hand-written table has none
             // (`!contextLength` in JS): an explicit table value always wins.
+            // A zero `current` makes the relative diff infinite — same as
+            // JS — so the upstream value is filed.
             if context > 0
                 && context_length.is_none()
-                && current.context_window > 0
                 && (context as f64 - current.context_window as f64).abs()
                     / current.context_window as f64
                     > LIMIT_TOLERANCE
@@ -454,8 +502,8 @@ pub fn build_delta(
             .and_then(|v| v.as_u64())
         {
             if output > 0
-                && current.max_output > 0
-                && (output as f64 - current.max_output as f64).abs() / current.max_output as f64
+                && (output as f64 - current.max_output as f64).abs()
+                    / current.max_output as f64
                     > LIMIT_TOLERANCE
             {
                 delta.max_output = output;
@@ -515,11 +563,23 @@ async fn sync_model_catalog_inner(data_dir: &Path) -> Option<Value> {
     let previous: Option<Value> = std::fs::read_to_string(data_dir.join(CATALOG_FILE_NAME))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok());
-    let previous_etag = previous
+    // A file written by an older schema has to be rebuilt even when
+    // upstream is unchanged, so the etag is only sent when the on-disk
+    // file is the current version (9router `state.fileVersion ===
+    // CATALOG_VERSION`).
+    let file_version = previous
         .as_ref()
-        .and_then(|v| v.get("etag"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+        .and_then(|v| v.get("v"))
+        .and_then(|v| v.as_u64());
+    let previous_etag = if file_version == Some(CATALOG_VERSION) {
+        previous
+            .as_ref()
+            .and_then(|v| v.get("etag"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    } else {
+        None
+    };
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
@@ -551,7 +611,7 @@ async fn sync_model_catalog_inner(data_dir: &Path) -> Option<Value> {
     let (models, providers) = build_delta(&catalog, &baseline);
 
     let serialized = serde_json::json!({
-        "v": 1,
+        "v": CATALOG_VERSION,
         "etag": etag,
         "syncedAt": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -634,16 +694,23 @@ fn collect_hand_baseline() -> Vec<(
     crate::core::combo::capabilities::ModelCapabilities,
 )> {
     // The static provider catalog is the model registry equivalent: every
-    // (alias → provider, model) pair with its hand-written caps.
+    // (provider, model) pair with its hand-written caps. The provider half
+    // is the CANONICAL id (providers[].id), matching upstream
+    // `collectEntries` (`provider.id`) — the providerModels `alias` is the
+    // JS display alias ("cc", "oc"), which would miss both the
+    // PROVIDER_CAPABILITIES blocks and the `providers:` limits lookup.
     let catalog = crate::core::model::catalog::provider_catalog();
     let mut entries = Vec::new();
     for entry in catalog.iter_provider_models() {
-        let alias = entry.alias.clone();
+        let provider_id = catalog
+            .canonical_id_for_alias(&entry.alias)
+            .unwrap_or(entry.alias.as_str())
+            .to_string();
         for model in &entry.models {
             let caps =
-                crate::core::combo::capabilities::hand_capabilities_for_model(&alias, &model.id);
+                crate::core::combo::capabilities::hand_capabilities_for_model(&provider_id, &model.id);
             entries.push((
-                alias.clone(),
+                provider_id.clone(),
                 model.id.clone(),
                 model.context_window.map(|c| c as u64),
                 caps,
@@ -699,73 +766,92 @@ mod tests {
         assert_eq!(base_id("plain-model"), "plain-model");
     }
 
-    #[test]
-    fn build_delta_tallies_modalities_by_majority() {
-        // 3 sources declare vision for model-x, 1 text-only reseller does
-        // not → vision wins the majority (the minimax-m2.5 / glm-4.7 /
-        // gpt-oss-120b lone-misdeclaration guard from the commit message).
-        let catalog = serde_json::json!({
-            "a": {"models": {"model-x": {"modalities": {"input": ["text", "image"]}, "limit": {"context": 100, "output": 10}}}},
-            "b": {"models": {"model-x": {"modalities": {"input": ["text", "image"]}, "limit": {"context": 100, "output": 10}}}},
-            "c": {"models": {"model-x": {"modalities": {"input": ["text", "image"]}, "limit": {"context": 100, "output": 10}}}},
-            "d": {"models": {"model-x": {"modalities": {"input": ["text"]}, "limit": {"context": 100, "output": 10}}}},
-        });
-        let baseline = vec![(
-            "a".to_string(),
-            "model-x".to_string(),
+    fn baseline_entry(provider: &str, model: &str) -> (
+        String,
+        String,
+        Option<u64>,
+        crate::core::combo::capabilities::ModelCapabilities,
+    ) {
+        (
+            provider.to_string(),
+            model.to_string(),
             None,
             crate::core::combo::capabilities::ModelCapabilities::default(),
-        )];
-        let (models, _) = build_delta(&catalog, &baseline);
-        assert!(models["model-x"].vision);
-
-        // 1 of 4 declares vision → below MIN_SHARE, no entry.
-        let catalog2 = serde_json::json!({
-            "a": {"models": {"model-y": {"modalities": {"input": ["text", "image"]}}}},
-            "b": {"models": {"model-y": {"modalities": {"input": ["text"]}}}},
-            "c": {"models": {"model-y": {"modalities": {"input": ["text"]}}}},
-            "d": {"models": {"model-y": {"modalities": {"input": ["text"]}}}},
-        });
-        let (models2, _) = build_delta(&catalog2, &baseline);
-        assert!(!models2.contains_key("model-y"));
+        )
     }
 
     #[test]
-    fn build_delta_one_vote_per_provider() {
-        // Several ids normalizing to the same model must not stack
-        // (e6f5724b: claude-opus-4-thinking:1024, :8192, :32768 …).
+    fn build_delta_files_modalities_per_gateway_v2() {
+        // v2 (912ed29): modalities are recorded PER GATEWAY verbatim — no
+        // majority vote. Each upstream provider's declaration lands under
+        // `local:baseId` for every local id mapping to it, plus the
+        // upstream id itself when it is not a local.
+        let catalog = serde_json::json!({
+            "zai": {"models": {"glm-5": {"modalities": {"input": ["text", "image"]}}}},
+            "other": {"models": {"glm-5": {"modalities": {"input": ["text"]}}}},
+        });
+        // glm → alias zai: only zai's declaration is filed, under "glm:".
+        let baseline = vec![baseline_entry("glm", "glm-5")];
+        let (models, _) = build_delta(&catalog, &baseline);
+        assert!(models["glm:glm-5"].vision);
+        assert!(!models.contains_key("glm-5"), "v1 bare keys are gone");
+        // The upstream id is also filed when it is not a local id — a
+        // custom provider node can carry the upstream name.
+        assert!(models["zai:glm-5"].vision);
+        // A provider with no declared modalities contributes nothing.
+        assert!(!models.contains_key("other:glm-5") || !models["other:glm-5"].vision);
+
+        // Two gateways disagreeing about the same weights each keep their
+        // own declaration — the v1 majority vote is gone.
+        let catalog2 = serde_json::json!({
+            "a": {"models": {"model-x": {"modalities": {"input": ["text", "image"]}}}},
+            "b": {"models": {"model-x": {"modalities": {"input": ["text"]}}}},
+            "c": {"models": {"model-x": {"modalities": {"input": ["text"]}}}},
+            "d": {"models": {"model-x": {"modalities": {"input": ["text"]}}}},
+        });
+        let baseline2 = vec![
+            baseline_entry("a", "model-x"),
+            baseline_entry("b", "model-x"),
+            baseline_entry("c", "model-x"),
+            baseline_entry("d", "model-x"),
+        ];
+        let (models2, _) = build_delta(&catalog2, &baseline2);
+        assert!(models2["a:model-x"].vision, "a's own declaration wins for a");
+        assert!(!models2.contains_key("b:model-x"), "b declares text only");
+        assert!(!models2.contains_key("c:model-x"));
+        assert!(!models2.contains_key("d:model-x"));
+    }
+
+    #[test]
+    fn build_delta_dedupes_normalized_ids_first_wins() {
+        // Several upstream ids normalizing to the same model must not
+        // stack (e6f5724b: claude-opus-4-thinking:1024, :8192, :32768 …) —
+        // the FIRST declaration wins.
+        let catalog = serde_json::json!({
+            "a": {"models": {
+                "m:1024": {"modalities": {"input": ["text"]}},
+                "m:32768": {"modalities": {"input": ["text", "image"]}},
+            }},
+        });
+        let baseline = vec![baseline_entry("a", "m")];
+        let (models, _) = build_delta(&catalog, &baseline);
+        // The first normalized id claims the slot even though it declares
+        // no modalities — the later vision declaration is skipped, so no
+        // overlay entry is filed at all (tables keep deciding).
+        assert!(
+            !models.contains_key("a:m"),
+            "first normalized id (text-only) wins the slot"
+        );
+
+        // Reversed order: the vision declaration lands.
         let catalog = serde_json::json!({
             "a": {"models": {
                 "m:1024": {"modalities": {"input": ["text", "image"]}},
-                "m:32768": {"modalities": {"input": ["text", "image"]}},
+                "m:32768": {"modalities": {"input": ["text"]}},
             }},
-            "b": {"models": {"m": {"modalities": {"input": ["text"]}}}},
         });
-        let baseline = vec![(
-            "a".to_string(),
-            "m".to_string(),
-            None,
-            crate::core::combo::capabilities::ModelCapabilities::default(),
-        )];
         let (models, _) = build_delta(&catalog, &baseline);
-        // a's two ids count once (vision 1/2 = 0.5 ≥ MIN_SHARE → still wins
-        // here, but would be 2/3 without the dedup — the dedup is what the
-        // test pins: with 3 text-only providers it must lose).
-        assert!(models["m"].vision);
-        let catalog3 = serde_json::json!({
-            "a": {"models": {
-                "m:1024": {"modalities": {"input": ["text", "image"]}},
-                "m:32768": {"modalities": {"input": ["text", "image"]}},
-            }},
-            "b": {"models": {"m": {"modalities": {"input": ["text"]}}}},
-            "c": {"models": {"m": {"modalities": {"input": ["text"]}}}},
-            "d": {"models": {"m": {"modalities": {"input": ["text"]}}}},
-        });
-        let (models3, _) = build_delta(&catalog3, &baseline);
-        // 1 vote (a) of 4 → 0.25 < 0.5 → no entry. Without dedup it would be
-        // 2/5 = 0.4 — still below, so also assert the raw tally shape via a
-        // 2-provider variant where dedup flips the outcome.
-        assert!(!models3.contains_key("m"));
+        assert!(models["a:m"].vision, "first (vision) declaration wins");
     }
 
     #[test]
@@ -820,8 +906,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let overlay = serde_json::json!({
-            "v": 1,
-            "models": {"some-unknown-vl-model-xyz": {"vision": true}},
+            "v": 2,
+            "models": {"glm:some-unknown-vl-model-xyz": {"vision": true}},
             "providers": {"glm": {"glm-5": {"contextWindow": 202752, "maxOutput": 16384}}},
         });
         let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
@@ -829,7 +915,7 @@ mod tests {
             .unwrap();
         init_catalog_overlay(&dir);
         // Overlay read works…
-        let m = catalog_modalities("some-unknown-vl-model-xyz").expect("overlay hit");
+        let m = catalog_modalities("glm", "some-unknown-vl-model-xyz").expect("overlay hit");
         assert!(m.vision);
         // …but the hand baseline is unaffected by it.
         let caps = crate::core::combo::capabilities::hand_capabilities_for_model(
@@ -837,9 +923,10 @@ mod tests {
             "some-unknown-vl-model-xyz",
         );
         assert!(!caps.vision, "hand baseline must ignore the overlay file");
-        // And the full refined lookup still applies the overlay on top.
+        // And the full refined lookup still applies the overlay on top —
+        // provider-scoped keys need the provider the entry was filed under.
         let refined = crate::core::combo::capabilities::get_capabilities_for_model(
-            "",
+            "glm",
             "some-unknown-vl-model-xyz",
         );
         assert!(refined.vision, "refined lookup must apply the overlay");
@@ -885,8 +972,8 @@ mod tests {
         // Sanity: the real baseline really ignores the overlay — install a
         // maximal overlay first and confirm the baseline is unchanged.
         let poison = serde_json::json!({
-            "v": 1,
-            "models": {"glm-5": {"vision": true, "pdf": true, "audioInput": true, "videoInput": true}},
+            "v": 2,
+            "models": {"glm:glm-5": {"vision": true, "pdf": true, "audioInput": true, "videoInput": true}},
             "providers": {"glm": {"glm-5": {"contextWindow": 9999999, "maxOutput": 9999999}}},
         });
         let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
@@ -916,7 +1003,7 @@ mod tests {
         // baseline — deltas must be identical.
         let (models1, providers1) = build_delta(&catalog, &baseline1);
         let file = serde_json::json!({
-            "v": 1,
+            "v": 2,
             "models": models1.keys().map(|k| (k.clone(), serde_json::json!({"vision": true}))).collect::<serde_json::Map<String, Value>>(),
             "providers": {"glm": {"glm-5": {"contextWindow": 500000, "maxOutput": 16384}}},
         });

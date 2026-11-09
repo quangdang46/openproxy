@@ -142,6 +142,8 @@ async fn validate_provider(
         "sdwebui",
         "comfyui",
         "ollama-local",
+        "veoaifree-web",
+        "veo-free",
     ];
     if no_auth.contains(&provider.as_str()) {
         return Json(json!({ "valid": true })).into_response();
@@ -193,6 +195,9 @@ async fn validate_provider(
         "grok-web" => validate_grok_web_session(&client, &api_key).await,
         "perplexity-web" => validate_perplexity_web_session(&client, &api_key).await,
         "chatgpt-web" | "cg" => validate_chatgpt_web_session(&client, &api_key).await,
+        // webIdentity.js `uc-web` probe: Clerk `__client` cookie → session
+        // token mint on clerk.uncensored.com.
+        "uc-web" | "uc" => validate_uc_web_session(&client, &api_key).await,
         "groq" => validate_bearer(&client, "https://api.groq.com/openai/v1/models", &api_key).await,
         "openrouter" => validate_bearer(&client, "https://openrouter.ai/api/v1/models", &api_key).await,
         "mistral" => validate_bearer(&client, "https://api.mistral.ai/v1/models", &api_key).await,
@@ -919,6 +924,139 @@ async fn validate_chatgpt_web_session(
                 }
                 Ok(_) => (false, Some("ChatGPT session is not signed in".into())),
                 Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// webIdentity.js `uc-web` probe: the durable Clerk `__client` cookie must
+/// mint a `__session` JWT. Legacy `__client` JWTs carry `sid`; current ones
+/// only `{id, rotating_token}`, so fall back to listing the client's
+/// sessions (same resolution the executor's `mintSession` performs).
+async fn validate_uc_web_session(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+    use base64::Engine as _;
+
+    // Parse the `__client` value out of the pasted Cookie header.
+    let mut client_jwt = String::new();
+    for part in api_key.split(';') {
+        if let Some((name, value)) = part.split_once('=') {
+            if name.trim() == "__client" {
+                client_jwt = value.trim().to_string();
+                break;
+            }
+        }
+    }
+    if client_jwt.is_empty() {
+        return (false, Some("Missing __client cookie".into()));
+    }
+
+    let decode_sid = |token: &str| -> Option<String> {
+        let payload = token.split('.').nth(1)?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()?
+            .get("sid")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+    let mut sid = decode_sid(&client_jwt);
+
+    if sid.is_none() {
+        // List the client's sessions to find the active one.
+        match client
+            .get("https://clerk.uncensored.com/v1/client?_clerk_js_version=5.127.1")
+            .header("Cookie", format!("__client={client_jwt}"))
+            .header("Accept", "application/json")
+            .header("Origin", "https://uncensored.com")
+            .header("Referer", "https://uncensored.com/")
+            .header("User-Agent", ua)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if code == 401 || code == 403 {
+                    return (false, Some("Clerk session is invalid or expired".into()));
+                }
+                if !resp.status().is_success() {
+                    return (false, Some(format!("Clerk returned HTTP {code}")));
+                }
+                match resp.json::<Value>().await {
+                    Ok(body) => {
+                        let payload = body
+                            .get("response")
+                            .or_else(|| body.get("client"))
+                            .unwrap_or(&body);
+                        let sessions = payload
+                            .get("sessions")
+                            .and_then(Value::as_array);
+                        sid = sessions.and_then(|list| {
+                            list.iter()
+                                .find(|s| s.get("status").and_then(Value::as_str) == Some("active"))
+                                .or_else(|| list.first())
+                                .and_then(|s| s.get("id"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        });
+                    }
+                    Err(e) => return (false, Some(format!("Clerk returned invalid JSON: {e}"))),
+                }
+            }
+            Err(e) => return (false, Some(e.to_string())),
+        }
+    }
+    let Some(sid) = sid.filter(|s| !s.is_empty()) else {
+        return (false, Some("Not signed in to uncensored.com — use Login via Browser".into()));
+    };
+
+    // Mint the session token — a valid credential yields a JWT.
+    let sid_enc = sid
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect::<String>();
+    match client
+        .post(format!(
+            "https://clerk.uncensored.com/v1/client/sessions/{sid_enc}/tokens?_clerk_js_version=5.127.1"
+        ))
+        .header("Cookie", format!("__client={client_jwt}"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Origin", "https://uncensored.com")
+        .header("Referer", "https://uncensored.com/")
+        .header("User-Agent", ua)
+        .body("")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 401 || code == 403 {
+                return (false, Some("Clerk session is invalid or expired".into()));
+            }
+            if !resp.status().is_success() {
+                return (false, Some(format!("Clerk returned HTTP {code}")));
+            }
+            match resp.json::<Value>().await {
+                Ok(json)
+                    if json
+                        .get("jwt")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false) =>
+                {
+                    (true, None)
+                }
+                Ok(_) => (false, Some("Clerk did not mint a session token".into())),
+                Err(e) => (false, Some(format!("Clerk returned invalid JSON: {e}"))),
             }
         }
         Err(e) => (false, Some(e.to_string())),
@@ -1814,6 +1952,8 @@ mod no_auth_set_tests {
             "sdwebui",
             "comfyui",
             "ollama-local",
+            "veoaifree-web",
+            "veo-free",
         ];
         for p in NINE_ROUTER_NOAUTH {
             assert!(

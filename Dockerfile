@@ -51,7 +51,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 # Stage 1: build the dashboard
 # ──────────────────────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS web
+FROM node:22-bookworm-slim AS web
 WORKDIR /web
 
 # pnpm via corepack — version pinned to match web/package.json packageManager

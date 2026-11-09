@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -182,6 +183,24 @@ impl ModelPricing {
     }
 }
 
+/// Namespaces upstream meters at $0 (9router `FREE_MODEL_NAMESPACES`,
+/// pricing.js — commit 199173f). A free model must never inherit a paid
+/// rate: the vendor-prefix strip would turn "cline-free/deepseek-v4.1-flash"
+/// into "deepseek-v4.1-flash" and match a canonical price, so the namespace
+/// is checked before the canonical/pattern fallbacks — and before the
+/// provider-wide `all` row, which is the openproxy equivalent of a
+/// catch-all price.
+pub fn is_free_model(model: &str) -> bool {
+    model
+        .get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cline-free/"))
+}
+
+/// Zero-cost row returned for free-namespace models that have no exact
+/// provider pricing entry.
+static FREE_PRICING: LazyLock<ModelPricing> =
+    LazyLock::new(|| ModelPricing::free("cline-free", "cline-free"));
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pricing {
     rates: BTreeMap<String, BTreeMap<String, ModelPricing>>,
@@ -281,8 +300,16 @@ impl Pricing {
 
     pub fn get(&self, provider: &str, model: &str) -> Option<&ModelPricing> {
         if let Some(models) = self.rates.get(provider) {
+            // An exact per-model row still wins — upstream checks
+            // PROVIDER_PRICING before the free-namespace rule.
             if let Some(pricing) = models.get(model) {
                 return Some(pricing);
+            }
+            // Free namespaces bill $0 regardless of any catch-all price
+            // (upstream FREE_MODEL_NAMESPACES sits between the provider
+            // override and the canonical/pattern fallbacks).
+            if is_free_model(model) {
+                return Some(&FREE_PRICING);
             }
             return models.get("all");
         }

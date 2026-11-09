@@ -3659,7 +3659,10 @@ fn bad_request_response(message: &str) -> Response {
 /// Providers that authenticate with a browser session cookie (stored in the
 /// `api_key` field). Must match `WEB_COOKIE_PROVIDERS` in the dashboard.
 fn is_web_cookie_provider(provider: &str) -> bool {
-    matches!(provider, "grok-web" | "perplexity-web" | "deepseek-web")
+    matches!(
+        provider,
+        "grok-web" | "perplexity-web" | "deepseek-web" | "uc-web" | "chatgpt-web" | "cg"
+    )
 }
 
 /// The one provider 9router's create route creates without an API key
@@ -3758,6 +3761,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "modal",
     "modelscope",
     "morph",
+    "nace",
     "nanobanana",
     "nebius",
     "nlpcloud",
@@ -3809,6 +3813,7 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "v1m",
     "venice",
     "vercel-ai-gateway",
+    "veoaifree-web",
     "vertex",
     "vertex-partner",
     "volcengine-ark",

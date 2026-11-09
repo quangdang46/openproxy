@@ -48,6 +48,49 @@ pub const STREAM_STALL_TIMEOUT_MS: u64 = 6 * 60 * 1000;
 /// (`STREAM_STALL_TIMEOUT_MS`) applies.
 pub const STREAM_FIRST_CHUNK_TIMEOUT_MS: u64 = 200_000;
 
+/// Keep-alive socket TTL for pooled upstream connections (4s default,
+/// `FETCH_KEEPALIVE_TIMEOUT_MS` override). Capped below upstream/edge idle
+/// windows (Cloudflare, AWS Global Accelerator / NVIDIA NIM) that drop idle
+/// sockets without a TCP RST. Port of `DEFAULT_KEEPALIVE_TIMEOUT_MS` /
+/// `resolveKeepAliveTimeouts` in 9router `open-sse/config/runtimeConfig.js`
+/// (v0.5.116, commit 963787f7).
+pub const DEFAULT_KEEPALIVE_TIMEOUT_MS: u64 = 4 * 1000;
+/// Fresh-socket retry TTL (1ms) — guarantees a new TCP/TLS connection.
+/// Port of `FRESH_RETRY_KEEPALIVE_TIMEOUT_MS`.
+pub const FRESH_RETRY_KEEPALIVE_TIMEOUT_MS: u64 = 1;
+
+/// Parse a positive-integer millisecond env override, falling back to `def`
+/// (port of upstream `envMs`: unset/empty/non-numeric/<=0 → default).
+fn env_ms(name: &str, def: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(raw) if !raw.is_empty() => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(def),
+        _ => def,
+    }
+}
+
+/// Effective keep-alive TTL for pooled upstream connections.
+pub fn fetch_keepalive_timeout_ms() -> u64 {
+    env_ms("FETCH_KEEPALIVE_TIMEOUT_MS", DEFAULT_KEEPALIVE_TIMEOUT_MS)
+}
+
+/// Escape hatch: `FETCH_FRESH_RETRY=off|0|false|no` disables the
+/// transport-level stale-socket replay, leaving only the executor's own
+/// retry path. Defaults to on. Port of `isFreshSocketReplayEnabled`.
+pub fn fresh_socket_replay_enabled() -> bool {
+    match std::env::var("FETCH_FRESH_RETRY") {
+        Ok(raw) => !matches!(
+            raw.trim().to_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Hard cap on `max_tokens` we forward upstream (clamped down from any
 /// caller-supplied value above this).
 pub const DEFAULT_MAX_TOKENS: u32 = 64_000;
@@ -213,5 +256,38 @@ mod tests {
             "Please write a 5-10 word title for the following conversation: ..."
         ));
         assert!(!matches_skip_pattern("hello world"));
+    }
+
+    #[test]
+    fn env_ms_parses_positive_int_and_falls_back() {
+        // Unique var name so parallel tests can't collide.
+        let name = "OPENPROXY_TEST_ENV_MS_KEEPALIVE";
+        std::env::set_var(name, "2500");
+        assert_eq!(env_ms(name, 99), 2500);
+        std::env::set_var(name, "0");
+        assert_eq!(env_ms(name, 99), 99);
+        std::env::set_var(name, "not-a-number");
+        assert_eq!(env_ms(name, 99), 99);
+        std::env::remove_var(name);
+        assert_eq!(env_ms(name, 99), 99);
+    }
+
+    #[test]
+    fn fresh_socket_replay_defaults_on_and_honors_kill_switch() {
+        // Save/restore the real env var; nothing else in the test binary
+        // reads FETCH_FRESH_RETRY.
+        let saved = std::env::var("FETCH_FRESH_RETRY").ok();
+        std::env::remove_var("FETCH_FRESH_RETRY");
+        assert!(fresh_socket_replay_enabled());
+        for off in ["off", "0", "false", "no", "OFF"] {
+            std::env::set_var("FETCH_FRESH_RETRY", off);
+            assert!(!fresh_socket_replay_enabled(), "{off} should disable");
+        }
+        std::env::set_var("FETCH_FRESH_RETRY", "on");
+        assert!(fresh_socket_replay_enabled());
+        match saved {
+            Some(v) => std::env::set_var("FETCH_FRESH_RETRY", v),
+            None => std::env::remove_var("FETCH_FRESH_RETRY"),
+        }
     }
 }

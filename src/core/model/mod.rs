@@ -135,6 +135,10 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("gweb", "gemini-web"),
         ("muse-spark-web", "muse-spark-web"),
         ("ms-web", "muse-spark-web"),
+        ("uc", "uc-web"),
+        ("uc-web", "uc-web"),
+        ("veo-free", "veoaifree-web"),
+        ("veoaifree-web", "veoaifree-web"),
         // ── 9router registry aliases not previously mapped ──────────────
         // Each entry mirrors `alias:` / `aliases:` on the matching
         // 9router providers/registry/*.js file, and every target is verified
@@ -236,6 +240,9 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         // executor — so the PROVIDER_CONFIGS caveat above does not apply.
         ("systemone", "v1m"),
         ("jev", "v1m"),
+        // 9router registry/nace.js: `drex` is the public alias for the Nace
+        // Drex System One provider (drex-max / drex-v2.0).
+        ("drex", "nace"),
     ])
 });
 

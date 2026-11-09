@@ -107,7 +107,14 @@ async fn handle_web_fetch(
         _ => return fetch_error(StatusCode::BAD_REQUEST, "Missing required field: url"),
     };
 
+    // 9router fetch/index.js: `format || DEFAULT_FORMAT` — an empty string
+    // falls back to markdown just like a missing field.
     let format = req.format.trim();
+    let format = if format.is_empty() {
+        "markdown"
+    } else {
+        format
+    };
     let max_chars = req.max_characters.unwrap_or(usize::MAX);
     let snapshot = state.db.snapshot();
 
@@ -393,12 +400,46 @@ async fn do_fetch(
     )
 }
 
+/// `fetchConfig.formats` registry (ported from 9router v0.5.116 #2239,
+/// open-sse/providers/registry/*.js). Providers without an entry have no
+/// format restriction. The registry drives both the dashboard selector and
+/// this backend validation; unsupported requests are rejected before any
+/// upstream call.
+fn fetch_supported_formats(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        "firecrawl" => Some(&["markdown", "html", "text"]),
+        "jina-reader" => Some(&["markdown", "text", "html"]),
+        "tavily" => Some(&["markdown", "text"]),
+        "exa" => Some(&["text", "markdown"]),
+        "ollama" => Some(&["markdown"]),
+        "tinyfish" => Some(&["markdown", "html"]),
+        _ => None,
+    }
+}
+
 fn build_fetch_request(
     provider: &str,
     connection: &ProviderConnection,
     url: &str,
     format: &str,
 ) -> Result<(String, Value, HeaderMap), FetchError> {
+    // 9router handleFetchCore: reject unsupported formats up front. The
+    // message must not echo the untrusted format value — account fallback
+    // classifies error text and values like "capacity" could be mistaken
+    // for real account failures.
+    if let Some(supported) = fetch_supported_formats(provider) {
+        if !supported.contains(&format) {
+            return Err(FetchError {
+                status: 400,
+                message: format!(
+                    "Unsupported format for {}. Supported: {}",
+                    provider,
+                    supported.join(", ")
+                ),
+            });
+        }
+    }
+
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -447,6 +488,15 @@ fn build_fetch_request(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             );
+            // 9router v0.5.116 #2239: forward the selected output format via
+            // Jina's `x-respond-with` header (markdown|text|html).
+            h.insert(
+                HeaderName::from_static("x-respond-with"),
+                HeaderValue::from_str(format).map_err(|_| FetchError {
+                    status: 400,
+                    message: "Invalid format".into(),
+                })?,
+            );
             if let Some(key) = api_key {
                 h.insert(
                     header::AUTHORIZATION,
@@ -461,9 +511,12 @@ fn build_fetch_request(
 
         "tavily" => {
             let request_url = "https://api.tavily.com/extract".to_string();
+            // 9router v0.5.116 #2239: forward the selected output format via
+            // Tavily's `format` body field (markdown|text).
             let request_body = json!({
                 "urls": [url],
-                "extract_depth": "basic"
+                "extract_depth": "basic",
+                "format": format
             });
             if let Some(key) = api_key {
                 let mut h = HeaderMap::new();
@@ -1097,5 +1150,103 @@ mod tests {
     fn combo_strategy_fallback_default() {
         // verify the combo_strategy_for function uses settings correctly
         // (integration tested via web_fetch_api tests)
+    }
+
+    fn test_connection() -> ProviderConnection {
+        ProviderConnection {
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        }
+    }
+
+    // 9router v0.5.116 #2239: the selected output format must reach Jina
+    // via the `x-respond-with` header.
+    #[test]
+    fn jina_reader_forwards_format_via_x_respond_with() {
+        for fmt in ["markdown", "text", "html"] {
+            let (_url, _body, headers) = build_fetch_request(
+                "jina-reader",
+                &test_connection(),
+                "https://example.com",
+                fmt,
+            )
+            .unwrap();
+            assert_eq!(
+                headers
+                    .get(HeaderName::from_static("x-respond-with"))
+                    .and_then(|v| v.to_str().ok()),
+                Some(fmt),
+                "x-respond-with must equal requested format {}",
+                fmt
+            );
+        }
+    }
+
+    // 9router v0.5.116 #2239: Tavily's `format` body field carries the
+    // selected output format (markdown|text only).
+    #[test]
+    fn tavily_forwards_format_in_body() {
+        let (_url, body, _headers) =
+            build_fetch_request("tavily", &test_connection(), "https://example.com", "text")
+                .unwrap();
+        assert_eq!(body["format"], "text");
+        assert_eq!(body["extract_depth"], "basic");
+        assert_eq!(body["urls"][0], "https://example.com");
+    }
+
+    // 9router handleFetchCore: unsupported formats are rejected with 400
+    // before any upstream call, and the error must not echo the untrusted
+    // format value (account fallback classifies error text).
+    #[test]
+    fn unsupported_format_rejected_without_echo() {
+        // Tavily supports markdown|text only — html is rejected.
+        let err = build_fetch_request("tavily", &test_connection(), "https://example.com", "html")
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("Unsupported format for tavily"));
+        assert!(err.message.contains("markdown, text"));
+        assert!(!err.message.contains("html"));
+
+        // Jina rejects formats outside its registry.
+        let err = build_fetch_request(
+            "jina-reader",
+            &test_connection(),
+            "https://example.com",
+            "xml",
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(!err.message.contains("xml"));
+
+        // Ollama only supports markdown.
+        let err = build_fetch_request("ollama", &test_connection(), "https://example.com", "text")
+            .unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn fetch_supported_formats_matches_upstream_registry() {
+        assert_eq!(
+            fetch_supported_formats("firecrawl"),
+            Some(&["markdown", "html", "text"][..])
+        );
+        assert_eq!(
+            fetch_supported_formats("jina-reader"),
+            Some(&["markdown", "text", "html"][..])
+        );
+        assert_eq!(
+            fetch_supported_formats("tavily"),
+            Some(&["markdown", "text"][..])
+        );
+        assert_eq!(
+            fetch_supported_formats("exa"),
+            Some(&["text", "markdown"][..])
+        );
+        assert_eq!(fetch_supported_formats("ollama"), Some(&["markdown"][..]));
+        assert_eq!(
+            fetch_supported_formats("tinyfish"),
+            Some(&["markdown", "html"][..])
+        );
+        assert_eq!(fetch_supported_formats("unknown"), None);
     }
 }

@@ -473,7 +473,11 @@ mod tests {
         let slots = get_schedule_slots(&s, now);
         assert!(!slots.is_empty());
         let ats: Vec<i64> = slots.iter().map(|s| s.at_ms).collect();
-        assert!(ats.windows(2).all(|w| w[0] < w[1]));
+        // Upstream JS resolves the nonexistent 02:30 to 06:30Z, which is the
+        // same instant as the previous day's last 1h slot — `Intl`-based
+        // `zonedWallClockToUtcMs` yields the identical collision, so slots
+        // are non-decreasing (never decreasing), not strictly increasing.
+        assert!(ats.windows(2).all(|w| w[0] <= w[1]));
     }
 
     #[test]

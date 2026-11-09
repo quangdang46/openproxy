@@ -89,6 +89,24 @@ pub fn systemone_config(provider: &str) -> Option<SystemoneConfig> {
             auth_required: true,
             opencode_session: false,
         },
+        // registry/nace.js — Nace Drex decision models on console.nace.ai;
+        // a saved host override joins `path` ("/v1/systemone").
+        "nace" => SystemoneConfig {
+            url: "https://console.nace.ai/v1/systemone",
+            path: Some("/v1/systemone"),
+            headers: &[],
+            auth_required: true,
+            opencode_session: false,
+        },
+        // registry/ollama.js — Ollama Cloud decision lane; apikey bearer,
+        // no path override (upstream systemoneConfig has no `path`).
+        "ollama" => SystemoneConfig {
+            url: "https://ollama.com/v1/systemone",
+            path: None,
+            headers: &[],
+            auth_required: true,
+            opencode_session: false,
+        },
         _ => return None,
     };
     Some(cfg)

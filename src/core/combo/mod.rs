@@ -21,6 +21,7 @@ pub mod fusion;
 pub mod hedging;
 pub mod ordering;
 pub mod shadow;
+pub mod smart;
 
 pub use ordering::{sort_models_by_cost, sort_models_by_latency};
 
@@ -136,6 +137,9 @@ pub enum ComboStrategy {
     Fastest,
     /// Quality-first: keep capability-tier ordering (vision/pdf/audio/video aware).
     Quality,
+    /// Smart Router: a System One decision model picks the best member per
+    /// request (9router `comboStrategy === "smart"`, combo.js:372-448).
+    Smart,
 }
 
 /// Map a strategy string (from `settings.combo_strategies`, `combo.extra["strategy"]`,
@@ -159,6 +163,8 @@ pub fn parse_combo_strategy(value: &str) -> ComboStrategy {
         ComboStrategy::Fastest
     } else if value.eq_ignore_ascii_case("quality") {
         ComboStrategy::Quality
+    } else if value.eq_ignore_ascii_case("smart") {
+        ComboStrategy::Smart
     } else {
         ComboStrategy::Fallback
     }
@@ -231,10 +237,15 @@ impl ComboAttemptError {
 /// string and a numeric seconds count. Returns `None` when absent/unparseable.
 pub fn parse_retry_after_from_body(body: &[u8]) -> Option<DateTime<Utc>> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let retry_after = value
+    let Some(retry_after) = value
         .get("error")
         .and_then(|e| e.get("retryAfter"))
-        .or_else(|| value.get("retryAfter"))?;
+        .or_else(|| value.get("retryAfter"))
+    else {
+        // No `retryAfter` field at all — still try the CodeBuddy reset
+        // datetime embedded in `msg` before giving up.
+        return parse_codebuddy_rate_limit(body).and_then(|e| e.resets_at);
+    };
     if let Some(iso) = retry_after.as_str() {
         // ISO-8601 date string.
         if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {

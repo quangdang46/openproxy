@@ -82,7 +82,7 @@ impl RequestPlan {
         };
 
         let (model_target, mut upstream_model_id, strip_list) =
-            resolve_model_metadata(provider, model);
+            resolve_model_metadata_with_client(provider, model, Some(body));
 
         // Global model(level) / model-level strip (9router thinkingUnified.stripThinkingSuffix)
         // Keep level for post-translate re-apply (applyThinking parity).
@@ -165,18 +165,170 @@ impl RequestPlan {
 
 /// Catalog + custom-model fields: targetFormat, upstreamModelId, strip.
 fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, String, Vec<String>) {
+    resolve_model_metadata_with_client(provider, model, None)
+}
+
+/// Split a trailing `"(level)"` thinking suffix off `model`, returning
+/// `(base, suffix_with_parens)`. Mirrors the JS
+/// `/\([^()]+\)\s*$/` match in `getModelUpstreamId` — any non-empty,
+/// paren-free parenthesized tail counts (e.g. `(high)`, `(8192)`).
+fn split_paren_suffix(model: &str) -> (&str, &str) {
+    let trimmed = model.trim_end();
+    if trimmed.ends_with(')') {
+        if let Some(open) = trimmed.rfind('(') {
+            let inner = &trimmed[open + 1..trimmed.len() - 1];
+            if !inner.is_empty() && !inner.contains(['(', ')']) {
+                return (trimmed[..open].trim_end(), &trimmed[open..]);
+            }
+        }
+    }
+    (trimmed, "")
+}
+
+/// 9router providerModels.js `getModelUpstreamId` tier normalization:
+/// `xhigh`/`max` collapse to `high`, `minimal` to `low`.
+fn normalize_tier(tier: &str) -> String {
+    let t = tier.trim().to_lowercase();
+    match t.as_str() {
+        "xhigh" | "max" => "high".to_string(),
+        "minimal" => "low".to_string(),
+        _ => t,
+    }
+}
+
+/// JS truthiness for the `a || b || c` effort chain (null/false/0/"" are falsy).
+fn js_truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// JS `Number(x)` coercion for `thinking.budget_tokens`.
+fn js_number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Some(0.0) // Number("") === 0
+            } else {
+                t.parse::<f64>().ok()
+            }
+        }
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        Value::Null => Some(0.0),
+        _ => None,
+    }
+}
+
+/// Requested thinking tier from the client request body
+/// (9router `getModelUpstreamId` clientBody branch):
+/// `reasoning_effort || output_config.effort || reasoning.effort`, else
+/// `thinking.budget_tokens` thresholds (>16384 high, <=4096 low, else medium).
+fn client_requested_tier(client_body: &Value) -> Option<String> {
+    let effort = [
+        client_body.get("reasoning_effort"),
+        client_body.pointer("/output_config/effort"),
+        client_body
+            .get("reasoning")
+            .filter(|r| r.is_object())
+            .and_then(|r| r.get("effort")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|v| js_truthy(v));
+    if let Some(v) = effort {
+        if let Some(s) = v.as_str() {
+            if !s.is_empty() {
+                return Some(normalize_tier(s));
+            }
+        }
+        // Truthy non-string effort: JS falls through to the thinking branch.
+    }
+    let thinking = client_body.get("thinking").filter(|t| t.is_object())?;
+    let budget = js_number(thinking.get("budget_tokens")?)?;
+    if budget > 0.0 {
+        Some(
+            if budget > 16384.0 {
+                "high"
+            } else if budget <= 4096.0 {
+                "low"
+            } else {
+                "medium"
+            }
+            .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// `getModelUpstreamId` port (9router v0.5.109, commit 82aeb90): resolve
+/// unadorned models to tiered catalog variants (`<base>-<tier>`) from the
+/// `(level)` suffix or the client's reasoning effort, then re-apply the
+/// thinking suffix the way upstream does (`resolvedBase + suffix`, or the
+/// requested tier over the catalog preset suffix).
+fn resolve_model_metadata_with_client(
+    provider: &str,
+    model: &str,
+    client_body: Option<&Value>,
+) -> (Option<Format>, String, Vec<String>) {
     let catalog = provider_catalog();
-    if let Some(entry) = catalog.find_model(provider, model) {
-        let target = entry.target_format.as_deref().and_then(Format::from_str);
-        let upstream = entry
-            .upstream_model_id
-            .clone()
-            .unwrap_or_else(|| model.to_string());
-        let strip = entry
+    // JS keys PROVIDER_MODELS by alias and accepts id-or-alias; the Rust
+    // catalog keys by canonical provider id, so normalize first.
+    let provider_id = crate::core::model::resolve_provider_alias(provider);
+    let (base_id, suffix) = split_paren_suffix(model);
+
+    // Tier from the "(level)" suffix first; client body only when absent.
+    let suffix_inner = suffix
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let tier = if !suffix_inner.is_empty() {
+        Some(normalize_tier(&suffix_inner))
+    } else {
+        client_body.and_then(client_requested_tier)
+    };
+
+    // Tiered variant wins over the bare base id (e.g. gemini-3.8-flash-high).
+    let found = tier
+        .as_deref()
+        .and_then(|t| catalog.find_model(&provider_id, &format!("{base_id}-{t}")))
+        .or_else(|| catalog.find_model(&provider_id, base_id));
+
+    if let Some(entry) = found {
+        // targetFormat/strip come from the base-id lookup upstream
+        // (getModelTargetFormat/getModelStrip run on the un-tiered id);
+        // tiered variants carry neither, so fall back to the found entry.
+        let meta = catalog.find_model(&provider_id, base_id).unwrap_or(entry);
+        let target = meta.target_format.as_deref().and_then(Format::from_str);
+        let strip = meta
             .strip
             .as_deref()
             .map(parse_strip_list)
             .unwrap_or_default();
+
+        let resolved = entry
+            .upstream_model_id
+            .clone()
+            .unwrap_or_else(|| entry.id.clone());
+        let (resolved_base, preset_suffix) = split_paren_suffix(&resolved);
+        let upstream = if !suffix.is_empty() {
+            format!("{resolved_base}{suffix}")
+        } else if !preset_suffix.is_empty() {
+            match &tier {
+                Some(t) => format!("{resolved_base}({t})"),
+                None => resolved.clone(),
+            }
+        } else {
+            resolved_base.to_string()
+        };
         return (target, upstream, strip);
     }
     // 9router acb5c34c (`getModelTargetFormat` + `isMuseSparkModel`): all
@@ -1258,6 +1410,7 @@ mod tests {
 #[cfg(test)]
 mod target_format_precedence {
     use super::*;
+    use serde_json::json;
 
     /// openproxy-e43o: 9router resolves `useTransport?.format ||
     /// modelTargetFormat || getTargetFormat(...)` — transport FIRST, because a
@@ -1413,5 +1566,109 @@ mod target_format_precedence {
         // Chat-lane models keep no model target.
         let (t, _, _) = resolve_model_metadata("opencode-zen", "big-pickle");
         assert_eq!(t, None);
+    }
+
+    // ---- 9router v0.5.109 (82aeb90): antigravity tiered model resolution ----
+
+    #[test]
+    fn antigravity_unadorned_model_resolves_tier_from_reasoning_effort() {
+        // reasoning_effort picks the tiered catalog variant; the preset
+        // "(tier)" suffix is re-applied like upstream getModelUpstreamId.
+        let body = json!({"model": "gemini-3.8-flash", "reasoning_effort": "high"});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-high(high)");
+
+        // Alias provider id resolves the same catalog entry.
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("ag", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-high(high)");
+    }
+
+    #[test]
+    fn antigravity_unadorned_argon_resolves_to_tiered_variant() {
+        // gemini-4-argon has no bare catalog entry — only the tiered ids.
+        for (effort, expected) in [
+            ("high", "gemini-4-argon-high(high)"),
+            ("medium", "gemini-4-argon-medium(medium)"),
+            ("low", "gemini-4-argon-low(low)"),
+        ] {
+            let body = json!({"model": "gemini-4-argon", "reasoning_effort": effort});
+            let (_, upstream, _) =
+                resolve_model_metadata_with_client("antigravity", "gemini-4-argon", Some(&body));
+            assert_eq!(upstream, expected, "effort={effort}");
+        }
+    }
+
+    #[test]
+    fn antigravity_tier_normalization_and_budget_fallback() {
+        // xhigh/max collapse to high; minimal collapses to low.
+        let body = json!({"reasoning_effort": "xhigh"});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-high(high)");
+
+        let body = json!({"reasoning_effort": "minimal"});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-low(low)");
+
+        // thinking.budget_tokens thresholds: >16384 high, <=4096 low, else medium.
+        for (budget, expected) in [
+            (20000, "gemini-3.8-flash-high(high)"),
+            (8192, "gemini-3.8-flash-medium(medium)"),
+            (2048, "gemini-3.8-flash-low(low)"),
+        ] {
+            let body = json!({"thinking": {"budget_tokens": budget}});
+            let (_, upstream, _) =
+                resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+            assert_eq!(upstream, expected, "budget={budget}");
+        }
+
+        // output_config.effort and reasoning.effort are alternate effort keys.
+        let body = json!({"output_config": {"effort": "low"}});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-low(low)");
+        let body = json!({"reasoning": {"effort": "medium"}});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-medium(medium)");
+    }
+
+    #[test]
+    fn antigravity_model_suffix_and_default_preset() {
+        // "(level)" suffix on the model id resolves the tiered variant too.
+        let (_, upstream, _) = resolve_model_metadata_with_client(
+            "antigravity",
+            "gemini-3.8-flash(low)",
+            None,
+        );
+        assert_eq!(upstream, "gemini-3.8-flash-low(low)");
+
+        // No tier requested → bare base entry keeps its catalog preset.
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", None);
+        assert_eq!(upstream, "gemini-3.8-flash-medium(medium)");
+
+        // Unknown tier falls back to the base entry and re-stamps the tier.
+        let body = json!({"reasoning_effort": "ultra"});
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash", Some(&body));
+        assert_eq!(upstream, "gemini-3.8-flash-medium(ultra)");
+    }
+
+    #[test]
+    fn antigravity_plan_dispatch_uses_resolved_tier() {
+        let body = json!({
+            "model": "ag/gemini-4-argon",
+            "reasoning_effort": "low",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let plan = RequestPlan::new(Some("/v1/chat/completions"), &body, "antigravity", "gemini-4-argon");
+        // upstream "gemini-4-argon-low(low)" → thinking suffix stripped for
+        // dispatch, level kept for post-translate re-apply.
+        assert_eq!(plan.dispatch_model(), "gemini-4-argon-low");
+        assert_eq!(plan.thinking_level.as_deref(), Some("low"));
     }
 }

@@ -868,6 +868,9 @@ async fn test_api_key_connection(
         "deepseek-web" | "ds-web" => {
             test_deepseek_web_connection(state, connection, effective_proxy).await
         }
+        "uc-web" | "uc" => {
+            test_uc_web_connection(state, connection, effective_proxy).await
+        }
         "opencode-go" => {
             openai_chat_status_test(
                 state,
@@ -1316,6 +1319,156 @@ async fn test_perplexity_web_connection(
             }
         }
         Err(error) => invalid(&error),
+    }
+}
+
+async fn test_uc_web_connection(
+    state: &AppState,
+    connection: &ProviderConnection,
+    effective_proxy: &EffectiveProxy,
+) -> ConnectionTestResult {
+    // webIdentity.js `uc-web` probe parity: extract `__client` from the
+    // pasted cookie header, resolve the Clerk session id (JWT `sid` claim or
+    // the client sessions list), then POST the token endpoint — a valid
+    // credential mints a `jwt`.
+    use base64::Engine as _;
+
+    let raw = connection.api_key.clone().unwrap_or_default();
+    let mut client_jwt = String::new();
+    for part in raw.split(';') {
+        if let Some((name, value)) = part.split_once('=') {
+            if name.trim() == "__client" {
+                client_jwt = value.trim().to_string();
+                break;
+            }
+        }
+    }
+    if client_jwt.is_empty() {
+        return invalid("Missing __client cookie");
+    }
+    let cookie_header = format!("__client={client_jwt}");
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+
+    let decode_sid = |token: &str| -> Option<String> {
+        let payload = token.split('.').nth(1)?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()?
+            .get("sid")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let mut sid = decode_sid(&client_jwt);
+
+    if sid.is_none() {
+        let list_req = PreparedRequest {
+            method: Method::GET,
+            url: "https://clerk.uncensored.com/v1/client?_clerk_js_version=5.127.1"
+                .to_string(),
+            headers: vec![
+                ("Cookie".to_string(), cookie_header.clone()),
+                ("Accept".to_string(), "application/json".to_string()),
+                ("Origin".to_string(), "https://uncensored.com".to_string()),
+                ("Referer".to_string(), "https://uncensored.com/".to_string()),
+                ("User-Agent".to_string(), ua.to_string()),
+            ],
+            body: None,
+        };
+        match execute_request(state, &connection.provider, effective_proxy, list_req).await {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if code == 401 || code == 403 {
+                    return invalid("Clerk session is invalid or expired");
+                }
+                if !resp.status().is_success() {
+                    return invalid(&format!("Clerk returned HTTP {code}"));
+                }
+                match resp.json::<Value>().await {
+                    Ok(body) => {
+                        let payload = body
+                            .get("response")
+                            .or_else(|| body.get("client"))
+                            .unwrap_or(&body);
+                        let sessions = payload.get("sessions").and_then(Value::as_array);
+                        sid = sessions.and_then(|list| {
+                            list.iter()
+                                .find(|s| {
+                                    s.get("status").and_then(Value::as_str) == Some("active")
+                                })
+                                .or_else(|| list.first())
+                                .and_then(|s| s.get("id"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        });
+                    }
+                    Err(e) => return invalid(&format!("Clerk returned invalid JSON: {e}")),
+                }
+            }
+            Err(e) => return invalid(&e),
+        }
+    }
+    let Some(sid) = sid.filter(|s| !s.is_empty()) else {
+        return invalid("Not signed in to uncensored.com — use Login via Browser");
+    };
+    let sid_enc = sid
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect::<String>();
+
+    let mint_req = PreparedRequest {
+        method: Method::POST,
+        url: format!(
+            "https://clerk.uncensored.com/v1/client/sessions/{sid_enc}/tokens?_clerk_js_version=5.127.1"
+        ),
+        headers: vec![
+            ("Cookie".to_string(), cookie_header),
+            (
+                "Content-Type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ),
+            ("Origin".to_string(), "https://uncensored.com".to_string()),
+            ("Referer".to_string(), "https://uncensored.com/".to_string()),
+            ("User-Agent".to_string(), ua.to_string()),
+        ],
+        body: Some(PreparedBody::Form(vec![])),
+    };
+    match execute_request(state, &connection.provider, effective_proxy, mint_req).await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 401 || code == 403 {
+                return invalid("Clerk session is invalid or expired");
+            }
+            if !resp.status().is_success() {
+                return invalid(&format!("Clerk returned HTTP {code}"));
+            }
+            match resp.json::<Value>().await {
+                Ok(json)
+                    if json
+                        .get("jwt")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false) =>
+                {
+                    ConnectionTestResult {
+                        valid: true,
+                        error: None,
+                        refreshed: false,
+                        new_tokens: None,
+                        soft_error: None,
+                    }
+                }
+                Ok(_) => invalid("Clerk did not mint a session token"),
+                Err(e) => invalid(&format!("Clerk returned invalid JSON: {e}")),
+            }
+        }
+        Err(e) => invalid(&e),
     }
 }
 

@@ -1538,7 +1538,8 @@ mod tests {
         let mut frame = vec![0u8; total];
         frame[0..4].copy_from_slice(&(total as u32).to_be_bytes());
         frame[4..8].copy_from_slice(&(header_bytes.len() as u32).to_be_bytes());
-        frame[8..12].copy_from_slice(&crc32fast::hash(&frame[0..8]).to_be_bytes());
+        let prelude_crc = crc32fast::hash(&frame[0..8]).to_be_bytes();
+        frame[8..12].copy_from_slice(&prelude_crc);
         frame[12..12 + header_bytes.len()].copy_from_slice(&header_bytes);
         let pstart = 12 + header_bytes.len();
         frame[pstart..pstart + payload_bytes.len()].copy_from_slice(&payload_bytes);

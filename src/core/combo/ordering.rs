@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use crate::core::model::resolve_provider_alias;
-use crate::core::usage::{parse_model_pricing, CostModel};
+use crate::core::usage::{is_free_model, parse_model_pricing, CostModel};
 use crate::types::PricingTable;
 
 /// Resolve the pricing row for a combo entry (`prefix/model`).
@@ -20,8 +20,18 @@ fn pricing_entry<'a>(model: &'a str, pricing: &'a PricingTable) -> Option<(&'a V
     let resolved = resolve_provider_alias(prefix);
     for provider in [prefix, resolved.as_str()] {
         if let Some(models) = pricing.get(provider) {
-            if let Some(entry) = models.get(name).or_else(|| models.get("all")) {
+            // An exact per-model row still wins — upstream checks
+            // PROVIDER_PRICING before the free-namespace rule.
+            if let Some(entry) = models.get(name) {
                 return Some((entry, name));
+            }
+            // cline-free/* bills $0 upstream (FREE_MODEL_NAMESPACES,
+            // 199173f) — a provider-wide `all` row must not price the free
+            // tier.
+            if !is_free_model(name) {
+                if let Some(entry) = models.get("all") {
+                    return Some((entry, name));
+                }
             }
         }
     }

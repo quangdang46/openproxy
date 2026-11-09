@@ -7,10 +7,12 @@ use std::sync::Barrier;
 use std::thread;
 use std::time::Duration;
 
+use openproxy::core::config::runtime_config::{
+    fetch_keepalive_timeout_ms, DEFAULT_KEEPALIVE_TIMEOUT_MS,
+};
 use openproxy::core::executor::{
     provider_config_base_url, ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError,
-    TransportKind, CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST,
-    CLIENT_POOL_TCP_KEEPALIVE,
+    TransportKind, CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
 };
 use openproxy::core::proxy::{normalize, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
@@ -1376,7 +1378,16 @@ fn client_pool_reuses_single_client_under_concurrent_same_provider_requests() {
 
 #[test]
 fn client_pool_exposes_documented_tuning() {
-    assert_eq!(CLIENT_POOL_IDLE_TIMEOUT, Duration::from_secs(90));
+    // The pooled keep-alive TTL is env-driven (FETCH_KEEPALIVE_TIMEOUT_MS,
+    // 4s default — 9router v0.5.116 dead-socket fix); assert the default
+    // with the override removed, then restore it.
+    let saved = std::env::var("FETCH_KEEPALIVE_TIMEOUT_MS").ok();
+    std::env::remove_var("FETCH_KEEPALIVE_TIMEOUT_MS");
+    assert_eq!(fetch_keepalive_timeout_ms(), DEFAULT_KEEPALIVE_TIMEOUT_MS);
+    match saved {
+        Some(v) => std::env::set_var("FETCH_KEEPALIVE_TIMEOUT_MS", v),
+        None => std::env::remove_var("FETCH_KEEPALIVE_TIMEOUT_MS"),
+    }
     assert_eq!(CLIENT_POOL_MAX_IDLE_PER_HOST, 8);
     assert_eq!(CLIENT_POOL_TCP_KEEPALIVE, Duration::from_secs(60));
 }

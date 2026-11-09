@@ -16,6 +16,7 @@ pub mod background_refresh;
 pub mod glm;
 pub mod kilocode;
 pub mod minimax_code;
+pub mod minimax_lease;
 pub mod muse;
 pub mod nous;
 pub mod pending;

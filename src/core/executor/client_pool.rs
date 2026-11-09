@@ -9,11 +9,11 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
+use crate::core::config::runtime_config;
 use crate::core::dns::MitmBypassResolver;
 use crate::core::proxy::ProxyTarget;
 use crate::core::tls::ensure_rustls_provider;
 
-pub const CLIENT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 pub const CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 8;
 pub const CLIENT_POOL_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,11 +27,24 @@ const INSECURE_KEY_SUFFIX: &str = "|insecure-tls";
 /// providers (Bedrock) must not let reqwest replay a signed body +
 /// `x-amz-security-token` at whatever origin a 3xx names.
 const NO_REDIRECT_KEY_SUFFIX: &str = "|no-redirect";
+/// Cache-key suffix for the no-keep-alive client used by the one-shot
+/// stale-socket replay in [`ClientPool::send_with_tls_fallback`]. Kept
+/// separate so the replay never draws (or poisons) the normal pool.
+const FRESH_SOCKET_KEY_SUFFIX: &str = "|fresh-socket";
 
 /// How often the stale-connection cleaner runs.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 /// Connections unused for longer than this are removed.
 const CLEANUP_MAX_IDLE: Duration = Duration::from_secs(600); // 10 minutes
+
+/// Idle TTL for pooled connections, capped below upstream/edge idle windows
+/// (Cloudflare, AWS Global Accelerator / NVIDIA NIM) that silently drop
+/// keep-alive sockets without a TCP RST. Port of upstream
+/// `resolveKeepAliveTimeouts` (`FETCH_KEEPALIVE_TIMEOUT_MS`, 4s default) —
+/// 9router v0.5.116 commit 963787f7.
+fn pool_idle_timeout() -> Duration {
+    Duration::from_millis(runtime_config::fetch_keepalive_timeout_ms())
+}
 
 /// Timeout configuration for HTTP clients built by [`build_reqwest_client`]
 /// and [`build_hyper_client`].
@@ -105,7 +118,7 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_inner(provider_key, proxy, false, false)
+        self.get_inner(provider_key, proxy, false, false, false)
     }
 
     /// A pooled client that skips TLS certificate verification. Used ONLY by
@@ -118,7 +131,21 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_inner(provider_key, proxy, true, false)
+        self.get_inner(provider_key, proxy, true, false, false)
+    }
+
+    /// A pooled client whose connections are never reused
+    /// (`pool_idle_timeout` ≈ [`runtime_config::FRESH_RETRY_KEEPALIVE_TIMEOUT_MS`]).
+    /// Used ONLY by the one-shot stale-socket replay in
+    /// [`Self::send_with_tls_fallback`] — port of upstream
+    /// `getFreshRetryDispatcher` (`keepAliveTimeout: 1`), guaranteeing a
+    /// fresh TCP/TLS connection after a silently-dropped keep-alive socket.
+    pub fn get_fresh(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+    ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+        self.get_inner(provider_key, proxy, false, false, true)
     }
 
     /// A pooled client that never follows redirects
@@ -131,7 +158,7 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_inner(provider_key, proxy, false, true)
+        self.get_inner(provider_key, proxy, false, true, false)
     }
 
     fn get_inner(
@@ -140,6 +167,7 @@ impl ClientPool {
         proxy: Option<&ProxyTarget>,
         insecure: bool,
         no_redirect: bool,
+        fresh: bool,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
         let timeout = self.timeout;
         let mut key = client_key(provider_key, proxy);
@@ -149,10 +177,12 @@ impl ClientPool {
         if no_redirect {
             key = format!("{key}{NO_REDIRECT_KEY_SUFFIX}");
         }
-        let result = self
-            .reqwest_clients
-            .entry(key.clone())
-            .or_try_insert_with(|| build_reqwest_client(proxy, timeout, insecure, no_redirect));
+        if fresh {
+            key = format!("{key}{FRESH_SOCKET_KEY_SUFFIX}");
+        }
+        let result = self.reqwest_clients.entry(key.clone()).or_try_insert_with(|| {
+            build_reqwest_client(proxy, timeout, insecure, no_redirect, fresh)
+        });
         match result {
             Ok(entry) => {
                 self.touch(key);
@@ -205,8 +235,17 @@ impl ClientPool {
     ///
     /// The request must be replayable: callers build it via
     /// `RequestBuilder::build()` and this method uses `try_clone()` for the
-    /// retry. A non-replayable body (streaming upload) skips the fallback
+    /// retries. A non-replayable body (streaming upload) skips the fallbacks
     /// and sends once, matching upstream's locked-body guard.
+    ///
+    /// Stale keep-alive recovery (9router v0.5.116, commit 963787f7 —
+    /// `fetchWithTlsFallback`'s `forceFreshSocket` replay): when the pooled
+    /// socket the edge silently dropped surfaces as a transport error before
+    /// response headers, the request is replayed ONCE on
+    /// [`Self::get_fresh`], which never reuses connections. The replay only
+    /// fires on errors that prove the socket died ([`is_stale_socket_error`])
+    /// — never on DNS/connect-refused/TLS failures — and is skipped for
+    /// configured proxies and when `FETCH_FRESH_RETRY=off`.
     pub async fn send_with_tls_fallback(
         &self,
         provider_key: &str,
@@ -217,9 +256,12 @@ impl ClientPool {
             let client = self.get(provider_key, proxy)?;
             return client.execute(request).await;
         };
+        // The stale-socket replay needs a second replayable copy; a request
+        // that clones once but not twice still gets the TLS fallback.
+        let fresh_request = request.try_clone();
 
         let secure_client = self.get(provider_key, proxy)?;
-        send_once_with_insecure_retry(
+        let result = send_once_with_insecure_retry(
             strict_ssl_enabled(),
             || secure_client.execute(request),
             || async {
@@ -228,7 +270,17 @@ impl ClientPool {
             },
             is_tls_cert_error,
         )
-        .await
+        .await;
+
+        match (result, fresh_request) {
+            (Err(err), Some(req))
+                if fresh_socket_replay_allowed(proxy) && is_stale_socket_error(&err) =>
+            {
+                let fresh_client = self.get_fresh(provider_key, proxy)?;
+                fresh_client.execute(req).await
+            }
+            (result, _) => result,
+        }
     }
 
     /// Record that a key was just accessed (for staleness tracking).
@@ -292,6 +344,7 @@ fn build_reqwest_client(
     timeout: ClientTimeout,
     insecure: bool,
     no_redirect: bool,
+    fresh: bool,
 ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
         // SigV4-signed requests (Bedrock) must surface 3xx to the caller
@@ -301,7 +354,15 @@ fn build_reqwest_client(
         } else {
             reqwest::redirect::Policy::default()
         })
-        .pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT)
+        // Fresh-socket clients get a ~zero idle TTL so the pool can never
+        // hand out a connection the upstream edge already dropped (port of
+        // undici `keepAliveTimeout`/`keepAliveMaxTimeout` = 1ms). Normal
+        // clients use the capped keep-alive TTL (`FETCH_KEEPALIVE_TIMEOUT_MS`).
+        .pool_idle_timeout(if fresh {
+            Duration::from_millis(runtime_config::FRESH_RETRY_KEEPALIVE_TIMEOUT_MS)
+        } else {
+            pool_idle_timeout()
+        })
         .pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST)
         .tcp_keepalive(CLIENT_POOL_TCP_KEEPALIVE)
         .connect_timeout(timeout.connect)
@@ -364,7 +425,7 @@ fn build_hyper_client(timeout: ClientTimeout) -> Result<Arc<DirectHyperClient>, 
         .wrap_connector(http);
 
     let mut builder = HyperClient::builder(TokioExecutor::new());
-    builder.pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT);
+    builder.pool_idle_timeout(pool_idle_timeout());
     builder.pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST);
     builder.pool_timer(TokioTimer::new());
 
@@ -412,6 +473,91 @@ pub fn tls_cert_error_in_chain(err: &(dyn std::error::Error + 'static)) -> bool 
             if is_cert_rustls_error(rustls_err) {
                 return true;
             }
+        }
+        current = e.source();
+    }
+    false
+}
+
+/// Eligibility gate for the stale-socket replay, mirroring upstream's
+/// conditions in `fetchWithTlsFallback` (proxyFetch.js): the replay is
+/// skipped for proxies (`!proxyUrl`), for non-replayable bodies (handled by
+/// the caller's `try_clone`), for aborts, and when `FETCH_FRESH_RETRY=off`.
+pub fn fresh_socket_replay_allowed(proxy: Option<&ProxyTarget>) -> bool {
+    runtime_config::fresh_socket_replay_enabled() && fresh_socket_replay_direct_only(proxy)
+}
+
+/// The proxy half of the gate, split out so it can be unit-tested without
+/// mutating the process-wide `FETCH_FRESH_RETRY` env var.
+fn fresh_socket_replay_direct_only(proxy: Option<&ProxyTarget>) -> bool {
+    proxy
+        .map(|p| p.url.trim().is_empty())
+        .unwrap_or(true)
+}
+
+/// Port of `isStaleSocketError` (proxyFetch.js, v0.5.116 commit 963787f7):
+/// a pooled keep-alive socket that an upstream edge (NVIDIA NIM behind AWS
+/// Global Accelerator, Cloudflare) silently dropped surfaces as a transport
+/// error before response headers. DNS, connect-refused, connect-timeout and
+/// TLS failures are excluded — those prove the host is unreachable, never a
+/// stale pool entry — matching upstream's NON_STALE_SOCKET_ERROR_CODES.
+pub fn is_stale_socket_error(err: &reqwest::Error) -> bool {
+    if err.is_connect() || err.is_redirect() || is_tls_cert_error(err) {
+        return false;
+    }
+    // A read/headers timeout is upstream's UND_ERR_HEADERS_TIMEOUT analogue:
+    // the socket was accepted but never answered — the classic dead-socket
+    // signature. Connect timeouts are already excluded via `is_connect`.
+    if err.is_timeout() {
+        return true;
+    }
+    stale_socket_error_in_chain(err)
+}
+
+/// Message fragments that identify a socket that died before the response
+/// (hyper "connection closed before message completed", io broken pipe /
+/// reset / unexpected EOF, undici-style "other side closed" / "socket hang
+/// up"). Deliberately excludes a bare ambiguous "request failed" — the
+/// upstream may already hold that request and a replay would bill it twice.
+const STALE_SOCKET_MESSAGE_HINTS: &[&str] = &[
+    "other side closed",
+    "socket hang up",
+    "connection closed",
+    "incomplete message",
+    "broken pipe",
+    "connection reset",
+    "unexpected eof",
+    "channel closed",
+];
+
+/// Walk an error chain looking for a dead-socket signature. Generic over
+/// `dyn Error` so unit tests can exercise it without a live connection (a
+/// `reqwest::Error` cannot be constructed synthetically).
+pub fn stale_socket_error_in_chain(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(io_err) = e.downcast_ref::<io::Error>() {
+            if matches!(
+                io_err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+            ) {
+                return true;
+            }
+        }
+        if let Some(hyper_err) = e.downcast_ref::<hyper::Error>() {
+            if hyper_err.is_incomplete_message() || hyper_err.is_closed() {
+                return true;
+            }
+        }
+        let msg = e.to_string().to_lowercase();
+        if STALE_SOCKET_MESSAGE_HINTS
+            .iter()
+            .any(|hint| msg.contains(hint))
+        {
+            return true;
         }
         current = e.source();
     }
@@ -675,5 +821,112 @@ mod tls_fallback_tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind, "insecure attempt failed");
+    }
+}
+
+#[cfg(test)]
+mod stale_socket_tests {
+    use super::*;
+
+    /// A stand-in for `reqwest::Error` in the chain walker, same trick as
+    /// `tls_fallback_tests::TestError`.
+    #[derive(Debug)]
+    struct ChainError {
+        msg: String,
+        source: Option<Box<dyn std::error::Error>>,
+    }
+
+    impl std::fmt::Display for ChainError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.msg)
+        }
+    }
+
+    impl std::error::Error for ChainError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_deref()
+        }
+    }
+
+    fn leaf(msg: &str) -> ChainError {
+        ChainError {
+            msg: msg.to_string(),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn dead_socket_io_kinds_are_stale() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            let err = ChainError {
+                msg: "error sending request".into(),
+                source: Some(Box::new(io::Error::new(kind, "dead socket"))),
+            };
+            assert!(stale_socket_error_in_chain(&err), "{kind:?} is stale");
+        }
+    }
+
+    #[test]
+    fn dead_socket_messages_are_stale() {
+        // hyper's "connection closed before message completed" and the
+        // undici-style substrings upstream matches on.
+        for msg in [
+            "connection closed before message completed",
+            "error: other side closed",
+            "socket hang up",
+            "channel closed",
+            "connection reset by peer",
+        ] {
+            assert!(stale_socket_error_in_chain(&leaf(msg)), "{msg} is stale");
+        }
+    }
+
+    #[test]
+    fn unreachable_host_errors_are_not_stale() {
+        // DNS / refused / TLS-style failures must never trigger a replay —
+        // the upstream may legitimately be down, and a replay would just
+        // bill the same request twice.
+        for msg in [
+            "dns error: failed to lookup address information",
+            "error trying to connect: tcp connect error: Connection refused",
+            "invalid peer certificate: UnknownIssuer",
+            "request failed",
+            "upstream returned 502",
+        ] {
+            let err = ChainError {
+                msg: "error sending request".into(),
+                source: Some(Box::new(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    msg,
+                ))),
+            };
+            // ConnectionRefused kind is not in the stale set; the message
+            // must not contain a stale hint either.
+            assert!(!stale_socket_error_in_chain(&err), "{msg} not stale");
+        }
+    }
+
+    #[test]
+    fn fresh_replay_is_direct_only() {
+        // Pure proxy gate — no env mutation, so it can't race the
+        // FETCH_FRESH_RETRY test in runtime_config.
+        assert!(fresh_socket_replay_direct_only(None));
+        assert!(fresh_socket_replay_direct_only(Some(&ProxyTarget {
+            url: String::new(),
+            ..Default::default()
+        })));
+        assert!(fresh_socket_replay_direct_only(Some(&ProxyTarget {
+            url: "   ".into(),
+            ..Default::default()
+        })));
+        assert!(!fresh_socket_replay_direct_only(Some(&ProxyTarget {
+            url: "http://127.0.0.1:7890".into(),
+            ..Default::default()
+        })));
     }
 }

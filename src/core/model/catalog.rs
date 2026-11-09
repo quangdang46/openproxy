@@ -99,6 +99,18 @@ impl ProviderCatalog {
             .map(String::as_str)
     }
 
+    /// Canonical provider id for a `providerModels[].alias` value
+    /// (`providers[].alias → providers[].id`). The model-catalog sync files
+    /// capabilities/limits under the canonical id requests resolve to, so
+    /// the hand baseline must key entries the same way (9router
+    /// `collectEntries` uses `provider.id`, never the JS alias).
+    pub fn canonical_id_for_alias(&self, alias: &str) -> Option<&str> {
+        self.providers_by_id
+            .values()
+            .find(|p| p.alias == alias)
+            .map(|p| p.id.as_str())
+    }
+
     pub fn iter_provider_models(&self) -> impl Iterator<Item = &ProviderModelsEntry> {
         self.provider_models.iter()
     }

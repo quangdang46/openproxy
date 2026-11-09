@@ -7,7 +7,7 @@
 //! `apihub.agnes-ai.com`, `api.b.ai`, all serving `/v1/chat/completions`.
 
 use openproxy::core::executor::{provider_config_base_url, ClientPool, DefaultExecutor};
-use openproxy::core::model::{parse_model, provider_catalog, resolve_provider_alias};
+use openproxy::core::model::{catalog::provider_catalog, parse_model, resolve_provider_alias};
 use std::sync::Arc;
 
 /// (provider id, expected upstream chat URL, registry `aliases:` extras).

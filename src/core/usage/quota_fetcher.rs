@@ -3056,20 +3056,39 @@ pub async fn fetch_kiro_quota(
 }
 
 const ANTIGRAVITY_IMPORTANT_MODELS: &[&str] = &[
+    // 9router google.js importantModels (v0.5.116): Gemini 4 Argon tiers are
+    // tracked separately from the main Gemini family.
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
     "gemini-3.7-flash-high",
     "gemini-3.7-flash-medium",
     "gemini-3.7-flash-low",
     "gemini-3.6-flash-high",
     "gemini-3.6-flash-medium",
     "gemini-3.6-flash-low",
-    "gemini-3-flash-agent",
-    "gemini-3.5-flash-low",
-    "gemini-3.5-flash-extra-low",
+    "gemini-3.1-pro-high",
     "gemini-pro-agent",
     "gemini-3.1-pro-low",
+    "claude-sonnet-5-5-high",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5",
+    "claude-opus-5-5-high",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-low",
+    "claude-opus-5-5",
     "claude-sonnet-4-6",
     "claude-opus-4-6-thinking",
     "gpt-oss-120b-medium",
+    "gemini-3.1-flash-image",
+    // Legacy ids kept from the earlier port (superset of upstream list).
+    "gemini-3-flash-agent",
+    "gemini-3.5-flash-low",
+    "gemini-3.5-flash-extra-low",
     "gemini-3-flash",
 ];
 
@@ -3248,13 +3267,34 @@ struct WeeklyQuotaEntry {
     remaining_percentage: f64,
 }
 
-/// Group-name → stable key mapping (9router `GROUP_MATCHERS`).
-fn weekly_group_key(display_name: &str) -> Option<(&'static str, &'static str)> {
+/// Group-name → (weekly key/label, session key/label) mapping
+/// (9router `GROUP_CONFIGS`). Order matters: the more specific Argon family
+/// must precede the broader `/gemini/i` matcher (v0.5.116, commit 8a833631).
+fn weekly_group_keys(
+    display_name: &str,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
     let lower = display_name.to_lowercase();
-    if lower.contains("gemini") {
-        Some(("gemini_weekly", "Gemini (Weekly)"))
+    if lower.contains("argon") {
+        Some((
+            "gemini_argon_weekly",
+            "Gemini 4 Argon (Weekly)",
+            "gemini_argon_session",
+            "Gemini 4 Argon (5h)",
+        ))
+    } else if lower.contains("gemini") {
+        Some((
+            "gemini_weekly",
+            "Gemini (Weekly)",
+            "gemini_session",
+            "Gemini (5h)",
+        ))
     } else if lower.contains("claude") || lower.contains("gpt") {
-        Some(("claude_gpt_weekly", "Claude & GPT (Weekly)"))
+        Some((
+            "claude_gpt_weekly",
+            "Claude & GPT (Weekly)",
+            "claude_gpt_session",
+            "Claude & GPT (5h)",
+        ))
     } else {
         None
     }
@@ -3276,7 +3316,9 @@ fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
             .get("displayName")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let Some((key, label)) = weekly_group_key(display_name) else {
+        let Some((weekly_key, weekly_label, session_key, session_label)) =
+            weekly_group_keys(display_name)
+        else {
             continue;
         };
         let buckets = group
@@ -3285,9 +3327,14 @@ fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
             .cloned()
             .unwrap_or_default();
         for bucket in &buckets {
-            // Identify weekly buckets by checking bucketId + displayName for
-            // "weekly".
-            let text = format!(
+            // 9router parseWeeklyQuotaSummary: classify by `window` plus the
+            // bucketId/displayName text — weekly OR session (5h/daily).
+            let window = bucket
+                .get("window")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let bucket_text = format!(
                 "{} {}",
                 bucket
                     .get("bucketId")
@@ -3299,24 +3346,47 @@ fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
                     .unwrap_or("")
             )
             .to_lowercase();
-            if !text.contains("weekly") {
+            let is_weekly =
+                window == "weekly" || bucket_text.contains("weekly");
+            let is_session = window == "5h"
+                || bucket_text.contains("five hour")
+                || bucket_text.contains("5h")
+                || bucket_text.contains("daily")
+                || window == "daily";
+            if !is_weekly && !is_session {
                 continue;
             }
-            // Skip disabled buckets.
-            if bucket
+            // Disabled weekly buckets are truly disabled; a disabled session
+            // bucket is kept (upstream marks it exhausted) so the UI still
+            // shows the 5h row.
+            let disabled = bucket
                 .get("disabled")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            if disabled && is_weekly {
                 continue;
             }
-            let Some(fraction) = bucket
-                .get("remainingFraction")
-                .and_then(|v| v.as_f64())
-                .filter(|f| f.is_finite())
-            else {
-                continue;
+            let fraction = if disabled {
+                0.0
+            } else {
+                match bucket
+                    .get("remainingFraction")
+                    .and_then(|v| v.as_f64())
+                    .filter(|f| f.is_finite())
+                {
+                    Some(f) => f,
+                    None => continue,
+                }
             };
+            let (key, label) = if is_weekly {
+                (weekly_key, weekly_label)
+            } else {
+                (session_key, session_label)
+            };
+            // First matching bucket per type wins.
+            if result.contains_key(key) {
+                continue;
+            }
             // 9router hardcodes total 1000: `remaining = round(1000 *
             // remainingFraction)`, `used = max(0, 1000 - remaining)`.
             let total = 1000.0;
@@ -3334,7 +3404,6 @@ fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
                     "displayName": label,
                 }),
             );
-            break; // first matching bucket per family wins
         }
     }
     result
@@ -3405,13 +3474,10 @@ fn reconcile_weekly_quota(
     }
     fn family_exhausted(
         quotas: &serde_json::Map<String, Value>,
-        prefix_ok: impl Fn(&str) -> bool,
-        exclude_image: bool,
+        member: impl Fn(&str) -> bool,
     ) -> (bool, Option<String>) {
-        let members: Vec<(&String, &Value)> = quotas
-            .iter()
-            .filter(|(k, _)| prefix_ok(k) && !(exclude_image && k.contains("image")))
-            .collect();
+        let members: Vec<(&String, &Value)> =
+            quotas.iter().filter(|(k, _)| member(k)).collect();
         if members.is_empty() {
             return (false, None);
         }
@@ -3439,41 +3505,27 @@ fn reconcile_weekly_quota(
         }
         (true, max_reset)
     }
-    for (weekly_key, is_gemini) in [("gemini_weekly", true), ("claude_gpt_weekly", false)] {
-        let Some(mut entry) = entry_of(&weekly, weekly_key) else {
-            continue;
-        };
-        if entry.remaining_percentage <= 0.0 {
-            // Already exhausted — still overlay it as-is below.
-            let total = entry.total;
-            quotas.insert(
-                weekly_key.to_string(),
-                json!({
-                    "used": entry.used,
-                    "total": total,
-                    "remaining": (total - entry.used).max(0.0),
-                    "resetAt": entry.reset_at,
-                    "remainingPercentage": entry.remaining_percentage,
-                    "unlimited": false,
-                }),
-            );
-            continue;
-        }
-        let (exhausted, max_reset) = if is_gemini {
-            family_exhausted(quotas, |k| k.starts_with("gemini-"), true)
-        } else {
-            family_exhausted(quotas, |k| k.starts_with("claude-"), false)
-        };
-        if exhausted {
-            entry.used = entry.total;
-            entry.remaining_percentage = 0.0;
-            if max_reset.is_some() {
-                entry.reset_at = max_reset;
-            }
-        }
+    // Per-model family membership (9router google.js v0.5.116): Argon is its
+    // own family — `gemini-*` keys containing "argon" — so exhausted Argon
+    // models no longer clobber the main Gemini session/weekly rows.
+    fn is_argon_model(k: &str) -> bool {
+        k.starts_with("gemini-") && k.contains("argon")
+    }
+    fn is_gemini_model(k: &str) -> bool {
+        k.starts_with("gemini-") && !k.contains("image") && !k.contains("argon")
+    }
+    fn is_claude_model(k: &str) -> bool {
+        k.starts_with("claude-")
+    }
+
+    fn insert_entry(
+        quotas: &mut serde_json::Map<String, Value>,
+        key: &str,
+        entry: WeeklyQuotaEntry,
+    ) {
         let total = entry.total;
         quotas.insert(
-            weekly_key.to_string(),
+            key.to_string(),
             json!({
                 "used": entry.used,
                 "total": total,
@@ -3483,6 +3535,72 @@ fn reconcile_weekly_quota(
                 "unlimited": false,
             }),
         );
+    }
+
+    // Session (5h) rows — 9router google.js reconcile: when every model in a
+    // family is locked/exhausted, clamp the family's session row (not the
+    // weekly row) to exhausted with the family's latest resetAt.
+    for (session_key, member) in [
+        ("gemini_argon_session", is_argon_model as fn(&str) -> bool),
+        ("gemini_session", is_gemini_model as fn(&str) -> bool),
+        ("claude_gpt_session", is_claude_model as fn(&str) -> bool),
+    ] {
+        let Some(mut entry) = entry_of(&weekly, session_key) else {
+            continue;
+        };
+        if entry.remaining_percentage > 0.0 {
+            let (exhausted, max_reset) = family_exhausted(quotas, member);
+            if exhausted {
+                entry.used = entry.total;
+                entry.remaining_percentage = 0.0;
+                if max_reset.is_some() {
+                    entry.reset_at = max_reset;
+                }
+            }
+        }
+        insert_entry(quotas, session_key, entry);
+    }
+
+    // Weekly rows — same clamp as before, now with Argon split out of the
+    // Gemini family and its own Argon weekly row.
+    for (weekly_key, member) in [
+        ("gemini_weekly", is_gemini_model as fn(&str) -> bool),
+        ("gemini_argon_weekly", is_argon_model as fn(&str) -> bool),
+        ("claude_gpt_weekly", is_claude_model as fn(&str) -> bool),
+    ] {
+        let Some(mut entry) = entry_of(&weekly, weekly_key) else {
+            continue;
+        };
+        if entry.remaining_percentage <= 0.0 {
+            // Already exhausted — still overlay it as-is.
+            insert_entry(quotas, weekly_key, entry);
+            continue;
+        }
+        let (exhausted, max_reset) = family_exhausted(quotas, member);
+        if exhausted {
+            entry.used = entry.total;
+            entry.remaining_percentage = 0.0;
+            if max_reset.is_some() {
+                entry.reset_at = max_reset;
+            }
+        }
+        insert_entry(quotas, weekly_key, entry);
+    }
+
+    // Pass through any remaining summary keys unchanged (upstream
+    // `Object.assign(quotas, weeklyQuotas)`).
+    let handled = [
+        "gemini_argon_session",
+        "gemini_session",
+        "claude_gpt_session",
+        "gemini_weekly",
+        "gemini_argon_weekly",
+        "claude_gpt_weekly",
+    ];
+    for (key, value) in &weekly {
+        if !handled.contains(&key.as_str()) {
+            quotas.insert(key.clone(), value.clone());
+        }
     }
 }
 
@@ -5615,6 +5733,129 @@ mod tests {
         reconcile_weekly_quota(&mut quotas, weekly);
         assert_eq!(quotas["gemini_weekly"]["used"], json!(500.0));
         assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(50.0));
+    }
+
+    // 9router v0.5.116 (8a833631): the "Gemini 4 Argon" group must win over
+    // the broader /gemini/i matcher and produce its own weekly+session keys.
+    #[test]
+    fn antigravity_weekly_parses_argon_group_separately() {
+        let data = json!({
+            "groups": [
+                {"displayName": "Gemini 4 Argon", "buckets": [
+                    {"bucketId": "gemini-argon-wtu-weekly", "displayName": "Weekly", "window": "weekly", "remainingFraction": 0.4, "resetTime": "2026-11-04T00:00:00Z"},
+                    {"bucketId": "gemini-argon-wtu-5h", "displayName": "5h", "window": "5h", "remainingFraction": 0.9},
+                ]},
+                {"displayName": "Gemini", "buckets": [
+                    {"bucketId": "gemini-weekly", "displayName": "Weekly", "window": "weekly", "remainingFraction": 0.8},
+                    {"bucketId": "gemini-5h", "displayName": "5-hour", "window": "5h", "remainingFraction": 0.7},
+                ]},
+            ]
+        });
+        let out = parse_weekly_quota_summary(&data);
+        assert_eq!(out["gemini_argon_weekly"]["remainingPercentage"], json!(40.0));
+        assert_eq!(out["gemini_argon_weekly"]["displayName"], json!("Gemini 4 Argon (Weekly)"));
+        assert_eq!(out["gemini_argon_session"]["remainingPercentage"], json!(90.0));
+        assert_eq!(out["gemini_argon_session"]["displayName"], json!("Gemini 4 Argon (5h)"));
+        assert_eq!(out["gemini_weekly"]["remainingPercentage"], json!(80.0));
+        assert_eq!(out["gemini_session"]["remainingPercentage"], json!(70.0));
+        // Argon buckets must not leak into the main Gemini keys.
+        assert_ne!(out["gemini_weekly"]["remainingPercentage"], json!(40.0));
+    }
+
+    // Disabled session buckets are kept as exhausted rows; disabled weekly
+    // buckets are skipped entirely (upstream parseWeeklyQuotaSummary).
+    #[test]
+    fn antigravity_weekly_disabled_session_kept_weekly_skipped() {
+        let data = json!({
+            "groups": [
+                {"displayName": "Claude & GPT", "buckets": [
+                    {"bucketId": "weekly", "displayName": "weekly", "remainingFraction": 0.5, "disabled": true},
+                    {"bucketId": "5h", "displayName": "5h", "remainingFraction": 0.6, "disabled": true},
+                ]},
+            ]
+        });
+        let out = parse_weekly_quota_summary(&data);
+        assert!(!out.contains_key("claude_gpt_weekly"));
+        assert_eq!(out["claude_gpt_session"]["remainingPercentage"], json!(0.0));
+    }
+
+    // 9router google.js reconcile (v0.5.116): exhausted Argon models clamp
+    // gemini_argon_session only — gemini_session/weekly stay healthy, and
+    // Argon models no longer count toward the Gemini family.
+    #[test]
+    fn antigravity_reconcile_argon_exhaustion_isolated() {
+        let mut quotas = serde_json::Map::new();
+        quotas.insert(
+            "gemini-4-argon-high".to_string(),
+            json!({"remainingPercentage": 0.0, "resetAt": "2026-11-04T00:00:00Z"}),
+        );
+        quotas.insert(
+            "gemini-4-argon-low".to_string(),
+            json!({"remainingPercentage": 0.0, "resetAt": "2026-11-05T00:00:00Z"}),
+        );
+        quotas.insert(
+            "gemini-3.8-flash-high".to_string(),
+            json!({"remainingPercentage": 80.0, "resetAt": null}),
+        );
+        let mut weekly = serde_json::Map::new();
+        weekly.insert(
+            "gemini_argon_session".to_string(),
+            json!({"used": 100.0, "total": 1000.0, "remainingPercentage": 90.0, "resetAt": null}),
+        );
+        weekly.insert(
+            "gemini_session".to_string(),
+            json!({"used": 200.0, "total": 1000.0, "remainingPercentage": 80.0, "resetAt": null}),
+        );
+        weekly.insert(
+            "gemini_argon_weekly".to_string(),
+            json!({"used": 300.0, "total": 1000.0, "remainingPercentage": 70.0, "resetAt": null}),
+        );
+        weekly.insert(
+            "gemini_weekly".to_string(),
+            json!({"used": 400.0, "total": 1000.0, "remainingPercentage": 60.0, "resetAt": null}),
+        );
+        reconcile_weekly_quota(&mut quotas, weekly);
+        // Argon session clamped to exhausted with latest Argon resetAt.
+        assert_eq!(quotas["gemini_argon_session"]["remainingPercentage"], json!(0.0));
+        assert_eq!(quotas["gemini_argon_session"]["used"], json!(1000.0));
+        assert_eq!(quotas["gemini_argon_session"]["resetAt"], json!("2026-11-05T00:00:00Z"));
+        // Argon weekly also clamped (all Argon models exhausted).
+        assert_eq!(quotas["gemini_argon_weekly"]["remainingPercentage"], json!(0.0));
+        // Main Gemini rows untouched — Argon exhaustion must not clobber them.
+        assert_eq!(quotas["gemini_session"]["remainingPercentage"], json!(80.0));
+        assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(60.0));
+    }
+
+    // Exhausted non-Argon Gemini models clamp gemini_session/weekly but leave
+    // the Argon rows alone.
+    #[test]
+    fn antigravity_reconcile_gemini_exhaustion_leaves_argon() {
+        let mut quotas = serde_json::Map::new();
+        quotas.insert(
+            "gemini-3.8-flash-high".to_string(),
+            json!({"remainingPercentage": 0.0, "resetAt": "2026-09-19T00:00:00Z"}),
+        );
+        quotas.insert(
+            "gemini-4-argon-high".to_string(),
+            json!({"remainingPercentage": 55.0, "resetAt": null}),
+        );
+        let mut weekly = serde_json::Map::new();
+        weekly.insert(
+            "gemini_session".to_string(),
+            json!({"used": 100.0, "total": 1000.0, "remainingPercentage": 90.0, "resetAt": null}),
+        );
+        weekly.insert(
+            "gemini_weekly".to_string(),
+            json!({"used": 100.0, "total": 1000.0, "remainingPercentage": 90.0, "resetAt": null}),
+        );
+        weekly.insert(
+            "gemini_argon_session".to_string(),
+            json!({"used": 450.0, "total": 1000.0, "remainingPercentage": 55.0, "resetAt": null}),
+        );
+        reconcile_weekly_quota(&mut quotas, weekly);
+        assert_eq!(quotas["gemini_session"]["remainingPercentage"], json!(0.0));
+        assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(0.0));
+        assert_eq!(quotas["gemini_argon_session"]["remainingPercentage"], json!(55.0));
     }
     // 9router b9c92cb8 (groq.js): Go-style durations, header
     // presence semantics, and quota entry shape.

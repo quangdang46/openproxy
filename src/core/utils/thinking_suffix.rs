@@ -598,6 +598,28 @@ pub fn extract_thinking_intent(body: &Value) -> Option<ThinkingIntent> {
     None
 }
 
+/// Capture the OpenAI-shaped client's ask for thinking *text* — port of
+/// 9router `openAIThinkingDisplay` (thinkingUnified.js:116-126). Claude only
+/// returns thinking content with `thinking.display: "summarized"`, a field
+/// OpenAI has no equivalent for:
+/// - Responses API: `reasoning.summary` (non-empty, non-"none") → summarized.
+///   When `reasoning` is an object its `summary` is authoritative — the
+///   function returns early and never falls through to `reasoning_effort`.
+/// - Chat Completions: any string `reasoning_effort` → summarized.
+fn openai_thinking_display(body: &Value) -> Option<String> {
+    let obj = body.as_object()?;
+    if let Some(reasoning) = obj.get("reasoning").filter(|v| v.is_object()) {
+        return reasoning
+            .get("summary")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && *s != "none")
+            .map(|_| "summarized".to_string());
+    }
+    obj.get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(|_| "summarized".to_string())
+}
+
 /// Alias of [`extract_thinking_intent`], named for clarity at the call-site
 /// where intent is snapshotted before format translation (JS `captureThinking`).
 pub fn capture_thinking(body: &Value) -> Option<ThinkingIntent> {
@@ -763,6 +785,16 @@ pub fn apply_thinking_intent(
         ThinkingIntent::None_ => "minimal".to_string(),
     };
     let level = level_owned.as_str();
+    // 9router `applyThinking`: Anthropic's `display` (summarized | omitted)
+    // decides whether thinking text comes back at all — keep what the client
+    // asked for instead of resetting it. `body.thinking.display` wins; the
+    // captured OpenAI intent (reasoning.summary / reasoning_effort) fills in
+    // when the client sent no display of its own. Read BEFORE strip_all.
+    let display = body
+        .pointer("/thinking/display")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| openai_thinking_display(body));
     strip_all_thinking_fields(body);
 
     match native {
@@ -802,16 +834,19 @@ pub fn apply_thinking_intent(
             // 9router `toBudget(eff, caps.thinkingRange)`: numeric budgets pass
             // through verbatim (or -1 → enabled w/o budget); levels map.
             // `budget == 0` is unreachable here (`none` returned above).
+            // `display` rides along on the thinking object (upstream
+            // applyFormat claude-budget arm).
             let b = budget.unwrap_or(8192);
             if let Some(obj) = body.as_object_mut() {
-                if b < 0 {
-                    obj.insert("thinking".into(), json!({"type": "enabled"}));
-                } else {
-                    obj.insert(
-                        "thinking".into(),
-                        json!({"type": "enabled", "budget_tokens": b}),
-                    );
+                let mut thinking = serde_json::Map::new();
+                thinking.insert("type".into(), json!("enabled"));
+                if b >= 0 {
+                    thinking.insert("budget_tokens".into(), json!(b));
                 }
+                if let Some(d) = display.as_deref() {
+                    thinking.insert("display".into(), json!(d));
+                }
+                obj.insert("thinking".into(), Value::Object(thinking));
             }
         }
         ThinkingNative::ClaudeAdaptive => {
@@ -834,16 +869,27 @@ pub fn apply_thinking_intent(
                 other => other,
             };
             if let Some(obj) = body.as_object_mut() {
-                // 9router `applyFormat` claude-adaptive: only models that CAN
-                // disable thinking get the explicit adaptive switch —
-                // permanently adaptive models (Opus 5.5, Fable 5.1) take
-                // output_config.effort directly and `thinking` stays deleted.
+                // 9router `applyFormat` claude-adaptive (thinkingUnified.js):
+                // only models that CAN disable thinking get the explicit
+                // adaptive switch — permanently adaptive models (Opus 5.5,
+                // Fable 5.1) take output_config.effort directly. Claude ones
+                // still get the switch when it carries a requested display:
+                // display defaults to "omitted" there, so dropping it hides
+                // the thinking text. A thinking-off request (clamped to
+                // minimal) asks for no thinking text.
+                let mut thinking = serde_json::Map::new();
+                thinking.insert("type".into(), json!("adaptive"));
+                if let Some(d) = display.as_deref() {
+                    thinking.insert("display".into(), json!(d));
+                }
                 if can_disable {
                     // 9router parity: output_config.effort alone does NOT turn
                     // thinking on — Anthropic requires an explicit
                     // thinking:{type:"adaptive"} on Opus/Sonnet 4.6+, and
                     // Anthropic-compatible shims default thinking off. Send both.
-                    obj.insert("thinking".into(), json!({"type": "adaptive"}));
+                    obj.insert("thinking".into(), Value::Object(thinking));
+                } else if display.is_some() && level != "minimal" && model.to_ascii_lowercase().contains("claude") {
+                    obj.insert("thinking".into(), Value::Object(thinking));
                 }
                 obj.insert("output_config".into(), json!({"effort": effort}));
             }
@@ -1258,6 +1304,84 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 24576);
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reapply_preserves_thinking_display_claude_budget() {
+        // 9router applyThinking keeps `body.thinking.display` across
+        // stripAll → applyFormat (claude-budget arm re-adds it). Without
+        // this the OpenAI→Claude translator's display:"summarized" is lost.
+        let mut body = json!({
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": 10000, "display": "summarized"}
+        });
+        reapply_thinking_after_translate(
+            Format::Claude,
+            "claude",
+            "claude-haiku-4.5",
+            &mut body,
+            None,
+            true,
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 10000);
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn reapply_preserves_thinking_display_claude_adaptive() {
+        // claude-adaptive arm: display rides on {type:"adaptive"}.
+        let mut body = json!({
+            "messages": [],
+            "thinking": {"type": "adaptive", "display": "summarized"}
+        });
+        reapply_thinking_after_translate(
+            Format::Claude,
+            "claude",
+            "claude-sonnet-5",
+            &mut body,
+            None,
+            true,
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn reapply_display_from_openai_reasoning_effort_fallback() {
+        // No thinking.display on the translated body, but a surviving
+        // reasoning_effort still asks for the thinking text — upstream
+        // openAIThinkingDisplay maps it to "summarized".
+        let mut body = json!({"messages": [], "reasoning_effort": "high"});
+        reapply_thinking_after_translate(
+            Format::Claude,
+            "claude",
+            "claude-haiku-4.5",
+            &mut body,
+            None,
+            true,
+        );
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reapply_reasoning_summary_none_leaves_display_absent() {
+        // reasoning.summary "none" is NOT a request for thinking text.
+        let mut body = json!({
+            "messages": [],
+            "reasoning": {"effort": "high", "summary": "none"}
+        });
+        reapply_thinking_after_translate(
+            Format::Claude,
+            "claude",
+            "claude-haiku-4.5",
+            &mut body,
+            None,
+            true,
+        );
+        assert!(body["thinking"].get("display").is_none(), "{body}");
     }
 
     #[test]

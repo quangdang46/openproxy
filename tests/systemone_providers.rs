@@ -102,7 +102,7 @@ fn decision_body(model: &str) -> Value {
 /// the catalog under the right provider alias.
 #[test]
 fn systemone_catalog_entries_match_upstream_registry() {
-    use openproxy::core::model::{parse_model, provider_catalog, resolve_provider_alias};
+    use openproxy::core::model::{catalog::provider_catalog, parse_model, resolve_provider_alias};
 
     let catalog = provider_catalog();
 
@@ -166,7 +166,7 @@ fn systemone_catalog_entries_match_upstream_registry() {
 #[test]
 fn every_catalog_systemone_provider_has_a_transport_config() {
     use openproxy::core::media::systemone::systemone_config;
-    use openproxy::core::model::provider_catalog;
+    use openproxy::core::model::catalog::provider_catalog;
 
     let catalog = provider_catalog();
     let alias_to_id = catalog.alias_to_provider_id();

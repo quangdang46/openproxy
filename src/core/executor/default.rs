@@ -1042,6 +1042,13 @@ pub enum ExecutorError {
     CredentialRefreshFailed(String),
     MaxRetriesExhausted(String),
     UpstreamStatus(http::StatusCode, String),
+    /// MiniMax Code desktop auth-lease failure (9router
+    /// `minimaxCodeLease.js` `AuthLeaseError`). `code` is the protocol code
+    /// (AUTH_REQUIRED / BROKER_UNAVAILABLE / …); the message is upstream's.
+    AuthLease {
+        code: &'static str,
+        message: String,
+    },
     /// Mock requested for a provider format with no registered simulator
     /// (bead sim-04/sim-05: surfaces explicitly, never silent).
     SimulationUnsupported {
@@ -1073,6 +1080,20 @@ impl ExecutorError {
             Self::MissingCredentials(p) => ComboAttemptError {
                 status: 400,
                 message: format!("Missing credentials for provider: {p}"),
+                retry_after: None,
+                upstream_body: None,
+                upstream_headers: Vec::new(),
+            },
+            // Lease auth failures: AUTH_REQUIRED / CAPABILITY_REJECTED are
+            // credential problems (401 so fallback can rotate); everything
+            // else is a local-broker transport failure (502).
+            Self::AuthLease { code, message } => ComboAttemptError {
+                status: if matches!(*code, "AUTH_REQUIRED" | "CAPABILITY_REJECTED") {
+                    401
+                } else {
+                    502
+                },
+                message: message.clone(),
                 retry_after: None,
                 upstream_body: None,
                 upstream_headers: Vec::new(),
@@ -1120,6 +1141,8 @@ impl std::fmt::Display for ExecutorError {
             | Self::InvalidUri(_)
             | Self::InvalidRequest(_)
             | Self::Serialize(_) => f.write_str("upstream request failed"),
+            // AuthLease carries upstream's own client-safe message.
+            Self::AuthLease { message, .. } => f.write_str(message),
             // Message- and status-carrying variants are already client-safe.
             other => write!(f, "{other:?}"),
         }
@@ -2667,6 +2690,34 @@ impl DefaultExecutor {
         let real_fault = crate::core::simulation::FaultSpec::parse(&request.sim_headers);
         // Latency applies to REAL too (first-byte delay before send loop).
         crate::core::simulation::FaultInjector::apply_latency(&real_fault).await;
+
+        // MiniMax Code lease auth (9router executors/minimax-code.js): a
+        // connection created via lease-connect carries authType "mcode-lease"
+        // and stores no token — borrow one from the desktop broker per
+        // request. The lease manager caches until near expiry and
+        // single-flights concurrent borrowers.
+        if matches!(
+            self.provider.as_str(),
+            "minimax-code" | "minimax-code-global"
+        ) && crate::oauth::minimax_lease::is_lease_connection(&request.credentials)
+        {
+            match crate::oauth::minimax_lease::get_lease_token(&request.credentials).await {
+                Ok(lease) => {
+                    request.credentials.access_token = Some(lease.access_token.clone());
+                    request.credentials.expires_at = chrono::DateTime::from_timestamp_millis(
+                        lease.expires_at_ms,
+                    )
+                    .map(|dt| dt.to_rfc3339());
+                }
+                Err(error) => {
+                    return Err(ExecutorError::AuthLease {
+                        code: error.code,
+                        message: error.message,
+                    })
+                }
+            }
+        }
+
         // Build headers and transformed body once, reused across retries and
         // fallback URLs. The transformed body is what upstream sees, so it is
         // also what header derivation (Claude session id) reads.
@@ -3096,6 +3147,34 @@ impl DefaultExecutor {
         &self,
         credentials: &ProviderConnection,
     ) -> Option<ProviderConnection> {
+        // Lease mode (9router minimax-code.js refreshCredentials): a 401
+        // means the borrowed token went stale — drop the cache and take a
+        // fresh lease. No refresh token is involved.
+        if matches!(
+            self.provider.as_str(),
+            "minimax-code" | "minimax-code-global"
+        ) && crate::oauth::minimax_lease::is_lease_connection(credentials)
+        {
+            match crate::oauth::minimax_lease::get_lease_token_after_invalidate(credentials).await {
+                Ok(lease) => {
+                    let mut updated = credentials.clone();
+                    updated.access_token = Some(lease.access_token.clone());
+                    updated.expires_at = chrono::DateTime::from_timestamp_millis(
+                        lease.expires_at_ms,
+                    )
+                    .map(|dt| dt.to_rfc3339());
+                    return Some(updated);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "MCODE lease refresh failed for {}: {}",
+                        self.provider,
+                        error.message
+                    );
+                    return None;
+                }
+            }
+        }
         let mut working = credentials.clone();
         if working.refresh_token.as_deref().unwrap_or("").is_empty() {
             return None;
