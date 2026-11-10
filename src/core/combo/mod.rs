@@ -810,6 +810,12 @@ pub fn reset_combo_rotation(combo_name: Option<&str>) {
         state.clear();
         sticky.clear();
     }
+    drop(sticky);
+    drop(state);
+    // 9router resetComboRotation (combo.js:265-273) also drops the Smart
+    // Router sticky-session mappings so a strategy/settings change
+    // re-evaluates instead of reusing a stale sticky pick.
+    smart::clear_sticky_combo_session(combo_name.unwrap_or(""), None);
 }
 
 pub fn rotation_index(combo_name: &str) -> Option<usize> {
@@ -1061,8 +1067,8 @@ pub async fn execute_combo_strategy_full<T, F, Fut, C, I, IFut>(
     required_caps: Option<&HashSet<String>>,
     pricing: &PricingTable,
     capacity_check: C,
-    mut handle_single_model: F,
-    mut inspect_ok: I,
+    handle_single_model: F,
+    inspect_ok: I,
 ) -> Result<T, ComboExecutionError>
 where
     F: FnMut(&str) -> Fut,
@@ -1070,6 +1076,92 @@ where
     C: Fn(&str) -> ModelCapacity,
     I: FnMut(T, bool) -> IFut,
     IFut: Future<Output = ComboOkVerdict<T>>,
+{
+    execute_combo_strategy_full_inner(
+        models,
+        combo_name,
+        strategy,
+        disabled_members,
+        sticky_limit,
+        required_caps,
+        pricing,
+        capacity_check,
+        handle_single_model,
+        inspect_ok,
+        &mut |_| {},
+    )
+    .await
+}
+
+/// [`execute_combo_strategy_full`] plus a terminal-member hook: invoked
+/// with the member id whenever a member is abandoned mid-iteration —
+/// either its attempt errored or its 2xx carried zero usable content and
+/// the loop fell through. The Smart Router uses this to drop the session's
+/// sticky pick when the sticky model itself fails or returns empty
+/// (9router combo.js:509-511, 542-544, 552-554 `clearStickyComboSession`).
+/// Members that succeed, or whose empty response is returned as-is on the
+/// last seat / a no-retry finish reason, never fire the hook — matching
+/// upstream, which only clears on the fall-through paths.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_combo_strategy_full_with_terminal<T, F, Fut, C, I, IFut, H>(
+    models: &[String],
+    combo_name: Option<&str>,
+    strategy: ComboStrategy,
+    disabled_members: &[String],
+    sticky_limit: u32,
+    required_caps: Option<&HashSet<String>>,
+    pricing: &PricingTable,
+    capacity_check: C,
+    handle_single_model: F,
+    inspect_ok: I,
+    on_member_terminal: H,
+) -> Result<T, ComboExecutionError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, ComboAttemptError>>,
+    C: Fn(&str) -> ModelCapacity,
+    I: FnMut(T, bool) -> IFut,
+    IFut: Future<Output = ComboOkVerdict<T>>,
+    H: FnMut(&str),
+{
+    let mut on_member_terminal = on_member_terminal;
+    execute_combo_strategy_full_inner(
+        models,
+        combo_name,
+        strategy,
+        disabled_members,
+        sticky_limit,
+        required_caps,
+        pricing,
+        capacity_check,
+        handle_single_model,
+        inspect_ok,
+        &mut on_member_terminal,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_combo_strategy_full_inner<T, F, Fut, C, I, IFut, H>(
+    models: &[String],
+    combo_name: Option<&str>,
+    strategy: ComboStrategy,
+    disabled_members: &[String],
+    sticky_limit: u32,
+    required_caps: Option<&HashSet<String>>,
+    pricing: &PricingTable,
+    capacity_check: C,
+    mut handle_single_model: F,
+    mut inspect_ok: I,
+    on_member_terminal: &mut H,
+) -> Result<T, ComboExecutionError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, ComboAttemptError>>,
+    C: Fn(&str) -> ModelCapacity,
+    I: FnMut(T, bool) -> IFut,
+    IFut: Future<Output = ComboOkVerdict<T>>,
+    H: FnMut(&str),
 {
     // Manual disable + auto-quarantine pre-gate. Applied to the raw
     // member list *before* rotation so the round-robin index doesn't
@@ -1166,22 +1258,36 @@ where
         }
         available.extend(busy);
 
-        return iterate_combo_models(&available, &mut handle_single_model, &mut inspect_ok).await;
+        return iterate_combo_models(
+            &available,
+            &mut handle_single_model,
+            &mut inspect_ok,
+            on_member_terminal,
+        )
+        .await;
     }
 
-    iterate_combo_models(&order, &mut handle_single_model, &mut inspect_ok).await
+    iterate_combo_models(
+        &order,
+        &mut handle_single_model,
+        &mut inspect_ok,
+        on_member_terminal,
+    )
+    .await
 }
 
-async fn iterate_combo_models<T, F, Fut, I, IFut>(
+async fn iterate_combo_models<T, F, Fut, I, IFut, H>(
     order: &[String],
     handle_single_model: &mut F,
     inspect_ok: &mut I,
+    on_member_terminal: &mut H,
 ) -> Result<T, ComboExecutionError>
 where
     F: FnMut(&str) -> Fut,
     Fut: Future<Output = Result<T, ComboAttemptError>>,
     I: FnMut(T, bool) -> IFut,
     IFut: Future<Output = ComboOkVerdict<T>>,
+    H: FnMut(&str),
 {
     let mut last_error: Option<ComboAttemptError> = None;
     // 9router combo.js tracks `lastStatus` as the FIRST failure's status
@@ -1231,10 +1337,19 @@ where
                         last_status = Some(502);
                     }
                     last_error = Some(failure);
+                    // combo.js:509-511 / 542-544 — a zero-content member
+                    // abandons the session's sticky pick so the next turn
+                    // re-evaluates instead of reusing a dead model.
+                    on_member_terminal(model);
                     continue;
                 }
             },
             Err(error) => {
+                // combo.js:552-554 — the member that failed was the
+                // session-sticky model: clear the sticky pick so the next
+                // turn re-evaluates. Fires for every abandoned member; the
+                // hook itself decides whether it was the sticky one.
+                on_member_terminal(model);
                 if last_status.is_none() {
                     last_status = Some(error.status);
                 }
@@ -2190,6 +2305,7 @@ mod tests {
                     async move { Err::<String, _>(error) }
                 },
                 &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+                &mut |_| {},
             )
             .await;
             let failure = result.expect_err("both members fail in this fixture");
@@ -2240,6 +2356,7 @@ mod tests {
                 }
             },
             &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+            &mut |_| {},
         )
         .await;
 
@@ -2274,6 +2391,7 @@ mod tests {
                 }
             },
             &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+            &mut |_| {},
         )
         .await
         .expect_err("every member fails");
@@ -2309,6 +2427,7 @@ mod tests {
                 }
             },
             &mut |result: String, _is_last: bool| async move { ComboOkVerdict::Accept(result) },
+            &mut |_| {},
         )
         .await
         .expect_err("every member fails");
@@ -2353,6 +2472,7 @@ mod tests {
                     }
                 }
             },
+            &mut |_| {},
         )
         .await;
 
@@ -2378,6 +2498,7 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                 }
             },
+            &mut |_| {},
         )
         .await;
 
@@ -2420,6 +2541,7 @@ mod tests {
                     }
                 }
             },
+            &mut |_| {},
         )
         .await;
 
@@ -2460,11 +2582,87 @@ mod tests {
                     ComboOkVerdict::Accept(result)
                 }
             },
+            &mut |_| {},
         )
         .await
         .expect_err("member b fails request-scoped");
 
         assert_eq!(result.status, 400);
         assert_eq!(result.message, "context overflow");
+    }
+
+    #[tokio::test]
+    async fn terminal_hook_fires_on_error_and_empty_fallthrough_only() {
+        // Smart Router sticky-clear parity (combo.js:509-511, 542-544,
+        // 552-554): the hook sees every abandoned member — a hard error and
+        // an empty-generation fall-through — but never the member that
+        // answered, nor an empty response returned as-is on the last seat.
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let abandoned = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = abandoned.clone();
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move {
+                    match owned.as_str() {
+                        // Hard failure → hook fires.
+                        "a" => Err(ComboAttemptError::new(500, "boom")),
+                        // Empty 200 that falls through → hook fires.
+                        "b" => Ok::<_, ComboAttemptError>(owned),
+                        // Answers → no hook.
+                        _ => Ok::<_, ComboAttemptError>(owned),
+                    }
+                }
+            },
+            &mut |result: String, is_last: bool| async move {
+                if result == "b" && !is_last {
+                    ComboOkVerdict::Empty {
+                        result,
+                        failure: ComboAttemptError::new(200, "Zero usable content"),
+                        finish_reason: None,
+                    }
+                } else {
+                    ComboOkVerdict::Accept(result)
+                }
+            },
+            &mut |member: &str| recorder.lock().push(member.to_string()),
+        )
+        .await;
+
+        assert_eq!(result, Ok("c".to_string()));
+        assert_eq!(
+            abandoned.lock().clone(),
+            vec!["a".to_string(), "b".to_string()],
+            "hook fires for the errored and empty-fallthrough members only"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_hook_does_not_fire_for_last_seat_empty() {
+        // Last-seat empty returns the response as-is — upstream does not
+        // clear the sticky pick on that path either.
+        let models = vec!["a".to_string()];
+        let abandoned = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = abandoned.clone();
+        let result = iterate_combo_models(
+            &models,
+            &mut |model: &str| {
+                let owned = model.to_string();
+                async move { Ok::<_, ComboAttemptError>(owned) }
+            },
+            &mut |result: String, _is_last: bool| async move {
+                ComboOkVerdict::Empty {
+                    result,
+                    failure: ComboAttemptError::new(502, "empty generation (stop)"),
+                    finish_reason: Some("stop".to_string()),
+                }
+            },
+            &mut |member: &str| recorder.lock().push(member.to_string()),
+        )
+        .await;
+
+        assert_eq!(result, Ok("a".to_string()));
+        assert!(abandoned.lock().is_empty());
     }
 }

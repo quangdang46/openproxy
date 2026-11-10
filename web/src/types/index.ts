@@ -262,6 +262,7 @@ export interface ModelPricing {
 export type ComboStrategyName =
   | "fallback"
   | "round-robin"
+  | "smart"
   | "fusion"
   | "cheapest"
   | "fastest"
@@ -272,6 +273,13 @@ export interface ComboStrategyConfig {
   fallbackStrategy?: ComboStrategyName | string;
   judgeModel?: string;
   fusionTuning?: Record<string, unknown>;
+  /** Smart Router knobs — 9router `comboStrategies[name].routerModel` /
+   * `smartPolicy` / `sessionSticky` / `confidenceThreshold`. Only read
+   * when `fallbackStrategy` is `"smart"`. */
+  routerModel?: string;
+  smartPolicy?: string;
+  sessionSticky?: boolean;
+  confidenceThreshold?: number;
   [key: string]: unknown;
 }
 

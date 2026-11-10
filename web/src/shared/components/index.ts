@@ -15,6 +15,7 @@ export { default as Header } from "./Header";
 export { default as Footer } from "./Footer";
 export { default as OAuthModal } from "./OAuthModal";
 export { default as ModelSelectModal } from "./ModelSelectModal";
+export { default as SmartPolicyModal } from "./SmartPolicyModal";
 export { ComboFormModal } from "./ComboFormModal";
 export { default as CapacityBadges } from "./CapacityBadges";
 export { default as ManualConfigModal } from "./ManualConfigModal";

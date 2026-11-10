@@ -45,6 +45,7 @@ import { USAGE_SUPPORTED_PROVIDERS, USAGE_APIKEY_PROVIDERS } from "@/shared/cons
 import { AUTO_PING_SETTINGS_KEYS } from "@/shared/constants/config";
 import AutoPingScheduleModal from "@/components/usage/AutoPingScheduleModal";
 import { getScheduleSlotLabels, type PingSchedule } from "@/shared/services/quotaPingSchedule";
+import { providerFilterFromSearch, urlWithProviderParam } from "@/shared/utils/providerFilterUrl";
 
 interface Connection {
   id: string;
@@ -206,7 +207,31 @@ export default function ProviderLimits() {
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [selectedConnection, setSelectedConnection] = useState<Connection | null>(null);
   const [proxyPools, setProxyPools] = useState<ProxyPool[]>([]);
-  const [providerFilter, setProviderFilter] = useState<string>("all");
+  // Initialize providerFilter from the URL ?provider= param so the page can
+  // be bookmarked / deep-linked to a specific provider (9router #4217,
+  // commit 65826d9). Astro has no useSearchParams, so window.location is read
+  // directly (component is client:only).
+  const [providerFilter, _setProviderFilter] = useState<string>(() =>
+    providerFilterFromSearch(
+      typeof window !== "undefined" ? window.location.search : "",
+    ),
+  );
+  // Wrapper: keeps the URL in sync with the selected provider so the view
+  // stays bookmarkable. Replaces the URL without adding to history — same
+  // contract as upstream's router.replace wrapper.
+  const setProviderFilter = useCallback((value: string) => {
+    _setProviderFilter(value);
+    if (typeof window === "undefined") return;
+    try {
+      window.history.replaceState(
+        null,
+        "",
+        urlWithProviderParam(window.location.pathname, window.location.search, value),
+      );
+    } catch {
+      /* non-fatal: URL sync is best-effort */
+    }
+  }, []);
   // Provider list for the dropdown comes from the server: it spans every eligible
   // connection, not just the rows on the current page.
   const [providerOptions, setProviderOptions] = useState<string[]>([]);

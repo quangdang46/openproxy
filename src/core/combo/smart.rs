@@ -347,8 +347,16 @@ pub fn clear_sticky_combo_session(combo_name: &str, session_id: Option<&str>) {
             store.remove(&(combo_name.to_string(), sid.to_string()));
         }
         None => {
-            let prefix = format!("{combo_name}:");
-            store.retain(|(combo, _), _| !combo.starts_with(&prefix));
+            if combo_name.is_empty() {
+                // Upstream `clearStickyComboSession()` with no arguments
+                // resets the whole store (combo.js resetComboRotation).
+                store.clear();
+            } else {
+                // Store keys are (combo, session) tuples — match the combo
+                // exactly, not a string prefix (the combo half never
+                // contains the session separator).
+                store.retain(|(combo, _), _| combo != combo_name);
+            }
         }
     }
 }
@@ -604,5 +612,23 @@ mod tests {
             get_sticky_combo_model("combo", "sess", &models).as_deref(),
             Some("m1")
         );
+    }
+
+    #[test]
+    fn clear_session_scopes_to_combo_or_clears_all() {
+        reset_sticky_combo_store();
+        let models = vec!["m1".to_string(), "m2".to_string()];
+        set_sticky_combo_model("combo-a", "s1", "m1");
+        set_sticky_combo_model("combo-b", "s1", "m2");
+        // Named combo + no session → drops only that combo's sessions.
+        clear_sticky_combo_session("combo-a", None);
+        assert_eq!(get_sticky_combo_model("combo-a", "s1", &models), None);
+        assert_eq!(
+            get_sticky_combo_model("combo-b", "s1", &models).as_deref(),
+            Some("m2")
+        );
+        // Empty combo + no session → upstream resetComboRotation clears all.
+        clear_sticky_combo_session("", None);
+        assert_eq!(get_sticky_combo_model("combo-b", "s1", &models), None);
     }
 }

@@ -19,6 +19,11 @@ rustls = "0.23"
 
 # HTTP client (complex - OAuth, proxy)
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "multipart", "gzip", "brotli", "socks", "stream", "rustls-tls"] }
+# TLS-impersonating client for Cloudflare-gated web providers (grok-web).
+# Stable since 0.16.x; wreq-util supplies the chrome_146/macos emulation
+# profile that upstream reaches via the optional wreq-js npm package.
+wreq = { version = "0.16", default-features = false, features = ["webpki-roots", "tokio-rt", "gzip", "brotli", "deflate", "zstd"] }
+wreq-util = "0.2"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

@@ -653,4 +653,104 @@ mod tests {
             );
         }
     }
+
+    // Bead openproxy-9router-parity-v5104-sync-eidj.56: codebuddy-cn catalogue
+    // resynced to the 2026-09-30 server config (9router commit 63de82b) —
+    // glm-5v-turbo / kimi-k2.7 / kimi-k2.6 dropped, kimi-k2.8-preview added,
+    // and the provider now carries the upstream `cbcn` alias like every other
+    // registry-mirrored entry.
+    #[test]
+    fn codebuddy_cn_catalog_resynced_2026_09_30() {
+        let catalog = provider_catalog();
+
+        assert_eq!(
+            catalog.static_alias_for_provider("codebuddy-cn"),
+            Some("cbcn"),
+            "codebuddy-cn should map to the upstream cbcn alias"
+        );
+        let provider = catalog
+            .provider_info("codebuddy-cn")
+            .expect("codebuddy-cn provider entry");
+        assert_eq!(provider.alias, "cbcn");
+
+        let models = catalog
+            .models_for_alias("cbcn")
+            .expect("providerModels should contain the cbcn entry");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "glm-5.2",
+                "glm-5.1",
+                "minimax-m3",
+                "hy3",
+                "hy4-preview",
+                "glm-5.3",
+                "glm-5.3-flash",
+                "kimi-k3-1",
+                "kimi-k2.8-preview",
+                "deepseek-v4-pro",
+                "deepseek-v4.1-flash",
+            ]
+        );
+        for dropped in ["glm-5v-turbo", "kimi-k2.7", "kimi-k2.6"] {
+            assert!(
+                !ids.contains(&dropped),
+                "{dropped} was dropped from the 2026-09-30 server list"
+            );
+        }
+
+        // find_model resolves through the alias like every other provider.
+        let m = catalog
+            .find_model("codebuddy-cn", "kimi-k2.8-preview")
+            .expect("codebuddy-cn/kimi-k2.8-preview should resolve");
+        assert_eq!(m.name.as_deref(), Some("Kimi-K2.8-Preview"));
+        assert!(catalog.find_model("codebuddy-cn", "kimi-k2.7").is_none());
+    }
+
+    // Bead openproxy-9router-parity-v5104-sync-eidj.57: antigravity catalogue
+    // refresh (9router commit 24034f6) — gemini-3.5 / gemini-3-flash removed,
+    // gemini-3.1-pro-high and gemini-pro-agent both map upstream to
+    // gemini-pro-agent, and gemini-3.1-pro-low carries its (low) tier suffix.
+    #[test]
+    fn antigravity_catalog_refresh_gemini_3_8() {
+        let catalog = provider_catalog();
+        let models = catalog
+            .models_for_alias("ag")
+            .expect("providerModels should contain the ag entry");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+        for removed in [
+            "gemini-3.5-flash-agent",
+            "gemini-3.5-flash-low",
+            "gemini-3.5-flash-extra-low",
+            "gemini-3-flash",
+        ] {
+            assert!(!ids.contains(&removed), "{removed} was removed upstream");
+        }
+
+        let pro_high = catalog
+            .find_model("antigravity", "gemini-3.1-pro-high")
+            .expect("gemini-3.1-pro-high should resolve");
+        assert_eq!(
+            pro_high.upstream_model_id.as_deref(),
+            Some("gemini-pro-agent")
+        );
+
+        let pro_agent = catalog
+            .find_model("antigravity", "gemini-pro-agent")
+            .expect("gemini-pro-agent should resolve");
+        assert_eq!(
+            pro_agent.upstream_model_id.as_deref(),
+            Some("gemini-pro-agent")
+        );
+
+        let pro_low = catalog
+            .find_model("antigravity", "gemini-3.1-pro-low")
+            .expect("gemini-3.1-pro-low should resolve");
+        assert_eq!(
+            pro_low.upstream_model_id.as_deref(),
+            Some("gemini-3.1-pro-low(low)")
+        );
+    }
 }

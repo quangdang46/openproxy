@@ -275,7 +275,7 @@ mod tests {
         assert!(is_model_no_map("tab_index"));
         assert!(is_model_no_map("tab_suggestion"));
         // Non-tab models must NOT be excluded
-        assert!(!is_model_no_map("gemini-3.5-flash-low"));
+        assert!(!is_model_no_map("gemini-3.8-flash-medium"));
         assert!(!is_model_no_map("claude-sonnet-4-6"));
         assert!(!is_model_no_map("gpt-4o"));
         assert!(!is_model_no_map(""));
@@ -305,10 +305,10 @@ mod tests {
             request_transform: true,
             ..Default::default()
         };
-        let mut body = json!({"model": "gemini-3.5-flash-low"});
+        let mut body = json!({"model": "gemini-3.8-flash-medium"});
         MitmInterceptor::transform_request("antigravity", &mut body, &config);
-        assert_eq!(body["original_model"], "gemini-3.5-flash-low");
-        assert_eq!(body["model"], "gemini-3.5-flash-low");
+        assert_eq!(body["original_model"], "gemini-3.8-flash-medium");
+        assert_eq!(body["model"], "gemini-3.8-flash-medium");
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
             request_transform: false,
             ..Default::default()
         };
-        let mut body = json!({"model": "gemini-3.5-flash-low"});
+        let mut body = json!({"model": "gemini-3.8-flash-medium"});
         MitmInterceptor::transform_request("antigravity", &mut body, &config);
         // original_model must NOT be inserted when transforms are disabled
         assert!(body.get("original_model").is_none());

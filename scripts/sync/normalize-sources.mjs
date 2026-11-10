@@ -116,10 +116,14 @@ function classifyKind(model) {
   // 9router registry entries carry the modality on `kind`; OmniRoute and
   // older providerModels entries use `type`. Read both so `kind: "stt"`
   // models (e.g. gemini Live Transcription) don't flatten to "llm".
+  // "systemone" (Jev decision models — nace drex, ollama clef, v1m, …) is a
+  // first-class kind in the registry and must survive normalization:
+  // `openproxy sync` writes this snapshot's kind into the user DB, and the
+  // /v1/systemone ping + ModelSelectModal kindFilter dispatch on it.
   const declared = model.kind ?? model.type;
   if (declared) {
     const t = String(declared).toLowerCase();
-    if (["embedding", "image", "tts", "stt", "search", "fetch", "video", "audio"].includes(t)) {
+    if (["embedding", "image", "tts", "stt", "search", "fetch", "video", "audio", "systemone"].includes(t)) {
       return t;
     }
     if (t === "chat" || t === "llm") return "llm";

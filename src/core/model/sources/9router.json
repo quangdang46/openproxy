@@ -1,7 +1,7 @@
 {
   "source": "9router",
   "ref": "v0.5.112",
-  "generatedAt": "2026-11-08T19:53:52.352Z",
+  "generatedAt": "2026-11-10T14:05:10.046Z",
   "providerIdToAlias": {
     "alicode-intl": "alicode-intl",
     "alicode": "alicode",
@@ -1476,7 +1476,7 @@
         {
           "id": "@cf/cloudflare/clef-flash",
           "name": "Clef Flash",
-          "kind": "llm",
+          "kind": "systemone",
           "upstreamModelId": "clef-flash"
         },
         {
@@ -4685,12 +4685,12 @@
         {
           "id": "drex-max",
           "name": "Drex Max",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "drex-v2.0",
           "name": "Drex 2.0",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -4884,7 +4884,7 @@
         {
           "id": "jev-1.13-free",
           "name": "Jev 1.13 Free",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -5285,12 +5285,12 @@
         {
           "id": "jev-1.13",
           "name": "Jev 1.13",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "jev-1.13-free",
           "name": "Jev 1.13 Free",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -5343,17 +5343,17 @@
         {
           "id": "clef",
           "name": "Clef",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "clef-flash",
           "name": "Clef Flash",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "clef:cloud",
           "name": "Clef (Cloud)",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -5366,12 +5366,12 @@
         {
           "id": "clef",
           "name": "Clef",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "clef-flash",
           "name": "Clef Flash",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "phonon:latest",
@@ -6822,7 +6822,7 @@
         {
           "id": "typesafe/jev-1.13",
           "name": "Jev 1.13",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },
@@ -7447,6 +7447,11 @@
       "baseUrl": "https://token.sensenova.cn/v1/chat/completions",
       "models": [
         {
+          "id": "sensenova-6.8-flash",
+          "name": "SenseNova 6.8 Flash",
+          "kind": "llm"
+        },
+        {
           "id": "sensenova-6.8-flash-lite",
           "name": "SenseNova 6.8 Flash Lite",
           "kind": "llm"
@@ -7462,13 +7467,18 @@
           "kind": "image"
         },
         {
+          "id": "deepseek-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "kind": "llm"
+        },
+        {
           "id": "deepseek-v4-flash",
           "name": "DeepSeek V4 Flash",
           "kind": "llm"
         },
         {
-          "id": "deepseek-flash",
-          "name": "DeepSeek V4.1 Flash",
+          "id": "glm-5.3",
+          "name": "GLM-5.3",
           "kind": "llm"
         },
         {
@@ -8077,12 +8087,12 @@
         {
           "id": "rev-latest",
           "name": "v1m Rev Latest (Calibrated)",
-          "kind": "llm"
+          "kind": "systemone"
         },
         {
           "id": "v1m-decision-engine",
           "name": "v1m Decision Engine",
-          "kind": "llm"
+          "kind": "systemone"
         }
       ]
     },

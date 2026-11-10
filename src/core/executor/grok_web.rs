@@ -37,16 +37,16 @@ use crate::core::proxy::ProxyTarget;
 use crate::core::utils::web_cookie::build_grok_cookie_header;
 use crate::types::ProviderConnection;
 
+use super::grok_tls::{self, GROK_TLS_TIMEOUT};
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const GROK_CHAT_API: &str = "https://grok.com/rest/app-chat/conversations/new";
 /// `GROK_TLS_USER_AGENT` (services/grokTlsClient.js) — must match the UA of
 /// the browser that earned the `cf_clearance` cookie. Upstream routes grok-web
 /// through a wreq-js `chrome_146` session because Cloudflare Enterprise
-/// rejects Node's TLS fingerprint; Rust has no wreq equivalent, so requests
-/// go out on the normal reqwest/rustls transport — the same fail-open posture
-/// upstream takes when wreq-js is absent (see `opencode.rs` for the same
-/// documented gap). The header set is kept in lockstep regardless.
+/// rejects Node's TLS fingerprint; Rust ports that with the stable `wreq` +
+/// `wreq-util` crates (`grok_tls` module, `Profile::Chrome146` +
+/// `Platform::MacOS`). The header set is kept in lockstep regardless.
 pub(crate) const GROK_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 const GROK_STATSIG_SUFFIX: &str =
     "e:TypeError: Cannot read properties of null (reading 'children')";
@@ -300,6 +300,9 @@ pub enum GrokWebExecutorError {
     HyperClientInit(std::io::Error),
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
+    /// wreq transport error from the TLS-impersonating grok.com client
+    /// (`grok_tls`) — upstream's `GrokTlsUnavailableError`/fetch-failure path.
+    Tls(wreq::Error),
     UnsupportedFormat(String),
     Media(String),
 }
@@ -307,6 +310,12 @@ pub enum GrokWebExecutorError {
 impl From<reqwest::Error> for GrokWebExecutorError {
     fn from(error: reqwest::Error) -> Self {
         Self::Request(error)
+    }
+}
+
+impl From<wreq::Error> for GrokWebExecutorError {
+    fn from(error: wreq::Error) -> Self {
+        Self::Tls(error)
     }
 }
 
@@ -352,6 +361,7 @@ impl std::fmt::Display for GrokWebExecutorError {
             Self::HyperClientInit(e) => write!(f, "Hyper client init error: {}", e),
             Self::Hyper(e) => write!(f, "Hyper error: {}", e),
             Self::Request(e) => write!(f, "Request error: {}", e),
+            Self::Tls(e) => write!(f, "TLS-impersonated request error: {}", e),
             Self::UnsupportedFormat(msg) => write!(f, "Unsupported format: {}", msg),
             Self::Media(msg) => write!(f, "{}", msg),
         }
@@ -379,13 +389,14 @@ impl std::fmt::Debug for GrokWebExecutorResponse {
     }
 }
 
-pub struct GrokWebExecutor {
-    pool: Arc<ClientPool>,
-}
+pub struct GrokWebExecutor;
 
 impl GrokWebExecutor {
-    pub fn new(pool: Arc<ClientPool>) -> Self {
-        Self { pool }
+    /// `pool` is accepted for call-site parity with the other executors but
+    /// unused: grok-web traffic goes through the wreq TLS-impersonating
+    /// client in `grok_tls`, not the shared reqwest pool.
+    pub fn new(_pool: Arc<ClientPool>) -> Self {
+        Self
     }
 
     pub async fn execute_request(
@@ -418,20 +429,26 @@ impl GrokWebExecutor {
 
         let body_bytes = serde_json::to_vec(&transformed_body)?;
 
-        let client = self.pool.get("grok-web", request.proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .body(body_bytes)
-            .send()
-            .await?;
+        // Upstream routes every grok-web call through the wreq-js
+        // `chrome_146`/`macos` TLS session (services/grokTlsClient.js) because
+        // Cloudflare Enterprise rejects non-browser TLS fingerprints;
+        // `grok_tls` is the Rust wreq equivalent (upstream timeoutMs 120s).
+        let response = grok_tls::request(
+            http::Method::POST,
+            &url,
+            headers.clone(),
+            Some(body_bytes),
+            GROK_TLS_TIMEOUT,
+            request.proxy.as_ref(),
+        )
+        .await?;
 
         // JS grok-web.js execute() error mapping — upstream reads the error
         // body for the Cloudflare-challenge marker (isCloudflareChallenge)
         // before choosing the message; auth/429 text drives account rotation.
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            let body_text = response.text().await.unwrap_or_default();
+        let status = response.status;
+        let body_text = response.text();
+        if !response.is_success() {
             let (msg, code): (String, String) = if is_cloudflare_challenge(&body_text) {
                 (
                     "Grok returned a Cloudflare challenge — cf_clearance in the pasted Cookie header no longer matches this machine. Re-copy the full Cookie header from a logged-in grok.com browser on this machine.".to_string(),
@@ -471,14 +488,13 @@ impl GrokWebExecutor {
         );
         let created = chrono::Utc::now().timestamp();
         let converted = convert_grok_response(
-            response,
+            &body_text,
             &request.model,
             &cid,
             created,
             model_info.is_thinking,
             request.stream,
-        )
-        .await?;
+        )?;
 
         Ok(GrokWebExecutorResponse {
             response: converted,
@@ -634,9 +650,9 @@ impl GrokWebExecutor {
     ///
     /// `kind` is `"image"` or `"video"`; image loops `n` times (clamped 1..=4
     /// upstream-side), video is single-shot (quota ~1/day). Returns base64
-    /// assets downloaded from `assets.grok.com`. Same reqwest/rustls
-    /// transport caveat as chat — upstream prefers the wreq-js `chrome_146`
-    /// session; Cloudflare may challenge either way.
+    /// assets downloaded from `assets.grok.com`. Same wreq `chrome_146`
+    /// transport as chat — upstream prefers the wreq-js session for both
+    /// turns and asset downloads (`grokTlsFetch`).
     pub async fn generate_media(
         &self,
         prompt: &str,
@@ -667,7 +683,6 @@ impl GrokWebExecutor {
         }
 
         let iterations = if kind == "video" { 1 } else { n.clamp(1, 4) };
-        let client = self.pool.get("grok-web", proxy)?;
         let mut results = Vec::with_capacity(iterations);
 
         for _ in 0..iterations {
@@ -720,15 +735,19 @@ impl GrokWebExecutor {
             let mut headers = media_headers(&cookie_header, &request_id);
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-            let response = client
-                .post(GROK_CHAT_API)
-                .headers(headers)
-                .body(serde_json::to_vec(&payload)?)
-                .timeout(turn_timeout)
-                .send()
-                .await?;
-            let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
+            // Media turns go through the same wreq-js chrome_146 TLS session
+            // upstream (grokTlsFetch) — Cloudflare gates conversations/new.
+            let response = grok_tls::request(
+                http::Method::POST,
+                GROK_CHAT_API,
+                headers,
+                Some(serde_json::to_vec(&payload)?),
+                turn_timeout,
+                proxy,
+            )
+            .await?;
+            let status = response.status;
+            let text = response.text();
             if !(200..300).contains(&status) || is_cloudflare_challenge(&text) {
                 return Err(GrokWebExecutorError::Media(
                     if is_cloudflare_challenge(&text) {
@@ -753,7 +772,7 @@ impl GrokWebExecutor {
                 } else {
                     format!("https://assets.grok.com/{video_url}")
                 };
-                let asset = download_grok_asset(&client, &url, &cookie_header, VIDEO_ASSET_TIMEOUT)
+                let asset = download_grok_asset(&url, &cookie_header, VIDEO_ASSET_TIMEOUT, proxy)
                     .await
                     .map_err(GrokWebExecutorError::Media)?
                     .ok_or_else(|| {
@@ -809,7 +828,7 @@ impl GrokWebExecutor {
                 ));
             };
             let url = format!("https://assets.grok.com/{image_url}");
-            let asset = download_grok_asset(&client, &url, &cookie_header, IMAGE_ASSET_TIMEOUT)
+            let asset = download_grok_asset(&url, &cookie_header, IMAGE_ASSET_TIMEOUT, proxy)
                 .await
                 .map_err(GrokWebExecutorError::Media)?
                 .ok_or_else(|| {
@@ -957,13 +976,14 @@ fn find_grok_video_url(text: &str) -> Option<String> {
 }
 
 /// Download a `assets.grok.com` asset as base64 (`generateMedia` download
-/// step). Returns `None` on non-2xx so callers can emit upstream-style
-/// errors.
+/// step). Upstream fetches assets through the same wreq-js TLS session, so
+/// this goes through `grok_tls` too. Returns `None` on non-2xx so callers
+/// can emit upstream-style errors.
 async fn download_grok_asset(
-    client: &reqwest::Client,
     url: &str,
     cookie_header: &str,
     timeout: Duration,
+    proxy: Option<&ProxyTarget>,
 ) -> Result<Option<GrokMediaAsset>, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -974,27 +994,16 @@ async fn download_grok_asset(
     if let Ok(v) = HeaderValue::from_str(cookie_header) {
         headers.insert(COOKIE, v);
     }
-    let resp = client
-        .get(url)
-        .headers(headers)
-        .timeout(timeout)
-        .send()
+    let resp = grok_tls::request(http::Method::GET, url, headers, None, timeout, proxy)
         .await
         .map_err(|e| format!("asset download failed: {e}"))?;
-    if !resp.status().is_success() {
+    if !resp.is_success() {
         return Ok(None);
     }
     let mime = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|ct| ct.split(';').next())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("asset download failed: {e}"))?;
+        .content_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let bytes = resp.body;
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -1913,25 +1922,17 @@ fn parse_grok_line(
 
 /// Convert the grok.com NDJSON reply into an OpenAI SSE stream or a
 /// non-streaming chat.completion JSON (JS buildStreamingResponse /
-/// buildNonStreamingResponse, grok-web.js:128-240).
-async fn convert_grok_response(
-    response: reqwest::Response,
+/// buildNonStreamingResponse, grok-web.js:128-240). The body arrives fully
+/// buffered — upstream `grokTlsFetch` materializes the ArrayBuffer before
+/// returning, matching this signature.
+fn convert_grok_response(
+    body_text: &str,
     model: &str,
     cid: &str,
     created: i64,
     is_thinking_model: bool,
     stream: bool,
 ) -> Result<UpstreamResponse, GrokWebExecutorError> {
-    use futures_util::StreamExt;
-
-    // Drain the whole NDJSON body first (grok.com sends no SSE framing).
-    let mut text = String::new();
-    let mut stream_body = response.bytes_stream();
-    while let Some(chunk) = stream_body.next().await {
-        let bytes = chunk.map_err(GrokWebExecutorError::Request)?;
-        text.push_str(&String::from_utf8_lossy(&bytes));
-    }
-
     let mut fingerprint = String::new();
     let mut response_id = String::new();
     let mut think_opened = false;
@@ -1939,7 +1940,7 @@ async fn convert_grok_response(
     let mut thinking_text = String::new();
     let mut error_text: Option<String> = None;
 
-    for line in text.lines() {
+    for line in body_text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;

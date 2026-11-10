@@ -275,6 +275,9 @@ fn video_model_spec(id: &str) -> Option<VideoModelSpec> {
             i2v: true,
             audio: false,
         },
+        // `audio` mirrors upstream `UC_VIDEO_MODELS[id].audio` — informational
+        // only (the /image_to_video body never carries it), kept for parity
+        // with `listUcVideoModels`.
         "grok-imagine-video"
         | "bytedance-seedance-2.0"
         | "seedance-2.0-fast"
@@ -291,10 +294,16 @@ fn video_model_spec(id: &str) -> Option<VideoModelSpec> {
             seconds: &[],
             t2v: true,
             i2v: true,
-            audio: id.contains("uncensored")
-                || id == "seedance-2.5"
-                || id == "seedance-2.5-uncensored"
-                || id == "seedance-v1.5-pro-uncensored",
+            audio: matches!(
+                id,
+                "seedance-2.0-uncensored"
+                    | "seedance-2.0-fast-uncensored"
+                    | "seedance-2.0-mini-uncensored"
+                    | "seedance-2.0-mini-turbo"
+                    | "seedance-v1.5-pro-uncensored"
+                    | "seedance-2.5-uncensored"
+                    | "seedance-2.5"
+            ),
         },
         "av-gen-v2" | "cosmos-predict" | "minimax-h3" | "happyhorse-1.0" | "wan/v2.2-a14b" => {
             VideoModelSpec {
@@ -390,8 +399,13 @@ impl UcWebExecutor {
             let aspect = aspect_for(size, spec.aspects);
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("aspect_ratio".into(), json!(aspect.aspect));
-                obj.insert("imageWidth".into(), json!(aspect.width));
-                obj.insert("imageHeight".into(), json!(aspect.height));
+                // Upstream spreads `UC_ASPECT_SIZES[candidate]` — when the
+                // fallback aspect is one the size table does not know
+                // (e.g. "2:1"), only `aspect_ratio` is sent, no dims.
+                if let (Some(w), Some(h)) = (aspect.width, aspect.height) {
+                    obj.insert("imageWidth".into(), json!(w));
+                    obj.insert("imageHeight".into(), json!(h));
+                }
             }
             if !spec.resolutions.is_empty() {
                 let want = resolution.unwrap_or("").to_lowercase();
@@ -497,8 +511,9 @@ impl UcWebExecutor {
             "sora_resolution": video_resolution,
             "end_frame_blob_name": Value::Null,
             "model": video_model,
-            "seconds": seconds,
-            "video_to_video_duration": seconds,
+            // JS sends `seconds` as a JSON number — `5`, not `5.0`.
+            "seconds": json_seconds(seconds),
+            "video_to_video_duration": json_seconds(seconds),
             "vdiscount": false,
         });
 
@@ -912,13 +927,14 @@ struct ClerkSessionRef {
 }
 
 struct AspectPick {
-    aspect: &'static str,
-    width: &'static str,
-    height: &'static str,
+    aspect: String,
+    width: Option<&'static str>,
+    height: Option<&'static str>,
 }
 
 /// `aspectFor`: direct aspect match → nearest ratio for "WxH" sizes →
-/// fallback (first allowed or "1:1").
+/// fallback (first allowed or "1:1"). The fallback aspect_ratio is sent even
+/// when `UC_ASPECT_SIZES` has no dims for it (upstream spreads `undefined`).
 fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
     let raw = size.unwrap_or("").trim();
     let pick = |candidate: &str| -> Option<AspectPick> {
@@ -927,28 +943,11 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
             return None;
         }
         Some(AspectPick {
-            aspect: candidate_leak(candidate),
-            width: w,
-            height: h,
+            aspect: candidate.to_string(),
+            width: Some(w),
+            height: Some(h),
         })
     };
-    // aspect strings are 'static literals from aspect_size's match arms.
-    fn candidate_leak(s: &str) -> &'static str {
-        // The candidates come from UC_ASPECT_SIZES keys — all 'static.
-        match s {
-            "1:1" => "1:1",
-            "16:9" => "16:9",
-            "9:16" => "9:16",
-            "4:3" => "4:3",
-            "3:4" => "3:4",
-            "3:2" => "3:2",
-            "2:3" => "2:3",
-            "4:5" => "4:5",
-            "5:4" => "5:4",
-            "21:9" => "21:9",
-            _ => "1:1",
-        }
-    }
     if let Some(p) = pick(raw) {
         return p;
     }
@@ -975,9 +974,9 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
             if let Some((aspect, _)) = best {
                 let (width, height) = aspect_size(aspect).unwrap();
                 return AspectPick {
-                    aspect,
-                    width,
-                    height,
+                    aspect: aspect.to_string(),
+                    width: Some(width),
+                    height: Some(height),
                 };
             }
         }
@@ -987,11 +986,11 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
     } else {
         allowed[0]
     };
-    let (width, height) = aspect_size(fallback).unwrap_or(("1024", "1024"));
-    // `fallback` borrows from `allowed` (non-'static); the pick's aspect is a
-    // known literal so resolve it through the same 'static mapping used above.
+    let (width, height) = aspect_size(fallback)
+        .map(|(w, h)| (Some(w), Some(h)))
+        .unwrap_or((None, None));
     AspectPick {
-        aspect: candidate_leak(fallback),
+        aspect: fallback.to_string(),
         width,
         height,
     }
@@ -1020,10 +1019,11 @@ fn build_cookie_header(jar: &BTreeMap<String, String>) -> String {
 }
 
 /// Decode a JWT payload (base64url, no signature check — claims only).
+/// Tolerates optional `=` padding the way upstream's manual base64 decode does.
 fn decode_jwt(token: &str) -> Option<Value> {
     let payload = token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
+        .decode(payload.trim_end_matches('='))
         .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -1070,6 +1070,16 @@ fn auth_headers(jwt: &str) -> HeaderMap {
     headers
 }
 
+/// `seconds` as a JSON number matching JS `Number` semantics: integral
+/// values serialise without a fraction (`5`, not `5.0`).
+fn json_seconds(seconds: f64) -> Value {
+    if seconds.fract() == 0.0 && seconds.abs() < 9.0e15 {
+        json!(seconds as i64)
+    } else {
+        json!(seconds)
+    }
+}
+
 fn urlencoding_encode(s: &str) -> String {
     // encodeURIComponent-lite: keep unreserved, %XX the rest.
     let mut out = String::with_capacity(s.len());
@@ -1091,4 +1101,216 @@ fn urlencoding_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_model_catalog_matches_upstream() {
+        // Registry ids accepted by /v2/image-gen `model_version`.
+        for id in [
+            "seedream-v4.5",
+            "seedream-v5",
+            "seedream-v5-flash",
+            "nano-banana-pro-ultra",
+            "nano-banana-pro",
+            "nano-banana",
+            "nano-banana-2",
+            "gpt-image",
+            "gpt-image-2",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
+            "wan-2.6",
+            "wan-2.6-image",
+            "wan-2.7-text-to-image",
+            "wan-2.7-text-to-image-pro",
+            "prefect-pony-xl",
+            "1.0",
+            "1.1",
+            "1.2",
+            "2.0",
+            "flux-2-max",
+            "SDXL",
+            "realism",
+            "realism-2",
+            "z-image-turbo",
+        ] {
+            assert!(image_model_spec(id).is_some(), "missing image model {id}");
+        }
+        assert!(image_model_spec("not-a-model").is_none());
+        // `upstream` overrides `model_version` (wan-2.6 disambiguation).
+        assert_eq!(
+            image_model_spec("wan-2.6-image").unwrap().upstream,
+            Some("wan-2.6")
+        );
+        assert_eq!(image_model_spec("seedream-v4.5").unwrap().upstream, None);
+    }
+
+    #[test]
+    fn video_model_catalog_matches_upstream() {
+        for id in [
+            "default",
+            "turbo",
+            "wan-2.2-uncensored-v2",
+            "wan-2.2-uncensored",
+            "wan-2.6",
+            "wan-2.6-ultra",
+            "wan-2.7",
+            "wan-2.7-pro",
+            "wan-2.7-uncensored",
+            "wan-2.7-uncensored-v2",
+            "wan-3.0",
+            "wan-3.0-uncensored",
+            "wan-3.0-uncensored-pro",
+            "sora-2",
+            "sora-2-pro",
+            "grok-imagine-video",
+            "bytedance-seedance-2.0",
+            "seedance-2.0-fast",
+            "seedance-2.0-uncensored",
+            "seedance-2.0-fast-uncensored",
+            "seedance-2.0-mini-uncensored",
+            "seedance-2.0-mini-turbo",
+            "seedance-v1.5-pro-uncensored",
+            "seedance-2.5-uncensored",
+            "seedance-2.5",
+            "vidu-q3-uncensored",
+            "av-gen-v2",
+            "cosmos-predict",
+            "minimax-h3",
+            "happyhorse-1.0",
+            "wan/v2.2-a14b",
+        ] {
+            assert!(video_model_spec(id).is_some(), "missing video model {id}");
+        }
+        assert!(video_model_spec("seedream-v4.5").is_none());
+    }
+
+    #[test]
+    fn video_audio_flags_match_upstream() {
+        // UC_VIDEO_MODELS `audio: true` entries — informational only.
+        for id in [
+            "wan-3.0",
+            "wan-3.0-uncensored",
+            "wan-3.0-uncensored-pro",
+            "seedance-2.0-uncensored",
+            "seedance-2.0-fast-uncensored",
+            "seedance-2.0-mini-uncensored",
+            "seedance-2.0-mini-turbo",
+            "seedance-v1.5-pro-uncensored",
+            "seedance-2.5-uncensored",
+            "seedance-2.5",
+            "av-gen-v2",
+        ] {
+            assert!(
+                video_model_spec(id).unwrap().audio,
+                "{id} should have audio"
+            );
+        }
+        for id in [
+            "vidu-q3-uncensored",
+            "grok-imagine-video",
+            "bytedance-seedance-2.0",
+            "seedance-2.0-fast",
+            "cosmos-predict",
+            "wan-2.6",
+            "default",
+        ] {
+            assert!(
+                !video_model_spec(id).unwrap().audio,
+                "{id} should not have audio"
+            );
+        }
+    }
+
+    #[test]
+    fn video_spec_constraints_match_upstream() {
+        let default = video_model_spec("default").unwrap();
+        assert!(default.t2v && default.i2v);
+        assert_eq!(default.resolutions, &["480p", "720p"]);
+        assert_eq!(default.seconds, &[5, 8]);
+        let sora = video_model_spec("sora-2").unwrap();
+        assert_eq!(sora.seconds, &[4, 8, 12]);
+        let wan26 = video_model_spec("wan-2.6").unwrap();
+        assert!(wan26.resolutions.is_empty());
+        assert_eq!(wan26.seconds, &[5, 8]);
+    }
+
+    #[test]
+    fn aspect_for_direct_and_fallback() {
+        let all: &[&str] = &[];
+        let p = aspect_for(Some("16:9"), all);
+        assert_eq!(p.aspect, "16:9");
+        assert_eq!((p.width, p.height), (Some("1024"), Some("576")));
+
+        // Pixel size snaps to the nearest known ratio.
+        let p = aspect_for(Some("1024x576"), all);
+        assert_eq!(p.aspect, "16:9");
+
+        // Unknown size → "1:1" fallback with dims.
+        let p = aspect_for(Some("bogus"), all);
+        assert_eq!(p.aspect, "1:1");
+        assert_eq!((p.width, p.height), (Some("1024"), Some("1024")));
+
+        // Allowed list gates both direct pick and fallback.
+        let allowed: &[&str] = &["9:16", "1:1"];
+        let p = aspect_for(Some("16:9"), allowed);
+        assert_eq!(p.aspect, "9:16"); // first allowed
+        let p = aspect_for(Some("512x512"), allowed);
+        assert_eq!(p.aspect, "1:1"); // nearest allowed ratio
+    }
+
+    #[test]
+    fn aspect_for_exotic_fallback_sends_ratio_without_dims() {
+        // gpt-image-2.5 allows "2:1" etc. which UC_ASPECT_SIZES does not know —
+        // upstream still sends aspect_ratio but no imageWidth/imageHeight.
+        let allowed: &[&str] = &["2:1", "1:1"];
+        let p = aspect_for(Some("999"), allowed);
+        assert_eq!(p.aspect, "2:1");
+        assert_eq!(p.width, None);
+        assert_eq!(p.height, None);
+    }
+
+    #[test]
+    fn cookie_jar_roundtrip_and_rotation() {
+        let header = "__client=abc.def.ghi; other=xyz; theme=dark";
+        let jar = parse_cookie_jar(header);
+        assert_eq!(jar.get("__client").map(String::as_str), Some("abc.def.ghi"));
+        assert_eq!(
+            build_cookie_header(&jar),
+            "__client=abc.def.ghi; other=xyz; theme=dark"
+        );
+
+        // Rotation swaps __client and keeps the rest.
+        let rotated = with_rotated_client(header, "new.client.jwt").unwrap();
+        assert!(rotated.contains("__client=new.client.jwt"));
+        assert!(rotated.contains("other=xyz"));
+        // Same value → no change.
+        assert!(with_rotated_client(header, "abc.def.ghi").is_none());
+        assert!(with_rotated_client(header, "").is_none());
+    }
+
+    #[test]
+    fn decode_jwt_reads_claims_with_or_without_padding() {
+        // {"uid":"user_123","sid":"sess_1"} base64url, unpadded and padded.
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"uid":"user_123","sid":"sess_1"}"#);
+        let padded = format!("{payload}==");
+        for tok in [format!("h.{payload}.s"), format!("h.{padded}.s")] {
+            let claims = decode_jwt(&tok).unwrap();
+            assert_eq!(claims["uid"], "user_123");
+            assert_eq!(claims["sid"], "sess_1");
+        }
+        assert!(decode_jwt("not-a-jwt").is_none());
+        assert!(decode_jwt("a.!!!.b").is_none());
+    }
+
+    #[test]
+    fn json_seconds_matches_js_number_format() {
+        assert_eq!(json_seconds(5.0), json!(5));
+        assert_eq!(json_seconds(7.5), json!(7.5));
+        assert_eq!(json_seconds(12.0), json!(12));
+    }
 }

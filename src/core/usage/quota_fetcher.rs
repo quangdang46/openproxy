@@ -3085,11 +3085,9 @@ const ANTIGRAVITY_IMPORTANT_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "gpt-oss-120b-medium",
     "gemini-3.1-flash-image",
-    // Legacy ids kept from the earlier port (superset of upstream list).
-    "gemini-3-flash-agent",
-    "gemini-3.5-flash-low",
-    "gemini-3.5-flash-extra-low",
-    "gemini-3-flash",
+    // 9router commit 24034f6: the deprecated gemini-3.5-flash-* /
+    // gemini-3-flash-agent / gemini-3-flash ids were removed from
+    // importantModels upstream; gemini-3.1-pro-high was already listed.
 ];
 
 pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Value {

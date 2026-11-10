@@ -17,6 +17,7 @@
 //!
 //! Subscriptions (Claude Code, Codex, Copilot, Cursor) are tracked via their own quota systems.
 
+pub mod antigravity_quota;
 pub mod grok_cli_quota_frame;
 mod pricing;
 pub mod quota_fetcher;

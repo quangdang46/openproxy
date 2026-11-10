@@ -16,6 +16,7 @@ mod devin_cli;
 mod gemini_cli;
 mod github;
 mod grok_cli;
+pub(crate) mod grok_tls;
 mod grok_web;
 mod iflow;
 mod kimchi;

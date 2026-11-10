@@ -72,13 +72,27 @@ const FORMAT_LEVELS: Record<string, ThinkingLevel[]> = {
   step: L.base,
 };
 
-/** Model-id pattern overrides that beat format defaults (9router PATTERN_THINKING). */
-const PATTERN_THINKING: Array<{ pattern: string; levels: ThinkingLevel[] }> = [
+/** Model-id pattern overrides that beat format defaults (9router PATTERN_THINKING).
+ * `provider` scopes an entry to one provider id (9router `{provider, pattern}`). */
+const PATTERN_THINKING: Array<{ pattern: string; levels: ThinkingLevel[]; provider?: string }> = [
   {
     pattern: "*gpt-5.6-sol*",
     levels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   { pattern: "*codex*", levels: ["low", "medium", "high", "xhigh"] },
+  // 9router commit 63de82b: codebuddy-cn per-model effort sets from the
+  // server's product-config payload. These MUST stay above any unqualified
+  // deepseek glob — PATTERN_THINKING is first-match-wins.
+  { provider: "codebuddy-cn", pattern: "deepseek-v4-pro", levels: ["low", "high", "xhigh"] },
+  { provider: "codebuddy-cn", pattern: "deepseek-v4.1-flash", levels: ["low", "high", "max"] },
+  { provider: "codebuddy-cn", pattern: "glm-5.3", levels: ["low", "high", "max"] },
+  { provider: "codebuddy-cn", pattern: "glm-5.3-flash", levels: ["low", "high", "max"] },
+  { provider: "codebuddy-cn", pattern: "glm-5.2", levels: ["high", "xhigh"] },
+  { provider: "codebuddy-cn", pattern: "kimi-k2.8-preview", levels: ["low", "medium", "high"] },
+  { provider: "codebuddy-cn", pattern: "hy3", levels: ["low", "high"] },
+  { provider: "codebuddy-cn", pattern: "hy4-preview", levels: ["high"] },
+  // codebuddy-intl rides the same gateway catalog, so its deepseek levels match.
+  { provider: "codebuddy-intl", pattern: "deepseek-v4*", levels: ["low", "high", "xhigh"] },
 ];
 
 const DEFAULT_CAPS: ThinkingCaps = {
@@ -125,22 +139,26 @@ const PROVIDER_CAPS: Record<string, Record<string, Partial<ThinkingCaps>>> = {
     "deepseek-ai/deepseek-v4-pro": { reasoning: true, thinkingFormat: "openai" },
     "deepseek-ai/deepseek-v4-flash": { reasoning: true, thinkingFormat: "openai" },
   },
+  // 9router commit 63de82b (2026-09-30 server config): glm-5v-turbo / kimi-k2.7 /
+  // kimi-k2.6 removed, kimi-k2.8-preview / kimi-k3-1 / hy3 / hy4-preview added.
   "codebuddy-cn": {
-    "glm-5.2": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
+    "glm-5.2": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
     "glm-5.1": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "glm-5.0": { reasoning: true, thinkingFormat: "openai" },
-    "glm-5.0-turbo": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
-    "glm-5v-turbo": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "glm-4.7": { reasoning: true, thinkingFormat: "openai" },
     "minimax-m3": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
-    "minimax-m2.7": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
-    "kimi-k2.7": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
-    "kimi-k2.6": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "kimi-k2.5": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "hy3-preview": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
-    "deepseek-v4-pro": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "deepseek-v4-flash": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
     "deepseek-v3-2-volc": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
+    "hy3": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
+    "hy4-preview": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
+    "glm-5.3": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
+    "glm-5.3-flash": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
+    "kimi-k3-1": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: false },
+    "kimi-k2.8-preview": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
+    "deepseek-v4-pro": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
+    "deepseek-v4.1-flash": { reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true },
   },
 };
 
@@ -287,7 +305,9 @@ export function getThinkingLevels(
   const caps = getThinkingCapsForModel(provider, model);
   if (!caps.reasoning) return null;
 
-  const hit = PATTERN_THINKING.find((p) => matchPattern(p.pattern, model));
+  const hit = PATTERN_THINKING.find(
+    (p) => (!p.provider || p.provider === provider) && matchPattern(p.pattern, model),
+  );
   let levels: ThinkingLevel[] = hit?.levels
     ? [...hit.levels]
     : caps.thinkingFormat && FORMAT_LEVELS[caps.thinkingFormat]

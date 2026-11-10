@@ -310,12 +310,18 @@ export default function ModelSelectModal({
     const groups: Record<string, ModelGroup> = {};
 
     const PROVIDER_AS_MODEL_KINDS = new Set(["webSearch", "webFetch"]);
-    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText"]);
+    // 9router ModelSelectModal.js TYPED_KINDS — "systemone" included so the
+    // Smart Router picker (kindFilter="systemone") sees Jev/Drex/Clef rows.
+    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText", "systemone"]);
     const ALLOW_PROVIDER_FALLBACK_KINDS = new Set(["tts", "image", "webFetch"]);
+
+    // 9router getModelKind (constants/models.js): catalog rows carry `kind`,
+    // custom/alias rows carry `type` — read both.
+    const modelKind = (m: any): string | undefined => m?.kind || m?.type;
 
     const filterByKind = (models: any[]) => {
       if (!kindFilter || !TYPED_KINDS.has(kindFilter)) return models;
-      return models.filter((m) => m.isPlaceholder || m.type === kindFilter);
+      return models.filter((m) => m.isPlaceholder || modelKind(m) === kindFilter);
     };
 
     const isDisabled = (alias: string, modelId: string) => {
@@ -372,8 +378,8 @@ export default function ModelSelectModal({
         let combined = aliasModels;
         if (kindFilter && TYPED_KINDS.has(kindFilter)) {
           combined = getModelsByProviderId(providerId)
-            .filter((m) => m.type === kindFilter && !isDisabled(alias, m.id))
-            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type }));
+            .filter((m) => modelKind(m) === kindFilter && !isDisabled(alias, m.id))
+            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: modelKind(m) }));
           if (combined.length === 0 && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
             const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
             if (supports) combined = [{ id: providerId, name: providerInfo.name, value: alias }];
@@ -452,7 +458,7 @@ export default function ModelSelectModal({
             .map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, type: r.type, isCustom: true }));
 
           let allModels = filterByKind([
-            ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
+            ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: modelKind(m) })),
             ...customAliasModels,
             ...customRegisteredModels,
           ]);

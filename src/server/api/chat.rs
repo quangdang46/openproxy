@@ -631,8 +631,10 @@ async fn chat_completions_impl(
             // Smart Router pre-pass (9router combo.js:372-448 +
             // src/sse/services/systemoneRouter.js): a System One decision
             // model orders the members before fallback iteration. Fails
-            // open to the configured order on any router error.
-            let dispatch_models = if strategy == ComboStrategy::Smart {
+            // open to the configured order on any router error. The
+            // returned `active_sticky_model` drives the sticky-clear hook
+            // below (combo.js:509-511, 542-544, 552-554).
+            let smart_ordering = if strategy == ComboStrategy::Smart {
                 smart_order_combo_models(
                     &state,
                     &snapshot,
@@ -643,8 +645,12 @@ async fn chat_completions_impl(
                 )
                 .await
             } else {
-                augmented_models.clone()
+                crate::core::combo::smart::SmartOrdering {
+                    models: augmented_models.clone(),
+                    active_sticky_model: None,
+                }
             };
+            let dispatch_models = smart_ordering.models.clone();
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -899,7 +905,32 @@ async fn chat_completions_impl(
             } else {
                 let attempted_members = attempted_members.clone();
                 let combo_headers = headers_map.clone();
-                execute_combo_strategy_full(
+                // Smart Router sticky-clear hook (combo.js:509-511,
+                // 542-544, 552-554): when the session's sticky member is
+                // abandoned — request error or zero-content fall-through —
+                // drop the sticky pick so the next turn re-evaluates.
+                let sticky_session = if strategy == ComboStrategy::Smart {
+                    smart_ordering
+                        .active_sticky_model
+                        .clone()
+                        .and_then(|active| {
+                            combo_session_id(&headers_map, &body).map(|sid| (sid, active))
+                        })
+                } else {
+                    None
+                };
+                let sticky_combo = combo_name.clone();
+                let mut on_member_terminal = move |member: &str| {
+                    if let Some((sid, active)) = &sticky_session {
+                        if member == active {
+                            crate::core::combo::smart::clear_sticky_combo_session(
+                                &sticky_combo,
+                                Some(sid),
+                            );
+                        }
+                    }
+                };
+                crate::core::combo::execute_combo_strategy_full_with_terminal(
                     &dispatch_models,
                     Some(&combo_name),
                     strategy,
@@ -977,6 +1008,7 @@ async fn chat_completions_impl(
                     // generation fails over to the next member instead of
                     // being delivered as a successful empty answer.
                     |response: Response, is_last: bool| inspect_combo_response(response, is_last),
+                    on_member_terminal,
                 )
                 .await
             };
@@ -3268,6 +3300,13 @@ async fn forward_with_provider_fallback(
                         registry.update_rate_limit(&connection.id, remaining, reset);
                     }
                     clear_connection_error_for_model(state, &connection.id, Some(model)).await;
+                    // 9router chat.js onRequestSuccess → clearAntigravityStrikes:
+                    // a success clears the strike breaker for this pair. No-op
+                    // for non-Antigravity connections (they never accrue strikes).
+                    crate::core::usage::antigravity_quota::clear_antigravity_strikes(
+                        &connection.id,
+                        model,
+                    );
                     if dashboard_stream {
                         let response = proxy_dashboard_sse_with_usage_tracking(
                             result.response,
@@ -3509,6 +3548,35 @@ async fn forward_with_provider_fallback(
                     }
                 }
 
+                // 9router chat.js:366 + antigravityQuota.js
+                // handleAntigravityQuotaError: on 409/429 refresh the live
+                // quota cache. An exhausted reading (or 3 strikes inside 60s)
+                // cache-blocks the pair — RAM only, NO persisted modelLock —
+                // and the account is skipped for the rest of this request.
+                let antigravity_quota_blocked =
+                    if crate::core::model::resolve_provider_alias(provider) == "antigravity"
+                        && (error_status == 409 || error_status == 429)
+                    {
+                        crate::core::usage::antigravity_quota::handle_antigravity_quota_error(
+                            &connection.id,
+                            error_status,
+                            model,
+                            connection
+                                .access_token
+                                .as_deref()
+                                .or(connection.api_key.as_deref())
+                                .unwrap_or(""),
+                        )
+                        .await
+                        .is_some()
+                    } else {
+                        false
+                    };
+                if antigravity_quota_blocked {
+                    excluded.insert(connection.id.clone());
+                    continue;
+                }
+
                 if decision.should_fallback {
                     // 9router githubMonthlyResetMs: a GitHub 402 with the
                     // monthly-usage-limit message locks the ACCOUNT (model="")
@@ -3736,6 +3804,14 @@ fn select_connection(
             connection_has_credentials(connection)
                 && !excluded.contains(&connection.id)
                 && connection_supports_model(connection, model)
+                // 9router auth.js:84-99 — Antigravity live-quota pre-filter:
+                // skip accounts whose cached quota for this model is
+                // exhausted (populated lazily by the 409/429 error path).
+                && !(connection.provider == "antigravity"
+                    && crate::core::usage::antigravity_quota::antigravity_account_quota_blocked(
+                        &connection.id,
+                        model,
+                    ))
         })
         .cloned()
         .collect();
@@ -3976,6 +4052,19 @@ fn earliest_retry_after(
                     .and_then(parse_timestamp)
                 {
                     retry_after.push(until);
+                }
+            }
+            // 9router auth.js:119-124 — when every Antigravity account is
+            // quota-cache-blocked, the earliest quota resetAt feeds the
+            // retry-after (RAM cache only; nothing is persisted).
+            if crate::core::model::resolve_provider_alias(provider) == "antigravity" {
+                if let Some(reset) =
+                    crate::core::usage::antigravity_quota::antigravity_quota_reset_after(
+                        &connection.id,
+                        model,
+                    )
+                {
+                    retry_after.push(reset);
                 }
             }
             retry_after
@@ -10587,11 +10676,14 @@ async fn smart_order_combo_models(
     models: &[String],
     body: &Value,
     headers: &std::collections::HashMap<String, String>,
-) -> Vec<String> {
+) -> crate::core::combo::smart::SmartOrdering {
     use crate::core::combo::smart;
 
     if models.len() <= 1 {
-        return models.to_vec();
+        return smart::SmartOrdering {
+            models: models.to_vec(),
+            active_sticky_model: None,
+        };
     }
     let cfg = combo_smart_config(snapshot, combo_name);
     let session_id = combo_session_id(headers, body);
@@ -10641,5 +10733,4 @@ async fn smart_order_combo_models(
         &cfg,
         choice.as_ref(),
     )
-    .models
 }

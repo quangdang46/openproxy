@@ -1216,10 +1216,79 @@ async fn test_grok_web_connection(
     // webIdentity.js `grok-web` probe parity: GET /api/auth/session with the
     // raw pasted credential as the Cookie header (upstream sends the blob
     // verbatim) and the wreq UA. `status == "authenticated"` proves the sso
-    // session; anything else is rejected/unknown. Upstream tries grokTlsFetch
-    // (wreq-js) first and falls back to plain fetch — Rust has no wreq, so the
-    // reqwest transport IS the fallback path.
+    // session; anything else is rejected/unknown.
+    //
+    // Upstream tries grokTlsFetch (wreq-js chrome_146 session) FIRST and only
+    // falls back to plain fetch when the TLS client is unavailable
+    // (webIdentity.js:131-135). Rust ports that order: wreq impersonation →
+    // reqwest fallback, but only on transport error — an HTTP response
+    // (including a Cloudflare challenge) is a definitive answer either way.
     let raw_credential = connection.api_key.clone().unwrap_or_default();
+    let cookie_value = crate::core::utils::web_cookie::strip_cookie_input_prefix(&raw_credential);
+    let user_agent = crate::core::executor::GROK_WEB_USER_AGENT.to_string();
+
+    let mut tls_headers = HeaderMap::new();
+    for (name, value) in [
+        (axum::http::header::ACCEPT, "application/json"),
+        (axum::http::header::COOKIE, cookie_value.as_str()),
+        (axum::http::header::ORIGIN, "https://grok.com"),
+        (axum::http::header::REFERER, "https://grok.com/"),
+        (axum::http::header::USER_AGENT, user_agent.as_str()),
+    ] {
+        if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+            tls_headers.insert(name, v);
+        }
+    }
+    let tls_proxy = if effective_proxy.connection_proxy_enabled
+        && !effective_proxy.connection_proxy_url.is_empty()
+    {
+        Some(crate::core::proxy::ProxyTarget {
+            url: effective_proxy.connection_proxy_url.clone(),
+            no_proxy: effective_proxy.connection_no_proxy.clone(),
+            strict_proxy: false,
+            pool_id: None,
+            label: None,
+            rtt_ms: None,
+        })
+    } else {
+        None
+    };
+    if let Ok(resp) = crate::core::executor::grok_tls::request(
+        Method::GET,
+        "https://grok.com/api/auth/session",
+        tls_headers,
+        None,
+        DEFAULT_TIMEOUT,
+        tls_proxy.as_ref(),
+    )
+    .await
+    {
+        let code = resp.status;
+        if code == 401 || code == 403 {
+            return invalid("sso cookie is invalid or expired");
+        }
+        if !(200..300).contains(&code) {
+            return invalid(&format!("Grok returned HTTP {code}"));
+        }
+        return match serde_json::from_str::<Value>(&resp.text()) {
+            Ok(payload)
+                if payload.get("status").and_then(Value::as_str) == Some("authenticated") =>
+            {
+                ConnectionTestResult {
+                    valid: true,
+                    error: None,
+                    refreshed: false,
+                    new_tokens: None,
+                    soft_error: None,
+                }
+            }
+            Ok(_) => invalid("Grok session is not signed in"),
+            Err(error) => invalid(&error.to_string()),
+        };
+    }
+    // wreq transport failed — fall back to the reqwest path (upstream's
+    // plain-fetch fallback when the TLS client is unavailable).
+
     let request = PreparedRequest {
         method: Method::GET,
         url: "https://grok.com/api/auth/session".to_string(),

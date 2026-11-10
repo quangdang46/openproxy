@@ -26,12 +26,41 @@ export interface ComboHealthEntry {
   remainingSeconds: number;
 }
 
+/**
+ * Aggregated capability envelope emitted by `GET /api/combos` per combo
+ * (9router `aggregateComboCapabilities`, commit 5c217d3; serialized by Rust
+ * `capabilities_json`). Union fields are `any` across seats, `tools` is
+ * `all`, `contextWindow` is min and `maxOutput` is max.
+ */
+export interface ComboCapabilities {
+  vision?: boolean;
+  pdf?: boolean;
+  audioInput?: boolean;
+  videoInput?: boolean;
+  imageOutput?: boolean;
+  audioOutput?: boolean;
+  search?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
+  thinkingFormat?: string | null;
+  thinkingCanDisable?: boolean | null;
+  thinkingEffortSupported?: boolean;
+  thinkingOffType?: string | null;
+  forcedToolChoice?: boolean;
+  thinkingRange?: { min?: number | null; max?: number | null } | null;
+  contextWindow?: number;
+  maxOutput?: number;
+}
+
 export interface Combo {
   id: string;
   name: string;
   models: string[];
   disabledModels?: string[];
   kind?: string;
+  /** Server-computed aggregate capability envelope (absent when the combo
+   * has no resolvable members). */
+  capabilities?: ComboCapabilities;
 }
 
 export interface ComboFormProvider {

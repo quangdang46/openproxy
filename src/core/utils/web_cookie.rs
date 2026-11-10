@@ -97,7 +97,7 @@ pub fn cookie_jar(raw: &str) -> HashMap<String, String> {
     let mut jar = HashMap::new();
     for part in raw.split(';') {
         if let Some(eq) = part.find('=') {
-            if eq <= 0 {
+            if eq == 0 {
                 continue;
             }
             let name = part[..eq].trim();

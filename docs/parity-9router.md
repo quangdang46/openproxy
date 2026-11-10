@@ -156,12 +156,19 @@ chatHttp / imageGenHttp; `grok-web` chat + media); Turnstile enforcement
 returns an explicit upstream-style error. Revisit only if a maintained Rust
 stealth-browser crate emerges.
 
-Related gap: `grok-web` upstream routes through wreq-js `chrome_146` TLS
-impersonation (Cloudflare Enterprise rejects Node's TLS fingerprint). Rust
-has no wreq equivalent and only an unstable RC (`wreq@6.0.0-rc.31`) exists —
-requests go out on reqwest/rustls with the full header/cookie fingerprint
-set kept in lockstep; Cloudflare challenges surface the upstream-style
-re-copy-cookie error.
+Related gap — **resolved**: `grok-web` upstream routes through wreq-js
+`chrome_146`/`macos` TLS impersonation (Cloudflare Enterprise rejects
+non-browser TLS fingerprints). Rust now ports this with the **stable**
+`wreq 0.16` + `wreq-util 0.2` crates (`src/core/executor/grok_tls.rs`,
+`Profile::Chrome146` + `Platform::MacOS` — the same profile/os pair as
+`createSession({ browser: "chrome_146", os: "macos" })`). Chat turns, media
+turns, `assets.grok.com` downloads, and the `/api/auth/session` connection
+probe all go through the impersonated client (cached per proxy target);
+upstream's TLS-first → plain-fetch fallback order is preserved in
+`provider_connection_test.rs`. Note: `wreq` pulls in `btls-sys` (BoringSSL),
+whose build script needs `libclang` + `cmake` at compile time — CI images
+must provide them. The full chrome_146 header/cookie fingerprint set is
+kept in lockstep regardless.
 
 ## Transport hardening (9router v0.5.116, `fix(transport): survive DPI-shaped networks`)
 

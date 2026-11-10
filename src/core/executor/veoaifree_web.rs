@@ -102,6 +102,41 @@ fn map_aspect_ratio(size: Option<&str>, prefix: &str) -> String {
     }
 }
 
+/// Upstream `/^https?:\/\//i` — the part must be an http(s) URL, not merely
+/// start with the letters "http".
+fn is_http_url(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Faithful port of upstream `isPrivateAddress` (veoaifree-web.js:22-34):
+/// IPv4 blocks 0.x, 10.x, 127.x, ≥224, 172.16–31, 192.168, 169.254;
+/// IPv6 blocks ::1, fc00::/7 (fc/fd) and fe80::/10 (fe80–febf). IPv4-mapped
+/// IPv6 is unwrapped first, like upstream's `::ffff:` strip.
+fn is_private_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [o1, o2, _, _] = v4.octets();
+            o1 == 0
+                || o1 == 10
+                || o1 == 127
+                || o1 >= 224
+                || (o1 == 172 && (16..=31).contains(&o2))
+                || (o1 == 192 && o2 == 168)
+                || (o1 == 169 && o2 == 254)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_private_address(IpAddr::V4(mapped));
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback() // ::1
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7  (fc…/fd…)
+                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 (fe80–febf)
+        }
+    }
+}
+
 /// SSRF guard — upstream `assertPublicHost`: HTTPS only, literal private IPs
 /// and hostnames resolving to private/loopback/link-local addresses are
 /// rejected. Redirects are followed manually and each hop is re-checked.
@@ -110,12 +145,8 @@ async fn assert_public_host(hostname: &str) -> Result<(), VeoError> {
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(hostname);
-    let blocked = |addr: IpAddr| -> bool {
-        // is_private_ip takes &str — covers v4 ranges, loopback, ULA, link-local.
-        crate::core::dns::is_private_ip(&addr.to_string())
-    };
     if let Ok(ip) = bare.parse::<IpAddr>() {
-        if blocked(ip) {
+        if is_private_address(ip) {
             return Err(VeoError::new(400, "artifact host is a blocked address"));
         }
         return Ok(());
@@ -132,7 +163,7 @@ async fn assert_public_host(hostname: &str) -> Result<(), VeoError> {
         return Err(VeoError::new(400, "artifact host could not be resolved"));
     }
     for addr in addrs {
-        if blocked(addr) {
+        if is_private_address(addr) {
             return Err(VeoError::new(
                 400,
                 "artifact host resolves to a blocked address",
@@ -223,22 +254,7 @@ impl VeoAiFreeWebExecutor {
             .text()
             .await
             .map_err(|e| VeoError::new(502, e.to_string()))?;
-        let Some(pos) = html.find(NONCE_RE) else {
-            return Err(VeoError::new(
-                502,
-                "failed to extract CSRF nonce from veoaifree.com (site layout changed or rate limited)",
-            ));
-        };
-        let rest = &html[pos + NONCE_RE.len()..];
-        let end = rest.find('"').unwrap_or(0);
-        let nonce = &rest[..end];
-        if nonce.is_empty() || !nonce.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(VeoError::new(
-                502,
-                "failed to extract CSRF nonce from veoaifree.com (site layout changed or rate limited)",
-            ));
-        }
-        Ok(nonce.to_string())
+        extract_nonce(&html)
     }
 
     async fn post_ajax(
@@ -265,7 +281,6 @@ impl VeoAiFreeWebExecutor {
                     content_type: Some("application/x-www-form-urlencoded".into()),
                     origin: Some(BASE_URL.into()),
                     body: Some(body),
-                    ..Default::default()
                 },
             )
             .await?;
@@ -446,7 +461,7 @@ impl VeoAiFreeWebExecutor {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
                 .map(|part| {
-                    if part.to_lowercase().starts_with("http") {
+                    if is_http_url(part) {
                         UcMediaAsset {
                             b64: String::new(),
                             mime: "image/png".into(),
@@ -513,7 +528,7 @@ impl VeoAiFreeWebExecutor {
             let url = poll_result
                 .split([',', '\n'])
                 .map(str::trim)
-                .find(|part| part.to_lowercase().starts_with("http"));
+                .find(|part| is_http_url(part));
             let Some(url) = url else { continue };
             let dl_client = self.client_no_redirect(proxy)?;
             let buffer = self
@@ -551,6 +566,24 @@ impl Default for RequestInit {
     }
 }
 
+/// Extract the WP CSRF nonce. Upstream regex `/nonce":"([a-f0-9]+)"/`
+/// scans every occurrence — a decoy `nonce":"` with a non-hex value does
+/// not end the search.
+fn extract_nonce(html: &str) -> Result<String, VeoError> {
+    for (pos, _) in html.match_indices(NONCE_RE) {
+        let rest = &html[pos + NONCE_RE.len()..];
+        let end = rest.find('"').unwrap_or(0);
+        let candidate = &rest[..end];
+        if !candidate.is_empty() && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err(VeoError::new(
+        502,
+        "failed to extract CSRF nonce from veoaifree.com (site layout changed or rate limited)",
+    ))
+}
+
 fn form_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -562,4 +595,109 @@ fn form_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn aspect_ratio_mapping_matches_upstream() {
+        assert_eq!(
+            map_aspect_ratio(Some("9:16"), "VIDEO_ASPECT_RATIO"),
+            "VIDEO_ASPECT_RATIO_PORTRAIT"
+        );
+        assert_eq!(
+            map_aspect_ratio(Some("portrait"), "IMAGE_ASPECT_RATIO"),
+            "IMAGE_ASPECT_RATIO_PORTRAIT"
+        );
+        assert_eq!(
+            map_aspect_ratio(Some("1:1"), "VIDEO_ASPECT_RATIO"),
+            "VIDEO_ASPECT_RATIO_SQUARE"
+        );
+        assert_eq!(
+            map_aspect_ratio(Some("square"), "IMAGE_ASPECT_RATIO"),
+            "IMAGE_ASPECT_RATIO_SQUARE"
+        );
+        // Default is landscape (16:9).
+        assert_eq!(
+            map_aspect_ratio(None, "VIDEO_ASPECT_RATIO"),
+            "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        );
+        assert_eq!(
+            map_aspect_ratio(Some("16:9"), "IMAGE_ASPECT_RATIO"),
+            "IMAGE_ASPECT_RATIO_LANDSCAPE"
+        );
+    }
+
+    #[test]
+    fn http_url_check_requires_scheme() {
+        assert!(is_http_url("https://cdn.example.com/v.mp4"));
+        assert!(is_http_url("HTTP://example.com/x.png"));
+        assert!(!is_http_url("httpfoo"));
+        assert!(!is_http_url("httpsx://example.com"));
+        assert!(!is_http_url("ftp://example.com/f"));
+    }
+
+    #[test]
+    fn nonce_extraction_skips_decoys() {
+        let html = r#"<html>nonce":"zzz-not-hex" data-x="1" nonce":"a1b2c3d4"</html>"#;
+        assert_eq!(extract_nonce(html).unwrap(), "a1b2c3d4");
+        assert!(extract_nonce("<html>no nonce here</html>").is_err());
+        assert!(extract_nonce(r#"nonce":"""#).is_err());
+    }
+
+    #[test]
+    fn private_address_blocks_upstream_ranges() {
+        let v4 = |a: u8, b: u8| IpAddr::V4(Ipv4Addr::new(a, b, 1, 1));
+        for ip in [
+            v4(0, 0),
+            v4(10, 0),
+            v4(127, 0),
+            v4(169, 254),
+            v4(172, 16),
+            v4(172, 31),
+            v4(192, 168),
+            v4(224, 0),
+            v4(255, 255),
+        ] {
+            assert!(is_private_address(ip), "{ip} should be blocked");
+        }
+        for ip in [
+            v4(8, 8),
+            v4(172, 15),
+            v4(172, 32),
+            v4(192, 167),
+            v4(169, 253),
+        ] {
+            assert!(!is_private_address(ip), "{ip} should be allowed");
+        }
+
+        let v6 = |s: &str| IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+        for ip in [
+            v6("::1"),
+            v6("fc00::1"),
+            v6("fd12::1"),
+            v6("fe80::1"),
+            v6("febf::1"),
+            // IPv4-mapped private/loopback.
+            v6("::ffff:127.0.0.1"),
+            v6("::ffff:10.0.0.1"),
+        ] {
+            assert!(is_private_address(ip), "{ip} should be blocked");
+        }
+        for ip in [v6("2606:4700::1"), v6("fec0::1")] {
+            // fec0:: is site-local (deprecated) — upstream does NOT block it.
+            assert!(!is_private_address(ip), "{ip} should be allowed");
+        }
+    }
+
+    #[test]
+    fn form_encode_percent_encodes_like_urlencoded() {
+        assert_eq!(form_encode("hello world"), "hello%20world");
+        assert_eq!(form_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(form_encode("prompt!"), "prompt%21");
+        assert_eq!(form_encode("abc-._~"), "abc-._~");
+    }
 }

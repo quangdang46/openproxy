@@ -229,27 +229,37 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
             ("gpt-5.6-luna-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
             ("gpt-5.6-luna-thinking-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 272000, "maxOutput": 128000 })),
         ]));
+        // 9router commit 63de82b (2026-09-30 server config): glm-5v-turbo /
+        // kimi-k2.7 / kimi-k2.6 dropped from the published list, kimi-k2.8-preview
+        // added; maxOutput/contextWindow re-synced from the server payload.
+        // glm-5.0 / glm-4.7 / kimi-k2.5 / hy3-preview / deepseek-v4-flash /
+        // deepseek-v3-2-volc keep capability rows upstream even though they are
+        // no longer advertised (the endpoint still answers them).
         table.insert("codebuddy-cn", HashMap::from([
             ("glm-5.2", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
-            ("glm-5.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
+            ("glm-5.1", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
             ("glm-5.0", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 48000 })),
-            ("glm-5.0-turbo", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
-            ("glm-5v-turbo", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 38000 })),
             ("glm-4.7", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 48000 })),
-            ("minimax-m3", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 512000, "maxOutput": 48000 })),
-            ("minimax-m2.7", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 48000 })),
-            ("kimi-k2.7", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 256000, "maxOutput": 32000 })),
-            ("kimi-k2.6", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 256000, "maxOutput": 32000 })),
+            ("minimax-m3", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 512000, "maxOutput": 524288 })),
             ("kimi-k2.5", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 164000, "maxOutput": 32000 })),
             ("hy3-preview", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 192000, "maxOutput": 64000 })),
-            ("deepseek-v4-pro", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 50000 })),
             ("deepseek-v4-flash", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 50000 })),
             ("deepseek-v3-2-volc", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 96000, "maxOutput": 32000 })),
             // GLM-5.3 line on the CN gateway: openai reasoning_effort shape and
             // thinking CAN be disabled here (unlike z.ai's own lines) —
             // upstream PROVIDER_CAPABILITIES["codebuddy-cn"].
+            ("hy3", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 192000, "maxOutput": 64000 })),
+            ("hy4-preview", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 64000 })),
             ("glm-5.3", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
             ("glm-5.3-flash", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 131072 })),
+            ("kimi-k3-1", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": false, "contextWindow": 1000000, "maxOutput": 1048576 })),
+            // contextWindow is the server's contextWindow.defaultLength
+            // (300000), NOT maxInputTokens — k2.8 publishes supportedLengths
+            // [300000, 1000000] and the gateway only gives 1M when the request
+            // opts in (upstream comment, capabilities.js).
+            ("kimi-k2.8-preview", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 300000, "maxOutput": 131072 })),
+            ("deepseek-v4-pro", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 393216 })),
+            ("deepseek-v4.1-flash", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "thinkingCanDisable": true, "contextWindow": 1000000, "maxOutput": 393216 })),
         ]));
         table.insert("poolside", HashMap::from([
             ("laguna-s-2.1", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 32000 })),

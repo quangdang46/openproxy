@@ -163,6 +163,10 @@ fn kind_to_type(kind: &str) -> &'static str {
         "search" | "websearch" => "search",
         "fetch" | "webfetch" => "fetch",
         "video" => "video",
+        // System One (Jev) decision models keep their kind so they stay out
+        // of the LLM `/v1/models` listing (`type` "chat"/"llm" only) and the
+        // `kind` survives for the /v1/systemone ping dispatch.
+        "systemone" => "systemone",
         _ => "chat",
     }
 }
@@ -665,6 +669,16 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn kind_to_type_preserves_systemone() {
+        // System One (Jev) decision models must not degrade to "chat" —
+        // the kind drives the /v1/systemone ping dispatch and keeps them
+        // out of the LLM `/v1/models` listing.
+        assert_eq!(kind_to_type("systemone"), "systemone");
+        assert_eq!(kind_to_type("llm"), "llm");
+        assert_eq!(kind_to_type("image"), "image");
     }
 
     #[test]
