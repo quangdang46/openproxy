@@ -136,6 +136,23 @@ pub fn extract_cookie_value(raw: &str, cookie_name: &str) -> String {
     trimmed
 }
 
+/// Port of upstream's `(?:^|;\s*)name=` presence test on the raw input.
+fn cookie_name_present(raw: &str, name: &str) -> bool {
+    let needle = format!("{name}=");
+    if raw.starts_with(&needle) {
+        return true;
+    }
+    let mut idx = 0;
+    while let Some(pos) = raw[idx..].find(';') {
+        let after = raw[idx + pos + 1..].trim_start();
+        if after.starts_with(&needle) {
+            return true;
+        }
+        idx += pos + 1;
+    }
+    false
+}
+
 /// `buildGrokCookieHeader` (webCookieAuth.js): always emits `sso=<v>`; forwards
 /// the paired `sso-rw`, `cf_clearance` and `__cf_bm` cookies when the pasted
 /// blob carries them — Grok's anti-bot rejects `sso` without `sso-rw`, and
@@ -147,6 +164,11 @@ pub fn build_grok_cookie_header(raw: &str) -> String {
     }
     let mut parts = vec![format!("sso={sso}")];
     for name in ["sso-rw", "cf_clearance", "__cf_bm"] {
+        // Upstream guards on `(?:^|;\s*)name=` in the raw input so a bare
+        // `sso` blob does not emit the same value under every cookie name.
+        if !cookie_name_present(raw, name) {
+            continue;
+        }
         let value = extract_cookie_value(raw, name);
         if !value.is_empty() {
             parts.push(format!("{name}={value}"));
