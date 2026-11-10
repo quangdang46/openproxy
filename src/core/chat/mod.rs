@@ -344,12 +344,20 @@ fn resolve_model_metadata_with_client(
     {
         return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
     }
-    // 9router `opencodeFamilyFormats` (helpers.js:56): on opencode-zen the
-    // grok/gpt family prefix also pins /responses for ids the curated
-    // catalog hasn't registered (modelsFetcher / passthrough). Scoped to
-    // zen — opencode-go keeps its own narrower table above and `opencode`
-    // owns the free lane.
-    if matches!(provider, "opencode-zen" | "ocz") {
+    // 9router `opencodeFamilyFormats` (helpers.js:56 +
+    // providerModels.js `getModelTargetFormat`): the family fallback
+    // applies to EVERY OpenCode alias (oc/opencode/ocg/opencode-go/
+    // ocz/opencode-zen) for ids the curated catalog hasn't registered —
+    // modelsFetcher/passthrough models keep their endpoint lane. Only the
+    // grok/gpt/muse-spark family carries a targetFormat
+    // (openai-responses); muse-spark is handled above, so here the grok/gpt
+    // prefix pins /responses. This also covers the opencode-go registry's
+    // responses-only ids (grok-4.5/4.6/4.7, gpt-5.6-luna, gpt-6-luna,
+    // muse-spark contributors) and unknown fetched grok/gpt ids.
+    if matches!(
+        provider,
+        "opencode" | "opencode-go" | "oc" | "ocg" | "opencode-zen" | "ocz"
+    ) {
         let base = model
             .trim()
             .rsplit('/')
@@ -359,14 +367,6 @@ fn resolve_model_metadata_with_client(
         if base.starts_with("grok") || base.starts_with("gpt") {
             return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
         }
-    }
-    // 9router opencode-go.js registry: grok-4.6 + gpt-5.6-luna are
-    // responses-only (`targetFormat: openai-responses`,
-    // `supportedFormats: [openai-responses]`) — route them to
-    // /zen/go/v1/responses like Muse Spark. Scoped to opencode-go only
-    // (registry entry lives on that provider); opencode/oc keep Chat.
-    if matches!(provider, "opencode-go" | "ocg") && is_opencode_go_responses_only_model(model) {
-        return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
     }
     (None, model.to_string(), Vec::new())
 }
@@ -399,35 +399,12 @@ fn is_muse_spark_model(model_id: &str) -> bool {
     after_spark.is_empty() || after_spark.starts_with(['-', '_', ':', '.', ' ', '\t'])
 }
 
-/// Responses-only models on opencode-go (9router registry
-/// `open-sse/providers/registry/opencode-go.js`, v0.5.116): grok-4.5/4.6/4.7,
-/// gpt-5.6-luna, gpt-6-luna and the muse-spark contributor ids carry
-/// `targetFormat: openai-responses` with no Chat transport.
-fn is_opencode_go_responses_only_model(model_id: &str) -> bool {
-    let mut clean = model_id.trim();
-    if let Some(open) = clean.rfind('(') {
-        if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
-            clean = clean[..open].trim_end();
-        }
-    }
-    let base = clean.rsplit('/').next().unwrap_or(clean);
-    let lower = base.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "grok-4.5"
-            | "grok-4.6"
-            | "grok-4.7"
-            | "gpt-5.6-luna"
-            | "gpt-6-luna"
-            | "muse-spark-1.2-contributor"
-            | "muse-spark-1.3-contributor"
-    ) || is_muse_spark_model(model_id)
-}
-
 /// Per-model endpoint support on opencode-go (9router registry opencode-go.js
-/// `supportedFormats`, following https://opencode.ai/docs/go/). `None` means
-/// the model is not in the static table — keep the upstream default of using
-/// the transport (JS: `!modelSupportedFormats` → use transport).
+/// `supportedFormats`, following https://opencode.ai/docs/go/, plus the
+/// `opencodeFamilyFormats` fallback and `[openai]` default from
+/// providerModels.js `getModelSupportedFormats`). `None` would mean "keep
+/// the upstream default of using the transport" — unreachable today since
+/// every id resolves to a lane, but kept for parity with the JS shape.
 fn opencode_go_supported_formats(model_id: &str) -> Option<&'static [Format]> {
     let mut clean = model_id.trim();
     if let Some(open) = clean.rfind('(') {
@@ -1232,28 +1209,41 @@ mod tests {
     #[test]
     fn opencode_go_responses_only_models_route_to_responses() {
         use crate::core::translator::registry::Format;
+        // v0.5.116 registry: grok-4.5/4.6/4.7, gpt-5.6-luna, gpt-6-luna and
+        // the muse-spark contributor ids are responses-only — and the
+        // `opencodeFamilyFormats` fallback covers every grok/gpt id the
+        // curated catalog hasn't registered (modelsFetcher/passthrough).
         for id in [
+            "grok-4.5",
             "grok-4.6",
             "GROK-4.6",
+            "grok-4.7",
             "gpt-5.6-luna",
+            "gpt-6-luna",
             "ocg/grok-4.6",
             "grok-4.6(high)",
         ] {
-            assert!(is_opencode_go_responses_only_model(id), "{id} should match");
             let (t, _, _) = resolve_model_metadata("opencode-go", id);
             assert_eq!(t, Some(Format::OpenAiResponses), "{id} on opencode-go");
             let (t, _, _) = resolve_model_metadata("ocg", id);
             assert_eq!(t, Some(Format::OpenAiResponses), "{id} on ocg");
         }
-        // Scoped to opencode-go: opencode/oc keep Chat routing.
-        let (t, _, _) = resolve_model_metadata("opencode", "grok-4.6");
+        // The family fallback is NOT scoped to opencode-go: upstream
+        // `isOpenCodeAlias` covers oc/opencode too, so fetched/unknown
+        // grok/gpt ids pin /responses on the free lane as well.
+        for id in ["grok-4.6", "gpt-5.6-luna", "gpt-5.6-terra"] {
+            let (t, _, _) = resolve_model_metadata("opencode", id);
+            assert_eq!(t, Some(Format::OpenAiResponses), "{id} on opencode");
+            let (t, _, _) = resolve_model_metadata("oc", id);
+            assert_eq!(t, Some(Format::OpenAiResponses), "{id} on oc");
+        }
+        // Non-family models keep Chat routing (catalog hit or no target).
+        let (t, _, _) = resolve_model_metadata("opencode", "big-pickle");
         assert_eq!(t, None);
-        let (t, _, _) = resolve_model_metadata("oc", "gpt-5.6-luna");
+        let (t, _, _) = resolve_model_metadata("opencode-go", "kimi-k2.6");
         assert_eq!(t, None);
-        // Non-listed models unaffected.
-        assert!(!is_opencode_go_responses_only_model("grok-4.5"));
-        assert!(!is_opencode_go_responses_only_model("gpt-5.6-terra"));
-        assert!(!is_opencode_go_responses_only_model("big-pickle"));
+        let (t, _, _) = resolve_model_metadata("opencode-go", "some-future-model");
+        assert_eq!(t, None);
     }
 
     #[test]
@@ -1335,14 +1325,27 @@ mod tests {
     #[test]
     fn muse_spark_models_skip_chat_transport() {
         // Muse Spark models are responses-only: an OpenAI-wire client must NOT
-        // match the chat/completions transport (upstream supportedFormats guard).
+        // match the chat/completions transport (upstream supportedFormats
+        // guard). chatCore then falls back to the transport for the model's
+        // declared targetFormat (`modelTargetTransport`), i.e. the request is
+        // translated to Responses and POSTed to /v1/responses — never to
+        // /chat/completions (which would reject the `input` body).
         let body = json!({
             "model": "muse-spark-1.3",
             "messages": [{"role": "user", "content": "hi"}]
         });
         let plan = RequestPlan::new(None, &body, "muse", "muse-spark-1.3");
-        assert!(plan.transport_base_url.is_none());
+        assert_eq!(plan.source_format, Format::OpenAi);
         assert_eq!(plan.target_format, Format::OpenAiResponses);
+        assert_eq!(
+            plan.transport_base_url.as_deref(),
+            Some("https://api.meta.ai/v1/responses")
+        );
+        assert_ne!(
+            plan.transport_base_url.as_deref(),
+            Some("https://api.meta.ai/v1/chat/completions")
+        );
+        assert!(plan.needs_translation());
 
         // A Responses-wire client DOES match the responses transport.
         let body = json!({
@@ -1426,12 +1429,38 @@ mod tests {
             "OCG/Kimi-K2.6-free(high)",
             Format::OpenAi
         ));
-        // Undeclared models keep the upstream default (use the transport).
-        assert!(model_supports_source_format(
+        // Unknown ids fall back to the upstream `[openai]` default
+        // (providerModels.js `getModelSupportedFormats`: family regex miss
+        // → `[FORMATS.OPENAI]`) — the claude transport must NOT be used.
+        assert!(!model_supports_source_format(
             "opencode-go",
             "some-future-model",
             Format::Claude
         ));
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "some-future-model",
+            Format::OpenAi
+        ));
+        // Family-fallback ids (modelsFetcher/passthrough) keep their lane:
+        // grok/gpt → responses only; deepseek-v4-(pro|flash) → all legs.
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "gpt-9.9-future",
+            Format::OpenAiResponses
+        ));
+        assert!(!model_supports_source_format(
+            "opencode-go",
+            "gpt-9.9-future",
+            Format::OpenAi
+        ));
+        for fmt in [Format::OpenAi, Format::Claude, Format::OpenAiResponses] {
+            assert!(model_supports_source_format(
+                "opencode-go",
+                "deepseek-v4-flash-2026",
+                fmt
+            ));
+        }
         // Guard scoped to opencode-go/ocg: other providers always use transport.
         assert!(model_supports_source_format(
             "deepseek",
