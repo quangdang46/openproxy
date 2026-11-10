@@ -563,19 +563,13 @@ impl TranslationRegistry {
 
         // Target-format post-hooks (9router translator/index.js:124-128).
         // preserveCacheControl follows the provider quirk (alicode / alicode-intl
-        // / alims-intl carry quirks.preserveCacheControl:true). `qwen` is the
-        // deprecated alias of `alims-intl` and upstream's removed `qwen.js`
-        // carried the same quirk.
+        // / alims-intl carry quirks.preserveCacheControl:true).
         if target == Format::OpenAi || target == Format::OpenAiResponses || target == Format::Codex
         {
             let provider = credentials
                 .and_then(|c| c.get("provider").and_then(Value::as_str))
                 .unwrap_or("");
-            let preserve = matches!(
-                provider,
-                "alicode" | "alicode-intl" | "alims-intl" | "alitp-intl" | "qwen"
-            );
-            filter_to_openai_format(body, preserve);
+            filter_to_openai_format(body, provider_preserves_cache_control(provider));
         }
         if target == Format::Claude {
             let api_key = credentials.and_then(|c| {
@@ -899,6 +893,17 @@ pub fn strip_content_types(body: &mut Value, strip_list: &[&str]) {
     }
 }
 
+/// True when the provider carries the `preserveCacheControl` quirk
+/// (DashScope/alicode family — 9router `PROVIDERS[provider].quirks
+/// .preserveCacheControl`). `qwen` is the deprecated alias of `alims-intl`
+/// and upstream's removed `qwen.js` carried the same quirk.
+pub fn provider_preserves_cache_control(provider: &str) -> bool {
+    matches!(
+        provider,
+        "alicode" | "alicode-intl" | "alims-intl" | "alitp-intl" | "qwen"
+    )
+}
+
 /// Filter messages to OpenAI standard format.
 /// Mirrors filterToOpenAIFormat in open-sse/translator/formats/openai.js.
 pub fn filter_to_openai_format(body: &mut Value, preserve_cache_control: bool) {
@@ -1105,8 +1110,22 @@ pub fn filter_to_openai_format(body: &mut Value, preserve_cache_control: bool) {
 /// Normalize thinking config: remove `thinking` if last message is not user.
 /// Keeps `reasoning_effort` (OpenAI request-level — survives tool-result turns).
 /// Mirrors open-sse/services/provider.js:normalizeThinkingConfig.
+///
+/// 9router v0.5.116 #5171: an OpenAI `role:"tool"` result continues a user
+/// turn, so `thinking` is preserved on tool-result turns too.
 pub fn normalize_thinking_config(body: &mut Value) {
     if is_last_message_from_user(body) {
+        return;
+    }
+    // Upstream reads `body.messages` (not contents) for the tool-result check.
+    let last_is_tool_result = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|m| m.last())
+        .and_then(|m| m.get("role"))
+        .and_then(Value::as_str)
+        == Some("tool");
+    if last_is_tool_result {
         return;
     }
     if let Some(obj) = body.as_object_mut() {
@@ -1447,7 +1466,9 @@ mod parity_tests {
     }
 
     #[test]
-    fn normalize_thinking_strips_on_tool_turn() {
+    fn normalize_thinking_keeps_on_tool_turn() {
+        // 9router v0.5.116 #5171: a trailing role:"tool" result continues a
+        // user turn — thinking intent is preserved (was stripped before).
         let mut body = json!({
             "thinking": {"type": "enabled", "budget_tokens": 1000},
             "reasoning_effort": "high",
@@ -1458,7 +1479,7 @@ mod parity_tests {
             ]
         });
         normalize_thinking_config(&mut body);
-        assert!(body.get("thinking").is_none());
+        assert_eq!(body["thinking"]["type"], "enabled");
         // reasoning_effort survives
         assert_eq!(body["reasoning_effort"], "high");
     }
@@ -1851,5 +1872,34 @@ mod parity_tests {
         let out =
             global_registry().translate_response(Format::OpenAi, Format::OpenAi, chunk, &mut state);
         assert_eq!(out[0].as_bytes(), chunk.as_slice());
+    }
+
+    // --- 9router v0.5.116 cff5328b (#5171): thinking config survives
+    // OpenAI tool-result turns ------------------------------------------
+
+    #[test]
+    fn normalize_thinking_config_keeps_thinking_on_tool_result_turn() {
+        for thinking in [
+            serde_json::json!({"type": "enabled", "budget_tokens": 4096}),
+            serde_json::json!({"type": "adaptive"}),
+            serde_json::json!({"type": "disabled"}),
+        ] {
+            let mut body = serde_json::json!({
+                "messages": [{"role": "tool", "tool_call_id": "call_1", "content": "done"}],
+                "thinking": thinking,
+            });
+            normalize_thinking_config(&mut body);
+            assert_eq!(body["thinking"], thinking);
+        }
+    }
+
+    #[test]
+    fn normalize_thinking_config_still_drops_on_assistant_tail() {
+        let mut body = serde_json::json!({
+            "messages": [{"role": "assistant", "content": "ok"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+        });
+        normalize_thinking_config(&mut body);
+        assert!(body.get("thinking").is_none());
     }
 }

@@ -25,15 +25,17 @@ use super::provider::{
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 /// Replacement system prompt when a system message reveals a coding agent.
-/// 9router codebuddy-cn.js NEUTRAL_PROMPT — verbatim.
-const NEUTRAL_PROMPT: &str =
+/// 9router codebuddy-cn.js NEUTRAL_PROMPT — verbatim. Shared with
+/// codebuddy-intl (v0.5.116 #3ca04639 uses the same neutral prompt).
+pub(crate) const NEUTRAL_PROMPT: &str =
     "You are a helpful AI assistant that helps with software engineering tasks.";
 
 /// Patterns that identify a coding-agent system prompt. Ported verbatim from
 /// 9router codebuddy-cn.js AGENT_PATTERN (JS `/i` flag). `(?is)` adds
 /// case-insensitivity and multi-line `.` so alternates like `<agent-identity>`
-/// and `cc_entrypoint` match across newlines.
-static AGENT_PATTERN: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+/// and `cc_entrypoint` match across newlines. Shared with codebuddy-intl —
+/// upstream uses the identical pattern for the intl WAF.
+pub(crate) static AGENT_PATTERN: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
     Regex::new(
         r"(?is)you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>",
     )

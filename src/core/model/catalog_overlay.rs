@@ -502,8 +502,7 @@ pub fn build_delta(
             .and_then(|v| v.as_u64())
         {
             if output > 0
-                && (output as f64 - current.max_output as f64).abs()
-                    / current.max_output as f64
+                && (output as f64 - current.max_output as f64).abs() / current.max_output as f64
                     > LIMIT_TOLERANCE
             {
                 delta.max_output = output;
@@ -707,8 +706,10 @@ fn collect_hand_baseline() -> Vec<(
             .unwrap_or(entry.alias.as_str())
             .to_string();
         for model in &entry.models {
-            let caps =
-                crate::core::combo::capabilities::hand_capabilities_for_model(&provider_id, &model.id);
+            let caps = crate::core::combo::capabilities::hand_capabilities_for_model(
+                &provider_id,
+                &model.id,
+            );
             entries.push((
                 provider_id.clone(),
                 model.id.clone(),
@@ -766,7 +767,10 @@ mod tests {
         assert_eq!(base_id("plain-model"), "plain-model");
     }
 
-    fn baseline_entry(provider: &str, model: &str) -> (
+    fn baseline_entry(
+        provider: &str,
+        model: &str,
+    ) -> (
         String,
         String,
         Option<u64>,
@@ -816,7 +820,10 @@ mod tests {
             baseline_entry("d", "model-x"),
         ];
         let (models2, _) = build_delta(&catalog2, &baseline2);
-        assert!(models2["a:model-x"].vision, "a's own declaration wins for a");
+        assert!(
+            models2["a:model-x"].vision,
+            "a's own declaration wins for a"
+        );
         assert!(!models2.contains_key("b:model-x"), "b declares text only");
         assert!(!models2.contains_key("c:model-x"));
         assert!(!models2.contains_key("d:model-x"));

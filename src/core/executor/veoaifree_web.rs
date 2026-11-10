@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use base64::Engine as _;
-use reqwest::header::{HeaderMap, COOKIE, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{HeaderMap, CONTENT_TYPE, COOKIE, USER_AGENT};
 
 use crate::core::proxy::ProxyTarget;
 use crate::types::ProviderConnection;
@@ -42,10 +42,18 @@ pub struct VeoError {
 
 impl VeoError {
     fn new(status: u16, message: impl Into<String>) -> Self {
-        Self { status, retryable: false, message: message.into() }
+        Self {
+            status,
+            retryable: false,
+            message: message.into(),
+        }
     }
     fn retryable(message: impl Into<String>) -> Self {
-        Self { status: 502, retryable: true, message: message.into() }
+        Self {
+            status: 502,
+            retryable: true,
+            message: message.into(),
+        }
     }
 }
 
@@ -125,7 +133,10 @@ async fn assert_public_host(hostname: &str) -> Result<(), VeoError> {
     }
     for addr in addrs {
         if blocked(addr) {
-            return Err(VeoError::new(400, "artifact host resolves to a blocked address"));
+            return Err(VeoError::new(
+                400,
+                "artifact host resolves to a blocked address",
+            ));
         }
     }
     Ok(())
@@ -200,9 +211,18 @@ impl VeoAiFreeWebExecutor {
         Ok(res)
     }
 
-    async fn fetch_nonce(&self, client: &reqwest::Client, session: &mut Session) -> Result<String, VeoError> {
-        let res = self.session_fetch(client, session, BASE_URL, RequestInit::default()).await?;
-        let html = res.text().await.map_err(|e| VeoError::new(502, e.to_string()))?;
+    async fn fetch_nonce(
+        &self,
+        client: &reqwest::Client,
+        session: &mut Session,
+    ) -> Result<String, VeoError> {
+        let res = self
+            .session_fetch(client, session, BASE_URL, RequestInit::default())
+            .await?;
+        let html = res
+            .text()
+            .await
+            .map_err(|e| VeoError::new(502, e.to_string()))?;
         let Some(pos) = html.find(NONCE_RE) else {
             return Err(VeoError::new(
                 502,
@@ -249,7 +269,9 @@ impl VeoAiFreeWebExecutor {
                 },
             )
             .await?;
-        res.text().await.map_err(|e| VeoError::new(502, e.to_string()))
+        res.text()
+            .await
+            .map_err(|e| VeoError::new(502, e.to_string()))
     }
 
     /// `downloadArtifact` — manual redirects (≤3), per-hop HTTPS + public
@@ -282,7 +304,10 @@ impl VeoAiFreeWebExecutor {
             if !session.cookie_jar.is_empty() {
                 req = req.header(COOKIE, session.cookie_header());
             }
-            let res = req.send().await.map_err(|e| VeoError::new(502, e.to_string()))?;
+            let res = req
+                .send()
+                .await
+                .map_err(|e| VeoError::new(502, e.to_string()))?;
             session.merge_set_cookies(res.headers());
             let status = res.status().as_u16();
             if (300..400).contains(&status) {
@@ -290,7 +315,9 @@ impl VeoAiFreeWebExecutor {
                     .headers()
                     .get(reqwest::header::LOCATION)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| VeoError::new(502, "artifact redirect is missing a destination"))?;
+                    .ok_or_else(|| {
+                        VeoError::new(502, "artifact redirect is missing a destination")
+                    })?;
                 current = parsed
                     .join(location)
                     .map_err(|_| VeoError::new(502, "artifact redirect is missing a destination"))?
@@ -301,7 +328,10 @@ impl VeoAiFreeWebExecutor {
                 return Err(VeoError::retryable("artifact not available yet"));
             }
             if !(200..300).contains(&status) {
-                return Err(VeoError::new(status, format!("artifact download failed (HTTP {status})")));
+                return Err(VeoError::new(
+                    status,
+                    format!("artifact download failed (HTTP {status})"),
+                ));
             }
             let content_type = res
                 .headers()
@@ -370,13 +400,18 @@ impl VeoAiFreeWebExecutor {
         proxy: Option<&ProxyTarget>,
     ) -> Result<Vec<UcMediaAsset>, VeoError> {
         if kind != "video" && kind != "image" {
-            return Err(VeoError::new(400, "veoaifree-web supports image and video generation only"));
+            return Err(VeoError::new(
+                400,
+                "veoaifree-web supports image and video generation only",
+            ));
         }
         if prompt.trim().is_empty() {
             return Err(VeoError::new(400, "prompt is required"));
         }
         let client = self.client(proxy)?;
-        let mut session = Session { cookie_jar: BTreeMap::new() };
+        let mut session = Session {
+            cookie_jar: BTreeMap::new(),
+        };
         let nonce = self.fetch_nonce(&client, &mut session).await?;
 
         if kind == "image" {
@@ -388,19 +423,22 @@ impl VeoAiFreeWebExecutor {
                     &[
                         ("promptIMG", prompt.to_string()),
                         ("totalVariationsIMG", "1".to_string()),
-                        ("aspectRatioIMG", map_aspect_ratio(size, "IMAGE_ASPECT_RATIO")),
+                        (
+                            "aspectRatioIMG",
+                            map_aspect_ratio(size, "IMAGE_ASPECT_RATIO"),
+                        ),
                         ("actionType", "banan-image-generator".to_string()),
                     ],
                 )
                 .await?;
             let trimmed = result.trim();
-            if trimmed.is_empty()
-                || trimmed == "0"
-                || trimmed.to_lowercase().contains("error")
-            {
+            if trimmed.is_empty() || trimmed == "0" || trimmed.to_lowercase().contains("error") {
                 return Err(VeoError::new(
                     502,
-                    format!("veoaifree image generation failed: {}", trimmed.chars().take(120).collect::<String>()),
+                    format!(
+                        "veoaifree image generation failed: {}",
+                        trimmed.chars().take(120).collect::<String>()
+                    ),
                 ));
             }
             let assets = trimmed
@@ -409,7 +447,11 @@ impl VeoAiFreeWebExecutor {
                 .filter(|p| !p.is_empty())
                 .map(|part| {
                     if part.to_lowercase().starts_with("http") {
-                        UcMediaAsset { b64: String::new(), mime: "image/png".into(), url: Some(part.to_string()) }
+                        UcMediaAsset {
+                            b64: String::new(),
+                            mime: "image/png".into(),
+                            url: Some(part.to_string()),
+                        }
                     } else {
                         UcMediaAsset {
                             b64: part.to_string(),
@@ -437,13 +479,14 @@ impl VeoAiFreeWebExecutor {
             )
             .await?;
         let scene_data = gen_result.trim().to_string();
-        if scene_data.is_empty()
-            || scene_data == "0"
-            || scene_data.to_lowercase().contains("error")
+        if scene_data.is_empty() || scene_data == "0" || scene_data.to_lowercase().contains("error")
         {
             return Err(VeoError::new(
                 502,
-                format!("veoaifree video submit failed: {}", scene_data.chars().take(120).collect::<String>()),
+                format!(
+                    "veoaifree video submit failed: {}",
+                    scene_data.chars().take(120).collect::<String>()
+                ),
             ));
         }
 
@@ -476,10 +519,7 @@ impl VeoAiFreeWebExecutor {
             let buffer = self
                 .download_artifact_with_retry(&dl_client, &mut session, url)
                 .await?;
-            tracing::info!(
-                "VEOAI-FREE video ready after {} poll(s)",
-                poll + 1
-            );
+            tracing::info!("VEOAI-FREE video ready after {} poll(s)", poll + 1);
             return Ok(vec![UcMediaAsset {
                 b64: base64::engine::general_purpose::STANDARD.encode(buffer),
                 mime: "video/mp4".into(),

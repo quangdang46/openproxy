@@ -60,10 +60,7 @@ fn default_messages() -> BTreeMap<&'static str, &'static str> {
             "INVALID_REQUEST",
             "Desktop authentication request is invalid.",
         ),
-        (
-            "INTERNAL_ERROR",
-            "Desktop authentication request failed.",
-        ),
+        ("INTERNAL_ERROR", "Desktop authentication request failed."),
     ]
     .into_iter()
     .collect()
@@ -217,9 +214,7 @@ fn resolve_lease_endpoint(data_dir: &Path) -> Result<LeaseEndpoint, AuthLeaseErr
         return Ok(LeaseEndpoint {
             transport: LeaseTransport::Pipe,
             endpoint: format!("{WINDOWS_PIPE_PREFIX}{hex}"),
-            capability_file: PathBuf::from(&canonical)
-                .join("run")
-                .join(CAPABILITY_FILE),
+            capability_file: PathBuf::from(&canonical).join("run").join(CAPABILITY_FILE),
         });
     }
     if !data_dir.is_absolute() {
@@ -236,9 +231,7 @@ fn resolve_lease_endpoint(data_dir: &Path) -> Result<LeaseEndpoint, AuthLeaseErr
             .join(SOCKET_FILE)
             .to_string_lossy()
             .to_string(),
-        capability_file: PathBuf::from(&canonical)
-            .join("run")
-            .join(CAPABILITY_FILE),
+        capability_file: PathBuf::from(&canonical).join("run").join(CAPABILITY_FILE),
     })
 }
 
@@ -569,7 +562,10 @@ pub async fn request_lease(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        expires_at_ms: result.get("expiresAtMs").and_then(Value::as_i64).unwrap_or(0),
+        expires_at_ms: result
+            .get("expiresAtMs")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
         generation: result.get("generation").and_then(Value::as_u64),
     })
 }
@@ -647,12 +643,7 @@ pub async fn get_lease_token(
         }
     }
 
-    let token = request_lease(
-        &data_dir,
-        AUTH_LEASE_MAX_MIN_VALIDITY_MS,
-        LEASE_TIMEOUT_MS,
-    )
-    .await?;
+    let token = request_lease(&data_dir, AUTH_LEASE_MAX_MIN_VALIDITY_MS, LEASE_TIMEOUT_MS).await?;
     *manager.cached.lock().await = Some(token.clone());
     tracing::debug!(
         target: "openproxy::oauth",
@@ -699,7 +690,10 @@ mod tests {
     fn frame_codec_round_trip() {
         let value = json!({"version": 1, "method": "status"});
         let frame = encode_frame(&value).unwrap();
-        assert_eq!(u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize, frame.len() - 4);
+        assert_eq!(
+            u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize,
+            frame.len() - 4
+        );
         let mut decoder = FrameDecoder::default();
         let frames = decoder.push(&frame).unwrap();
         assert_eq!(frames.len(), 1);
@@ -786,7 +780,8 @@ mod tests {
         let err = assert_ok(&json!({"ok": false, "error": {"code": "AUTH_REQUIRED"}})).unwrap_err();
         assert_eq!(err.code, "AUTH_REQUIRED");
         assert_eq!(err.message, "Desktop authentication is required.");
-        let err = assert_ok(&json!({"ok": false, "error": {"code": "SOMETHING_ELSE"}})).unwrap_err();
+        let err =
+            assert_ok(&json!({"ok": false, "error": {"code": "SOMETHING_ELSE"}})).unwrap_err();
         assert_eq!(err.code, "INTERNAL_ERROR");
         let ok = assert_ok(&json!({"ok": true, "result": {"status": "ready"}})).unwrap();
         assert_eq!(ok["status"], "ready");

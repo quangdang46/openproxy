@@ -54,6 +54,33 @@ fn extract_text_content(content: &Value) -> String {
     String::new()
 }
 
+/// Concrete MIME for a remote image URL (9router v0.5.116 `7ba1d1ca`,
+/// `remoteImageMimeType` in `open-sse/translator/formats/gemini.js`).
+/// Gemini/Antigravity rejects the `image/*` wildcard
+/// (`Unsupported mime type: image/* in contents.file_data`), so infer from
+/// the URL path extension and fall back to `image/png` (`DEFAULT_IMAGE_MIME`).
+/// The value comes from a fixed set — a caller-supplied URL cannot inject
+/// anything into the emitted MIME string.
+fn remote_image_mime_type(url: &str) -> &'static str {
+    // Strip query/fragment, then take the path extension.
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else if path.ends_with(".gif") {
+        "image/gif"
+    } else if path.ends_with(".bmp") {
+        "image/bmp"
+    } else {
+        "image/png"
+    }
+}
+
 /// Convert OpenAI content parts to Gemini parts.
 fn convert_openai_content_to_parts(content: &Value) -> Vec<Value> {
     if let Some(s) = content.as_str() {
@@ -84,6 +111,16 @@ fn convert_openai_content_to_parts(content: &Value) -> Vec<Value> {
                                         }
                                     }));
                                 }
+                            } else if url.starts_with("http://") || url.starts_with("https://") {
+                                // Remote image: prefetch normally inlines it,
+                                // but when it cannot, emit fileData with a
+                                // concrete MIME — `image/*` is rejected.
+                                parts.push(serde_json::json!({
+                                    "fileData": {
+                                        "fileUri": url,
+                                        "mimeType": remote_image_mime_type(url)
+                                    }
+                                }));
                             }
                         }
                     }
@@ -440,10 +477,42 @@ fn flatten_type_arrays(obj: &mut Value) {
                     .iter()
                     .filter(|t| t.as_str() != Some("null"))
                     .collect();
+                // 9router 8db1f4ae: multiple non-null types pick the best fit —
+                // structural clues (properties → object, non-empty items with a
+                // type → array) then string > number > integer > boolean > first.
                 let new_type = if non_null.is_empty() {
                     Value::String("string".to_string())
-                } else {
+                } else if non_null.len() == 1 {
                     non_null[0].clone()
+                } else {
+                    let contains = |t: &str| non_null.iter().any(|v| v.as_str() == Some(t));
+                    let has_properties = map.get("properties").map(js_truthy).unwrap_or(false);
+                    let items_nonempty = map.get("items").is_some_and(|i| match i {
+                        Value::Object(o) => !o.is_empty(),
+                        Value::Array(a) => !a.is_empty(),
+                        _ => false,
+                    });
+                    let items_has_type = map
+                        .get("items")
+                        .and_then(|i| i.get("type"))
+                        .map(js_truthy)
+                        .unwrap_or(false);
+                    let picked = if has_properties && contains("object") {
+                        "object"
+                    } else if items_nonempty && items_has_type && contains("array") {
+                        "array"
+                    } else if contains("string") {
+                        "string"
+                    } else if contains("number") {
+                        "number"
+                    } else if contains("integer") {
+                        "integer"
+                    } else if contains("boolean") {
+                        "boolean"
+                    } else {
+                        non_null[0].as_str().unwrap_or("string")
+                    };
+                    Value::String(picked.to_string())
                 };
                 map.insert("type".to_string(), new_type);
             }
@@ -2010,5 +2079,66 @@ mod tests {
         assert_eq!(q["type"], "string");
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"].get("q").is_some());
+    }
+
+    // ---- mozza.10: remote images get a concrete MIME (never image/*) ----
+
+    #[test]
+    fn remote_image_url_emits_filedata_with_concrete_mime() {
+        let url = "https://files.example.com/reference/photo.jpg?token=abc";
+        let parts = convert_openai_content_to_parts(&serde_json::json!([
+            {"type": "image_url", "image_url": {"url": url}}
+        ]));
+        assert_eq!(
+            parts,
+            vec![serde_json::json!({
+                "fileData": {"fileUri": url, "mimeType": "image/jpeg"}
+            })]
+        );
+        // Unknown extension → DEFAULT_IMAGE_MIME fallback.
+        let parts = convert_openai_content_to_parts(&serde_json::json!([
+            {"type": "image_url", "image_url": {"url": "https://x.test/pic"}}
+        ]));
+        assert_eq!(parts[0]["fileData"]["mimeType"], "image/png");
+        // Data URIs still inline.
+        let parts = convert_openai_content_to_parts(&serde_json::json!([
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAB"}}
+        ]));
+        assert_eq!(parts[0]["inlineData"]["data"], "AAAB");
+    }
+
+    // ---- mozza.12: multi-type flatten picks the best fit ----
+
+    #[test]
+    fn flatten_type_arrays_prefers_structural_clues() {
+        let mut schema = serde_json::json!({
+            "type": ["null", "boolean", "object", "array", "number", "string"],
+            "properties": {"a": {"type": "string"}},
+            "items": {"type": "string"}
+        });
+        flatten_type_arrays(&mut schema);
+        // properties present + "object" in the union → object wins.
+        assert_eq!(schema["type"], "object");
+
+        let mut schema = serde_json::json!({
+            "type": ["boolean", "array", "number"],
+            "items": {"type": "string"}
+        });
+        flatten_type_arrays(&mut schema);
+        // non-empty items with type + "array" in union → array.
+        assert_eq!(schema["type"], "array");
+
+        let mut schema = serde_json::json!({"type": ["boolean", "number", "integer"]});
+        flatten_type_arrays(&mut schema);
+        // No structural clues: string > number > integer > boolean.
+        assert_eq!(schema["type"], "number");
+
+        let mut schema = serde_json::json!({"type": ["boolean", "integer"]});
+        flatten_type_arrays(&mut schema);
+        assert_eq!(schema["type"], "integer");
+
+        let mut schema = serde_json::json!({"type": ["null"]});
+        flatten_type_arrays(&mut schema);
+        assert_eq!(schema["type"], "string");
     }
 }

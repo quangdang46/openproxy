@@ -7,6 +7,41 @@ use serde_json::Value;
 const DEFAULT_MAX_TOKENS: u64 = 64000;
 const DEFAULT_MIN_TOKENS: u64 = 32000;
 
+/// Strip the `x-anthropic-billing-header:` line Claude Code prepends to the
+/// system prompt. Mirrors `stripAnthropicBillingHeader` in
+/// open-sse/translator/request/claude-to-openai.js.
+fn strip_anthropic_billing_header(text: &str) -> String {
+    // Remove a leading `x-anthropic-billing-header: ...` line (up to and
+    // including its newline). Case-insensitive like the JS /i flag.
+    let lower = text.to_ascii_lowercase();
+    const PREFIX: &str = "x-anthropic-billing-header:";
+    if lower.starts_with(PREFIX) {
+        if let Some(idx) = text[PREFIX.len()..].find('\n') {
+            return text[PREFIX.len() + idx + 1..].to_string();
+        }
+        // Header-only content: the whole string is the billing line.
+        return String::new();
+    }
+    text.to_string()
+}
+
+/// Collapse an OpenAI content-part array: a lone text part becomes a plain
+/// string, otherwise the array is returned as-is. Cache-aware targets retain
+/// marked blocks. Mirrors `collapseTextParts` in
+/// open-sse/translator/concerns/message.js.
+fn collapse_text_parts(parts: Vec<Value>, preserve_cache_control: bool) -> Value {
+    if parts.len() == 1
+        && parts[0].get("type").and_then(Value::as_str) == Some("text")
+        && !(preserve_cache_control && parts[0].get("cache_control").is_some())
+    {
+        return parts[0]
+            .get("text")
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+    }
+    Value::Array(parts)
+}
+
 /// Adjust max_tokens based on request context.
 /// Mirrors the logic in open-sse/translator/helpers/maxTokensHelper.js
 fn adjust_max_tokens(body: &serde_json::Map<String, Value>) -> Option<u64> {
@@ -111,7 +146,7 @@ fn fix_missing_tool_responses(messages: &mut Vec<Value>) {
 
 /// Convert a single Claude message to OpenAI format.
 /// Returns either a single message Value or an array of message Values.
-fn convert_claude_message(msg: &Value) -> Option<Value> {
+fn convert_claude_message(msg: &Value, preserve_cache_control: bool) -> Option<Value> {
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
     let converted_role = match role {
         "user" | "tool" => "user",
@@ -156,10 +191,19 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
             match block_type {
                 "text" => {
                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                        parts.push(serde_json::json!({
+                        let mut part = serde_json::json!({
                             "type": "text",
                             "text": text
-                        }));
+                        });
+                        // 9router #2069: cache-aware OpenAI targets (DashScope
+                        // family) keep explicit cache_control markers so the
+                        // prefix-cache boundary survives translation.
+                        if preserve_cache_control {
+                            if let Some(cc) = block.get("cache_control") {
+                                part["cache_control"] = cc.clone();
+                            }
+                        }
+                        parts.push(part);
                     }
                 }
                 "image" => {
@@ -260,19 +304,10 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
         // If has tool results, return array of tool messages
         if !tool_results.is_empty() {
             if !parts.is_empty() {
-                let text_content = if parts.len() == 1 {
-                    parts[0]
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                } else {
-                    serde_json::to_string(&parts).unwrap_or_default()
-                };
                 let mut result = tool_results;
                 result.push(serde_json::json!({
                     "role": "user",
-                    "content": text_content
+                    "content": collapse_text_parts(parts, preserve_cache_control)
                 }));
                 return Some(serde_json::json!(result));
             }
@@ -285,14 +320,7 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                 "role": "assistant"
             });
             if !parts.is_empty() {
-                let content = if parts.len() == 1
-                    && parts[0].get("text").and_then(|v| v.as_str()).is_some()
-                {
-                    Value::String(parts[0]["text"].as_str().unwrap_or("").to_string())
-                } else {
-                    Value::Array(parts)
-                };
-                result["content"] = content;
+                result["content"] = collapse_text_parts(parts, preserve_cache_control);
             }
             result["tool_calls"] = serde_json::json!(tool_calls);
             return Some(result);
@@ -300,15 +328,9 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
 
         // Return content
         if !parts.is_empty() {
-            let content =
-                if parts.len() == 1 && parts[0].get("text").and_then(|v| v.as_str()).is_some() {
-                    Value::String(parts[0]["text"].as_str().unwrap_or("").to_string())
-                } else {
-                    Value::Array(parts)
-                };
             return Some(serde_json::json!({
                 "role": converted_role,
-                "content": content
+                "content": collapse_text_parts(parts, preserve_cache_control)
             }));
         }
 
@@ -359,11 +381,19 @@ pub fn claude_to_openai_request(
     model: &str,
     body: &mut Value,
     stream: bool,
-    _credentials: Option<&Value>,
+    credentials: Option<&Value>,
 ) -> bool {
     let Some(body_obj) = body.as_object_mut() else {
         return false;
     };
+
+    // 9router #2069: `preserveCacheControl` translation option — true only
+    // for cache-aware OpenAI targets (DashScope/alicode family quirk). The
+    // Rust pipeline threads the provider through `credentials`, matching how
+    // `filter_to_openai_format` already derives the same flag.
+    let preserve_cache_control = credentials
+        .and_then(|c| c.get("provider").and_then(Value::as_str))
+        .is_some_and(crate::core::translator::registry::provider_preserves_cache_control);
 
     // Max tokens - call before we have mutable borrow
     let max_tokens = adjust_max_tokens(body_obj);
@@ -383,30 +413,97 @@ pub fn claude_to_openai_request(
         result["temperature"] = temp.clone();
     }
 
-    // System message - flatten to single string
+    // System message
     //
     // Supports all three Claude API formats:
     //   array:  [{"type": "text", "text": "..."}, ...]
     //   string: "system prompt text"
     //   object: {"type": "text", "text": "..."}
+    //
+    // 9router #2069: when the target preserves cache_control and the system
+    // array carries markers, keep the block boundaries as OpenAI content
+    // parts instead of flattening to a string. A billing-only block that is
+    // stripped transfers its marker to the preceding retained block so the
+    // prefix-cache boundary survives.
     if let Some(system) = body_obj.get("system") {
-        let system_content = if let Some(arr) = system.as_array() {
-            arr.iter()
-                .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else if let Some(obj) = system.as_object() {
-            obj.get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string()
-        } else if let Some(s) = system.as_str() {
-            s.to_string()
-        } else {
-            String::new()
-        };
+        let mut system_content: Value = Value::Null;
+        let mut have_system = false;
 
-        if !system_content.is_empty() {
+        if preserve_cache_control {
+            if let Some(arr) = system.as_array() {
+                if arr.iter().any(|s| s.get("cache_control").is_some()) {
+                    let mut parts: Vec<Value> = Vec::new();
+                    for block in arr {
+                        let text = strip_anthropic_billing_header(
+                            block.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                        );
+                        if !text.is_empty() {
+                            let mut part = serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            });
+                            if let Some(cc) = block.get("cache_control") {
+                                part["cache_control"] = cc.clone();
+                            }
+                            parts.push(part);
+                        } else if block.get("cache_control").is_some() && !parts.is_empty() {
+                            // Removing a billing-only block must not remove
+                            // its prefix cache boundary.
+                            if let Some(last) = parts.last_mut() {
+                                last["cache_control"] = block["cache_control"].clone();
+                            }
+                        }
+                    }
+                    if parts.iter().any(|p| p.get("cache_control").is_some()) {
+                        system_content = Value::Array(parts);
+                        have_system = true;
+                    } else {
+                        let joined = parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !joined.is_empty() {
+                            system_content = Value::String(joined);
+                            have_system = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !have_system {
+            system_content = if let Some(arr) = system.as_array() {
+                Value::String(
+                    arr.iter()
+                        .filter_map(|s| {
+                            s.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(strip_anthropic_billing_header)
+                        })
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            } else if let Some(obj) = system.as_object() {
+                Value::String(
+                    obj.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(strip_anthropic_billing_header)
+                        .unwrap_or_default(),
+                )
+            } else if let Some(s) = system.as_str() {
+                Value::String(strip_anthropic_billing_header(s))
+            } else {
+                Value::String(String::new())
+            };
+            have_system = system_content
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+        }
+
+        if have_system {
             result["messages"] = serde_json::json!([
                 {
                     "role": "system",
@@ -421,7 +518,7 @@ pub fn claude_to_openai_request(
         let mut converted_messages: Vec<Value> = Vec::new();
 
         for msg in messages {
-            if let Some(converted) = convert_claude_message(msg) {
+            if let Some(converted) = convert_claude_message(msg, preserve_cache_control) {
                 if let Some(arr) = converted.as_array() {
                     converted_messages.extend(arr.iter().cloned());
                 } else {
@@ -1095,5 +1192,162 @@ mod tests {
         // reasoning object is also forwarded verbatim.
         assert!(body.get("reasoning").is_some());
         assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    // --- 9router v0.5.116 a61b5a6f (#2069): Claude cache markers for
+    // DashScope targets -----------------------------------------------
+
+    fn creds(provider: &str) -> Value {
+        serde_json::json!({"provider": provider})
+    }
+
+    #[test]
+    fn dashscope_preserves_system_and_user_cache_markers() {
+        for provider in ["alicode", "alicode-intl", "alims-intl", "alitp-intl"] {
+            let mut body: Value = serde_json::from_str(
+                r#"{
+                "system": [{"type":"text","text":"x-anthropic-billing-header: transient\nStable instructions","cache_control":{"type":"ephemeral"}}],
+                "messages": [{"role":"user","content":[{"type":"text","text":"Stable question","cache_control":{"type":"ephemeral"}}]}],
+                "max_tokens": 1024
+            }"#,
+            )
+            .unwrap();
+            claude_to_openai_request("qwen3-coder-plus", &mut body, false, Some(&creds(provider)));
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(messages[0]["role"], "system", "{provider}");
+            // Billing header stripped; marker retained on the text part.
+            assert_eq!(
+                messages[0]["content"],
+                serde_json::json!([{"type":"text","text":"Stable instructions","cache_control":{"type":"ephemeral"}}]),
+                "{provider}"
+            );
+            assert_eq!(
+                messages[1]["content"],
+                serde_json::json!([{"type":"text","text":"Stable question","cache_control":{"type":"ephemeral"}}]),
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_dashscope_flattens_and_drops_markers() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "system": [{"type":"text","text":"one"},{"type":"text","text":"two","cache_control":{"type":"ephemeral"}}],
+            "messages": [{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request("gpt-4", &mut body, false, Some(&creds("groq")));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "one\ntwo");
+        assert_eq!(messages[1]["content"], "hi");
+    }
+
+    #[test]
+    fn dashscope_marked_text_survives_next_to_tool_calls() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "messages": [
+                {"role":"assistant","content":[
+                    {"type":"text","text":"Calling tool","cache_control":{"type":"ephemeral"}},
+                    {"type":"tool_use","id":"c1","name":"read","input":{}}
+                ]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"done"}]}
+            ]
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request(
+            "qwen3-coder-plus",
+            &mut body,
+            false,
+            Some(&creds("alicode")),
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::json!([{"type":"text","text":"Calling tool","cache_control":{"type":"ephemeral"}}])
+        );
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn dashscope_retains_system_block_boundaries_around_marker() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "system": [
+                {"type":"text","text":"prefix"},
+                {"type":"text","text":"cached","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"uncached tail"}
+            ],
+            "messages": [{"role":"user","content":"hi"}]
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request(
+            "qwen3-coder-plus",
+            &mut body,
+            false,
+            Some(&creds("alicode")),
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {"type":"text","text":"prefix"},
+                {"type":"text","text":"cached","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"uncached tail"}
+            ])
+        );
+    }
+
+    #[test]
+    fn dashscope_marker_survives_billing_only_block_removal() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "system": [
+                {"type":"text","text":"Stable prefix"},
+                {"type":"text","text":"x-anthropic-billing-header: transient","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"Uncached tail"}
+            ],
+            "messages": [{"role":"user","content":"hi"}]
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request(
+            "qwen3-coder-plus",
+            &mut body,
+            false,
+            Some(&creds("alicode")),
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {"type":"text","text":"Stable prefix","cache_control":{"type":"ephemeral"}},
+                {"type":"text","text":"Uncached tail"}
+            ])
+        );
+    }
+
+    #[test]
+    fn dashscope_unmarked_single_text_still_flattens() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "system": "instructions",
+            "messages": [{"role":"user","content":[{"type":"text","text":"hi"}]}]
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request(
+            "qwen3-coder-plus",
+            &mut body,
+            false,
+            Some(&creds("alicode")),
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "instructions");
+        assert_eq!(messages[1]["content"], "hi");
     }
 }

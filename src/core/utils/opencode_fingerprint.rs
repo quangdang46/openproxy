@@ -28,6 +28,19 @@ use serde_json::{json, Value};
 /// Names required by the upstream free-tier gate.
 pub const OPENCODE_FINGERPRINT_TOOLS: &[&str] = &["read", "shell"];
 
+/// A second, purely textual gate on the same route (9router v0.5.116
+/// `95dafae3`, #5319): a declared tool name containing "terminal"
+/// (case-insensitive substring) is answered 429 FreeUsageLimitError
+/// regardless of quota, IP, session or payload size. Only `tools[]` is
+/// inspected — history and system prompt are not — so the declaration
+/// travels under an alias and the caller's name is restored on the way
+/// back, like a fingerprint-name collision.
+const GATED_TOOL_ALIAS: &str = "run_command";
+
+fn is_gated_tool_name(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("terminal")
+}
+
 /// Verbatim from the OpenCode v2.0.26 CLI. Upstream compares description
 /// and parameters, so do not reword or reformat these.
 fn fingerprint_tool_definition(key: &str) -> (&'static str, Value) {
@@ -209,6 +222,20 @@ pub fn conceal_fingerprint_tool_names(tools: &mut Vec<Value>) -> BTreeMap<String
             continue;
         }
         let name = tool_name_of(&tool);
+        // Gated-name alias runs before the fingerprint-key lookup, matching
+        // upstream order (opencodeFingerprint.js concealFingerprintToolNames).
+        if is_gated_tool_name(&name) {
+            let mut alias = GATED_TOOL_ALIAS.to_string();
+            let mut i = 2;
+            while taken.contains(&alias) {
+                alias = format!("{GATED_TOOL_ALIAS}{i}");
+                i += 1;
+            }
+            taken.insert(alias.clone());
+            map.insert(alias.clone(), name);
+            out.push(with_tool_name(&tool, &alias));
+            continue;
+        }
         let Some(key) = fingerprint_tool_key(&name) else {
             out.push(tool);
             continue;
@@ -1040,6 +1067,46 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<env>"));
+    }
+
+    #[test]
+    fn gated_terminal_tool_name_is_aliased_and_restored() {
+        // 9router 95dafae3 (#5319): a declared tool name containing
+        // "terminal" is 429-rejected by the free tier; it travels as
+        // `run_command` and the caller's name is restored on the way back.
+        let tools = vec![
+            chat_tool("read_file"),
+            chat_tool("terminal"),
+            chat_tool("my_terminal_thing"),
+            chat_tool("terminals"),
+        ];
+        let mut v = tools;
+        let map = conceal_fingerprint_tool_names(&mut v);
+        let names: Vec<String> = v
+            .iter()
+            .map(|t| {
+                t["function"]["name"]
+                    .as_str()
+                    .or_else(|| t["name"].as_str())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(!names.iter().any(|n| n.to_lowercase().contains("terminal")));
+        assert!(names.contains(&"run_command".to_string()));
+        assert!(names.contains(&"run_command2".to_string()));
+        assert!(names.contains(&"run_command3".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+        assert_eq!(map.get("run_command").map(String::as_str), Some("terminal"));
+        // Response-side restore maps the alias back to the caller's name.
+        let restored = restore_tool_names(
+            &json!({"choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"run_command","arguments":"{}"}}]}}]}),
+            &map,
+        );
+        assert_eq!(
+            restored["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "terminal"
+        );
     }
 
     #[test]

@@ -46,7 +46,9 @@ pub fn extract_prompt_state(body: &Value, max_chars: usize) -> String {
                     || (msg.get("role").is_none() && msg.get("content").is_some());
                 if is_user {
                     let text = extract_text_from_content(
-                        msg.get("content").or_else(|| msg.get("text")).unwrap_or(&Value::Null),
+                        msg.get("content")
+                            .or_else(|| msg.get("text"))
+                            .unwrap_or(&Value::Null),
                     );
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
@@ -306,11 +308,8 @@ pub fn apply_smart_ordering(
     } else if let Some(result) = choice {
         // Turn 1 or per-turn: evaluate once for the initial pick.
         if models.iter().any(|m| m == &result.choice) {
-            let below = threshold > 0.0
-                && result
-                    .confidence
-                    .map(|c| c < threshold)
-                    .unwrap_or(false);
+            let below =
+                threshold > 0.0 && result.confidence.map(|c| c < threshold).unwrap_or(false);
             if below {
                 // Keep configured order.
             } else {
@@ -357,7 +356,10 @@ pub fn clear_sticky_combo_session(combo_name: &str, session_id: Option<&str>) {
 /// Test hook — upstream `resetStickyComboStore`.
 #[cfg(test)]
 pub fn reset_sticky_combo_store() {
-    STICKY_STORE.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    STICKY_STORE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 // ── Sticky session store ───────────────────────────────────────────────
@@ -448,7 +450,10 @@ mod tests {
                 {"role": "user", "content": [{"type": "text", "text": "second question"}]}
             ]
         });
-        assert_eq!(extract_prompt_state(&body, MAX_STATE_CHARS), "second question");
+        assert_eq!(
+            extract_prompt_state(&body, MAX_STATE_CHARS),
+            "second question"
+        );
     }
 
     #[test]
@@ -461,7 +466,10 @@ mod tests {
     #[test]
     fn extract_prompt_state_truncates() {
         let body = json!({"prompt": "x".repeat(3000)});
-        assert_eq!(extract_prompt_state(&body, MAX_STATE_CHARS).len(), MAX_STATE_CHARS);
+        assert_eq!(
+            extract_prompt_state(&body, MAX_STATE_CHARS).len(),
+            MAX_STATE_CHARS
+        );
     }
 
     #[test]
@@ -477,20 +485,23 @@ mod tests {
         assert_eq!(choice.choice, "provider-a/model-1");
         assert_eq!(choice.confidence, Some(0.91));
         assert_eq!(
-            choice.probabilities.as_ref().unwrap().get("provider-b/model-2"),
+            choice
+                .probabilities
+                .as_ref()
+                .unwrap()
+                .get("provider-b/model-2"),
             Some(&0.1)
         );
         assert!(parse_systemone_route_answer(&json!({"answers": {}})).is_none());
-        assert!(parse_systemone_route_answer(&json!({"answers": {"route": {"choice": "  "}}})).is_none());
+        assert!(
+            parse_systemone_route_answer(&json!({"answers": {"route": {"choice": "  "}}}))
+                .is_none()
+        );
     }
 
     #[test]
     fn order_models_by_choice_puts_choice_first_by_probability() {
-        let models = vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-        ];
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let choice = SmartChoice {
             choice: "c".to_string(),
             confidence: Some(0.9),
@@ -500,7 +511,10 @@ mod tests {
                     .collect(),
             ),
         };
-        assert_eq!(order_models_by_choice(&models, &choice), vec!["c", "b", "a"]);
+        assert_eq!(
+            order_models_by_choice(&models, &choice),
+            vec!["c", "b", "a"]
+        );
     }
 
     #[test]
@@ -513,7 +527,10 @@ mod tests {
             Some("m2".to_string())
         );
         // Model no longer in combo → cleared.
-        assert_eq!(get_sticky_combo_model("combo", "sess", &["m1".to_string()]), None);
+        assert_eq!(
+            get_sticky_combo_model("combo", "sess", &["m1".to_string()]),
+            None
+        );
         clear_sticky_combo_session("combo", Some("sess"));
         assert_eq!(get_sticky_combo_model("combo", "sess", &models), None);
     }

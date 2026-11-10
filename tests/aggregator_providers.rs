@@ -1,10 +1,12 @@
 //! Routing + catalog coverage for the OpenAI-compatible aggregators
 //! dahl / atria / agnes / bai (bead
-//! openproxy-9router-parity-v5104-sync-eidj.48).
+//! openproxy-9router-parity-v5104-sync-eidj.48) plus tokenharbor
+//! (openproxy-9router-parity-v5104-sync-eidj.45).
 //!
 //! Upstream: `open-sse/providers/registry/{dahl,atria,agnes,bai}.js`
 //! (commit 06112c1) — `inference.dahl.global`, `api.atria-asi.ai`,
-//! `apihub.agnes-ai.com`, `api.b.ai`, all serving `/v1/chat/completions`.
+//! `apihub.agnes-ai.com`, `api.b.ai`, all serving `/v1/chat/completions`;
+//! `registry/tokenharbor.js` (commit 737b1f4) — `tokenharbor.ai/v1`.
 
 use openproxy::core::executor::{provider_config_base_url, ClientPool, DefaultExecutor};
 use openproxy::core::model::{catalog::provider_catalog, parse_model, resolve_provider_alias};
@@ -106,4 +108,52 @@ fn seeded_model_lists_match_the_registry() {
     // bai ships no seed ids upstream — the live /v1/models is the source of
     // truth and passthroughModels accepts anything.
     assert!(catalog.models_for_alias("bai").is_some());
+}
+
+/// Token Harbor (bead openproxy-9router-parity-v5104-sync-eidj.45):
+/// `registry/tokenharbor.js` — OpenAI-compatible aggregator at
+/// `https://tokenharbor.ai/v1/chat/completions` with aliases `th`/`thh`.
+#[test]
+fn tokenharbor_routes_to_the_upstream_url() {
+    assert_eq!(
+        provider_config_base_url("tokenharbor").as_deref(),
+        Some("https://tokenharbor.ai/v1/chat/completions"),
+        "tokenharbor must route to its registry transport.baseUrl"
+    );
+    DefaultExecutor::new("tokenharbor", Arc::new(ClientPool::new()), None)
+        .expect("tokenharbor must construct a DefaultExecutor");
+    for alias in ["th", "thh"] {
+        assert_eq!(resolve_provider_alias(alias), "tokenharbor");
+        assert_eq!(
+            parse_model(&format!("{alias}/some-model"))
+                .provider
+                .as_deref(),
+            Some("tokenharbor"),
+            "{alias}/some-model must address tokenharbor"
+        );
+    }
+    let catalog = provider_catalog();
+    let provider = catalog
+        .provider_info("tokenharbor")
+        .expect("providers[] should contain tokenharbor");
+    assert_eq!(provider.alias, "tokenharbor");
+    assert!(provider.service_kinds.contains(&"llm".to_string()));
+    // Seed catalogue matches registry/tokenharbor.js `models:`.
+    let ids: Vec<&str> = catalog
+        .models_for_alias("tokenharbor")
+        .expect("tokenharbor models")
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "claude-opus-5.5",
+            "claude-sonnet-5",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "deepseek-v4.1-flash:free",
+            "grok-4.7"
+        ]
+    );
 }

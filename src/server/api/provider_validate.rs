@@ -500,7 +500,7 @@ async fn validate_provider(
         }
 
         "opencode-go" => {
-            validate_bearer(&client, "https://opencode.ai/zen/go/v1/models", &api_key).await
+            validate_bearer(&client, "https://opencode.ai/inference/go/v1/models", &api_key).await
         }
 
         p if is_openai_compatible(p) => {
@@ -934,7 +934,10 @@ async fn validate_chatgpt_web_session(
 /// mint a `__session` JWT. Legacy `__client` JWTs carry `sid`; current ones
 /// only `{id, rotating_token}`, so fall back to listing the client's
 /// sessions (same resolution the executor's `mintSession` performs).
-async fn validate_uc_web_session(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+async fn validate_uc_web_session(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> (bool, Option<String>) {
     use base64::Engine as _;
 
     // Parse the `__client` value out of the pasted Cookie header.
@@ -992,9 +995,7 @@ async fn validate_uc_web_session(client: &reqwest::Client, api_key: &str) -> (bo
                             .get("response")
                             .or_else(|| body.get("client"))
                             .unwrap_or(&body);
-                        let sessions = payload
-                            .get("sessions")
-                            .and_then(Value::as_array);
+                        let sessions = payload.get("sessions").and_then(Value::as_array);
                         sid = sessions.and_then(|list| {
                             list.iter()
                                 .find(|s| s.get("status").and_then(Value::as_str) == Some("active"))
@@ -1011,7 +1012,10 @@ async fn validate_uc_web_session(client: &reqwest::Client, api_key: &str) -> (bo
         }
     }
     let Some(sid) = sid.filter(|s| !s.is_empty()) else {
-        return (false, Some("Not signed in to uncensored.com — use Login via Browser".into()));
+        return (
+            false,
+            Some("Not signed in to uncensored.com — use Login via Browser".into()),
+        );
     };
 
     // Mint the session token — a valid credential yields a JWT.

@@ -488,6 +488,13 @@ pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> Respons
             "-m".to_string(),
             "headroom".to_string(),
             "proxy".to_string(),
+            // 9router v0.5.109 (08ef047): the compress proxy must never be
+            // reachable off-box — it carries request bodies. headroom-ai
+            // already defaults --host to 127.0.0.1 and refuses non-loopback
+            // binds without a proxy token; pass it explicitly so the intent
+            // survives a future default change.
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
         ];
@@ -673,6 +680,13 @@ pub async fn restart(State(state): State<AppState>, headers: HeaderMap) -> Respo
             "-m".to_string(),
             "headroom".to_string(),
             "proxy".to_string(),
+            // 9router v0.5.109 (08ef047): the compress proxy must never be
+            // reachable off-box — it carries request bodies. headroom-ai
+            // already defaults --host to 127.0.0.1 and refuses non-loopback
+            // binds without a proxy token; pass it explicitly so the intent
+            // survives a future default change.
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
         ];

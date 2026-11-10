@@ -186,6 +186,42 @@ pub fn resolve_thinking_native(
         _ => {}
     }
 
+    // 9router `resolveFormat` (thinkingUnified.js): the model capability
+    // `thinkingFormat` wins over the target-format default — this is what
+    // lets an `openai-compatible-*` node serving a DeepSeek-thinking model
+    // reach the `deepseek` wire arm (v0.5.116 #5108 budget passthrough).
+    // On the OpenAI wire the native-only formats are skipped, exactly like
+    // upstream's NATIVE_ONLY_FORMATS guard.
+    let caps_format = crate::core::combo::capabilities::get_capabilities_for_model(provider, model)
+        .thinking_format;
+    let is_openai_wire = matches!(target_format, Format::OpenAi | Format::OpenAiResponses);
+    const NATIVE_ONLY_FORMATS: &[&str] = &[
+        "gemini-level",
+        "gemini-budget",
+        "claude-budget",
+        "claude-adaptive",
+        "kiro",
+    ];
+    if let Some(f) = caps_format {
+        if !(is_openai_wire && NATIVE_ONLY_FORMATS.contains(&f)) {
+            match f {
+                "openai" => return ThinkingNative::OpenAi,
+                "claude-adaptive" => return ThinkingNative::ClaudeAdaptive,
+                "claude-budget" => return ThinkingNative::ClaudeBudget,
+                "gemini-level" => return ThinkingNative::GeminiLevel,
+                "gemini-budget" => return ThinkingNative::GeminiBudget,
+                "zai" => return ThinkingNative::Zai,
+                "qwen" => return ThinkingNative::Qwen,
+                "deepseek" => return ThinkingNative::DeepSeek,
+                "kimi" => return ThinkingNative::Kimi,
+                "minimax" => return ThinkingNative::MiniMax,
+                // hunyuan/step/nous/tokenrouter/commandcode have no Rust
+                // ThinkingNative arm yet — fall through to the target default.
+                _ => {}
+            }
+        }
+    }
+
     match target_format {
         Format::OpenAi | Format::OpenAiResponses | Format::OpenAiResponse | Format::Codex => {
             ThinkingNative::OpenAi
@@ -888,7 +924,10 @@ pub fn apply_thinking_intent(
                     // thinking:{type:"adaptive"} on Opus/Sonnet 4.6+, and
                     // Anthropic-compatible shims default thinking off. Send both.
                     obj.insert("thinking".into(), Value::Object(thinking));
-                } else if display.is_some() && level != "minimal" && model.to_ascii_lowercase().contains("claude") {
+                } else if display.is_some()
+                    && level != "minimal"
+                    && model.to_ascii_lowercase().contains("claude")
+                {
                     obj.insert("thinking".into(), Value::Object(thinking));
                 }
                 obj.insert("output_config".into(), json!({"effort": effort}));
@@ -968,8 +1007,22 @@ pub fn apply_thinking_intent(
             } else {
                 "high"
             };
+            // 9router v0.5.116 #5108: an explicit thinking budget survives on
+            // dynamic openai-compatible-* nodes (vLLM/SGLang-style gateways
+            // validate budget_tokens). Registered DeepSeek-family providers
+            // keep the bare enabled marker — first-party DeepSeek ignores
+            // budget_tokens.
+            let budget_passthrough = provider.starts_with("openai-compatible-")
+                && matches!(intent, ThinkingIntent::Budget(b) if *b > 0);
             if let Some(obj) = body.as_object_mut() {
-                obj.insert("thinking".into(), json!({"type": "enabled"}));
+                let mut thinking = serde_json::Map::new();
+                thinking.insert("type".into(), json!("enabled"));
+                if budget_passthrough {
+                    if let ThinkingIntent::Budget(b) = intent {
+                        thinking.insert("budget_tokens".into(), json!(b));
+                    }
+                }
+                obj.insert("thinking".into(), Value::Object(thinking));
                 obj.insert("reasoning_effort".into(), Value::String(effort.into()));
             }
         }
@@ -1784,15 +1837,24 @@ mod tests {
             resolve_thinking_native(Format::OpenAiResponses, "muse", "muse-spark-1.3"),
             ThinkingNative::OpenAiResponses
         );
-        // Chat legs are unaffected — no thinkingFormat declared there.
+        // Chat legs have no transport thinkingFormat — resolution falls
+        // through to model capabilities. glm-5.3 hits the *glm-5.3* pattern
+        // (thinkingFormat "zai") exactly like upstream resolveFormat.
         assert_eq!(
             resolve_thinking_native(Format::OpenAi, "opencode-go", "glm-5.3"),
+            ThinkingNative::Zai
+        );
+        // A model whose caps declare the openai shape stays OpenAi.
+        assert_eq!(
+            resolve_thinking_native(Format::OpenAi, "opencode-go", "glm-5.3-flash"),
             ThinkingNative::OpenAi
         );
-        // Claude leg has no thinkingFormat → normal format resolution.
+        // Claude leg: upstream's claude transport declares
+        // thinkingFormat "claude-adaptive" (opencode-go.js transports[]),
+        // which wins over the model's chat-shaped caps.
         assert_eq!(
             resolve_thinking_native(Format::Claude, "opencode-go", "deepseek-v4-pro"),
-            ThinkingNative::ClaudeBudget
+            ThinkingNative::ClaudeAdaptive
         );
     }
 
@@ -1889,5 +1951,54 @@ mod tests {
             "none",
         );
         assert_eq!(body["thinking"]["type"], "disabled", "{body}");
+    }
+
+    // --- 9router v0.5.116 626a0684 (#5108): explicit DeepSeek thinking
+    // budgets on openai-compatible-* nodes -------------------------------
+
+    #[test]
+    fn deepseek_budget_passthrough_on_compat_node() {
+        // openai-compatible-* node serving a DeepSeek-thinking model keeps
+        // an explicit budget_tokens on the enabled block.
+        let mut body = json!({"messages": []});
+        apply_thinking_intent(
+            Format::OpenAi,
+            "openai-compatible-chat-budget-test",
+            "deepseek-v4-flash",
+            &mut body,
+            &ThinkingIntent::Budget(2048),
+        );
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 2048})
+        );
+    }
+
+    #[test]
+    fn deepseek_registered_provider_keeps_bare_marker() {
+        // First-party DeepSeek ignores budget_tokens — bare enabled marker.
+        let mut body = json!({"messages": []});
+        apply_thinking_intent(
+            Format::OpenAi,
+            "deepseek",
+            "deepseek-v4-pro",
+            &mut body,
+            &ThinkingIntent::Budget(2048),
+        );
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+    }
+
+    #[test]
+    fn deepseek_compat_node_effort_only_gets_no_budget() {
+        let mut body = json!({"messages": []});
+        apply_thinking_intent(
+            Format::OpenAi,
+            "openai-compatible-chat-budget-test",
+            "deepseek-v4-flash",
+            &mut body,
+            &ThinkingIntent::Level("high".to_string()),
+        );
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert!(body["thinking"].get("budget_tokens").is_none());
     }
 }

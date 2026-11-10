@@ -7,7 +7,7 @@ import BaseUrlSelect from "./BaseUrlSelect";
 import { rememberEndpoint } from "./cliEndpointPresets";
 import ApiKeySelect from "./ApiKeySelect";
 import { matchKnownEndpoint } from "./cliEndpointMatch";
-import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
+import { useAllActiveModelValues } from "@/shared/models/selectableModelValues";
 
 // Pi per-model caps (9router v0.5.111): presets + sanitizeCap limits.
 const PI_CONTEXT_WINDOWS = [200000, 400000, 600000, 1000000];
@@ -302,17 +302,17 @@ export default function GenericCliToolCard({
     setModalOpen(false);
   };
 
+  // 9router v0.5.116 #5449: "Add All Active Models" resolves through the
+  // picker's own grouping rules (no-auth providers, aliases, custom models,
+  // live catalogs, disabled excluded) instead of the static registry over
+  // connection rows.
+  const { values: allActiveModelValues, ready: allActiveReady } =
+    useAllActiveModelValues(activeProviders, activeProviders);
+
   const handleAddAllActiveModels = (): void => {
-    const allModels: string[] = [];
-    activeProviders.forEach((conn: any) => {
-      const alias = PROVIDER_ID_TO_ALIAS[conn.provider] || conn.provider;
-      const providerModels = getModelsByProviderId(conn.provider);
-      providerModels.forEach((m: any) => {
-        const val = `${alias}/${m.id}`;
-        if (!allModels.includes(val)) allModels.push(val);
-      });
-    });
-    if (allModels.length > 0) {
+    if (!allActiveReady || allActiveModelValues.length === 0) return;
+    const allModels = allActiveModelValues;
+    if (tool.id === "pi") {
       setSelectedModels((prev) => Array.from(new Set([...prev, ...allModels])));
       setModelCaps((prev) => {
         const next = { ...prev };

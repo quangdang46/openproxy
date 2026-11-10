@@ -44,7 +44,10 @@ const CAPACITY_ADAPTER_CAPS = [
   // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
   { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "Audio input" },
 ];
-const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+// 9router DEFAULT_FALLBACK_MODEL — v2.6 free tier (capacityAdapter.js:15);
+// legacy oc/mimo-v2.5-free pool entries are upgraded by the backend
+// (capacity_adapter.rs `upgrade_legacy_model`) and by normalizeCapEntry below.
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.6-flash-free";
 const EMPTY_CAP_ENTRY: CapacityAdapterEntry = { enabled: true, roundRobin: false, models: [] };
 const EMPTY_CAPACITY_ADAPTER: Record<string, CapacityAdapterEntry> = {
   vision: { ...EMPTY_CAP_ENTRY },
@@ -52,16 +55,30 @@ const EMPTY_CAPACITY_ADAPTER: Record<string, CapacityAdapterEntry> = {
   audioInput: { ...EMPTY_CAP_ENTRY },
   videoInput: { ...EMPTY_CAP_ENTRY },
 };
+// 9router upgradeLegacyModel (combos/page.js:33): a stored legacy pool model
+// resolves to the current default.
+function upgradeLegacyModel(model: string): string {
+  return model === "oc/mimo-v2.5-free" ? DEFAULT_FALLBACK_MODEL : model;
+}
+
 // Backward-compat: legacy stored form was an array of {model, enabled}.
 function normalizeCapEntry(entry: any): CapacityAdapterEntry {
   if (Array.isArray(entry)) {
-    return { enabled: true, roundRobin: false, models: entry.map((e: any) => e?.model || e).filter(Boolean) };
+    return {
+      enabled: true,
+      roundRobin: false,
+      models: entry
+        .map((e: any) => upgradeLegacyModel(e?.model || e))
+        .filter(Boolean),
+    };
   }
   if (entry && typeof entry === "object") {
     return {
       enabled: entry.enabled !== false,
       roundRobin: !!entry.roundRobin,
-      models: Array.isArray(entry.models) ? entry.models.filter(Boolean) : [],
+      models: Array.isArray(entry.models)
+        ? entry.models.map(upgradeLegacyModel).filter(Boolean)
+        : [],
     };
   }
   return { ...EMPTY_CAP_ENTRY };

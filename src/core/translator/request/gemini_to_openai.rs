@@ -4,21 +4,31 @@
 
 use serde_json::Value;
 
-/// Convert Gemini content to OpenAI message
-fn convert_gemini_content(content: &Value) -> Option<Value> {
+/// Convert Gemini content to OpenAI messages.
+///
+/// Returns a Vec because one Gemini content can emit several OpenAI
+/// messages: every `functionResponse` becomes a `role:"tool"` message and
+/// they ALL precede any co-located follow-up text or `functionCall`s
+/// (9router v0.5.116 `ef2af4de`, #2393 — the previous early `return` on the
+/// first functionResponse dropped parallel tool results and follow-up
+/// parts).
+fn convert_gemini_content(content: &Value) -> Vec<Value> {
     let role = content
         .get("role")
         .and_then(|v| v.as_str())
         .unwrap_or("user");
     let openai_role = if role == "user" { "user" } else { "assistant" };
 
-    let parts = content.get("parts").and_then(|v| v.as_array())?;
+    let Some(parts) = content.get("parts").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
     if parts.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let mut text_parts: Vec<Value> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    let mut tool_results: Vec<Value> = Vec::new();
     let mut reasoning_text: Option<String> = None;
 
     for part in parts {
@@ -57,7 +67,16 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
         if let Some(func_call) = part.get("functionCall") {
             let name = func_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = func_call.get("args").cloned().unwrap_or(Value::Null);
-            let id = format!("call_{}_{}", name, chrono::Utc::now().timestamp_millis());
+            // Gemini lacks a native call id; derive a deterministic one from
+            // the name so the matching functionResponse maps to the same
+            // tool_call_id (providers require pairing). Upstream:
+            // `part.functionCall.id || `call_${name}``.
+            let id = func_call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{name}"));
             tool_calls.push(serde_json::json!({
                 "id": id,
                 "type": "function",
@@ -69,27 +88,42 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
         }
 
         if let Some(func_response) = part.get("functionResponse") {
+            // `response?.result || response || {}` — JS `||` treats falsy
+            // results (null/false/0/"") as absent and falls back to the whole
+            // response object.
+            let response = func_response
+                .get("response")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let result_val = response.get("result").cloned().unwrap_or(Value::Null);
+            let payload = if js_truthy(&result_val) {
+                result_val
+            } else if js_truthy(&response) {
+                response
+            } else {
+                serde_json::json!({})
+            };
             let tool_call_id = func_response
                 .get("id")
-                .or_else(|| func_response.get("name"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let response_content = func_response
-                .get("response")
-                .and_then(|r| r.get("result"))
-                .or_else(|| func_response.get("response"))
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-
-            return Some(serde_json::json!({
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    func_response
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| format!("call_{n}"))
+                })
+                .unwrap_or_default();
+            tool_results.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "content": serde_json::to_string(&response_content).unwrap_or_default()
+                "content": serde_json::to_string(&payload).unwrap_or_default()
             }));
         }
     }
 
+    let mut message: Option<Value> = None;
     if !tool_calls.is_empty() {
         let mut result = serde_json::json!({ "role": "assistant" });
         if text_parts.len() == 1 {
@@ -97,46 +131,66 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
                 result["content"] = Value::String(text.to_string());
             }
         } else if !text_parts.is_empty() {
-            result["content"] = Value::Array(text_parts);
+            result["content"] = Value::Array(text_parts.clone());
         }
         if let Some(reasoning) = &reasoning_text {
             result["reasoning_content"] = Value::String(reasoning.clone());
         }
         result["tool_calls"] = Value::Array(tool_calls);
-        return Some(result);
-    }
-
-    if text_parts.len() == 1 {
-        if let Some(text) = text_parts[0].get("text").and_then(|v| v.as_str()) {
-            let mut msg = serde_json::json!({
-                "role": openai_role,
-                "content": text
-            });
-            if let Some(reasoning) = &reasoning_text {
-                msg["reasoning_content"] = Value::String(reasoning.clone());
-            }
-            return Some(msg);
-        }
+        message = Some(result);
     } else if !text_parts.is_empty() {
-        let mut msg = serde_json::json!({
-            "role": openai_role,
-            "content": text_parts
-        });
+        let mut msg = if text_parts.len() == 1 {
+            if let Some(text) = text_parts[0].get("text").and_then(|v| v.as_str()) {
+                serde_json::json!({
+                    "role": openai_role,
+                    "content": text
+                })
+            } else {
+                serde_json::json!({
+                    "role": openai_role,
+                    "content": text_parts[0].clone()
+                })
+            }
+        } else {
+            serde_json::json!({
+                "role": openai_role,
+                "content": text_parts
+            })
+        };
         if let Some(reasoning) = &reasoning_text {
             msg["reasoning_content"] = Value::String(reasoning.clone());
         }
-        return Some(msg);
-    }
-
-    // Only reasoning content present, no regular text parts or tool calls
-    if let Some(reasoning) = reasoning_text {
-        return Some(serde_json::json!({
+        message = Some(msg);
+    } else if let Some(reasoning) = reasoning_text {
+        // Only reasoning content present, no regular text parts or tool calls
+        message = Some(serde_json::json!({
             "role": openai_role,
             "reasoning_content": reasoning
         }));
     }
 
-    None
+    // Complete the parts scan before returning: parallel results must all
+    // precede any co-located follow-up text or calls in the OpenAI message
+    // sequence (upstream ef2af4de).
+    if !tool_results.is_empty() {
+        let mut out = tool_results;
+        if let Some(m) = message {
+            out.push(m);
+        }
+        return out;
+    }
+    message.into_iter().collect()
+}
+
+/// JS truthiness for the `a || b` fallback chains above.
+fn js_truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
 }
 
 /// Extract text from Gemini content
@@ -215,9 +269,9 @@ pub fn gemini_to_openai_request(
     if let Some(contents) = body_obj.get("contents").and_then(|v| v.as_array()) {
         let mut messages: Vec<Value> = Vec::new();
         for content in contents {
-            if let Some(converted) = convert_gemini_content(content) {
-                messages.push(converted);
-            }
+            // One Gemini content can emit several OpenAI messages (parallel
+            // tool results precede co-located follow-up parts).
+            messages.extend(convert_gemini_content(content));
         }
         if let Some(msg_arr) = result["messages"].as_array_mut() {
             msg_arr.extend(messages);
@@ -279,5 +333,67 @@ mod tests {
         let model = body.get("model").unwrap().as_str().unwrap();
         assert_eq!(model, "gemini-pro");
         assert!(!body.get("messages").unwrap().as_array().unwrap().is_empty());
+    }
+
+    // ---- mozza.11: keep all tool results + follow-up parts (#2393) ----
+
+    fn convert_parts(parts: Value, role: &str) -> Vec<Value> {
+        convert_gemini_content(&serde_json::json!({"role": role, "parts": parts}))
+    }
+
+    #[test]
+    fn keeps_every_parallel_tool_result_in_order() {
+        let out = convert_parts(
+            serde_json::json!([
+                {"functionResponse": {"name": "read", "response": {"result": "first"}, "id": "c1"}},
+                {"functionResponse": {"name": "search", "response": {"result": "second"}, "id": "c2"}},
+            ]),
+            "user",
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["tool_call_id"], "c1");
+        assert_eq!(out[1]["tool_call_id"], "c2");
+        // Fallback id is `call_<name>` so it pairs with the functionCall.
+        let out = convert_parts(
+            serde_json::json!([{"functionResponse": {"name": "read", "response": {"result": "x"}}}]),
+            "user",
+        );
+        assert_eq!(out[0]["tool_call_id"], "call_read");
+    }
+
+    #[test]
+    fn tool_results_precede_co_located_text_and_calls() {
+        let out = convert_parts(
+            serde_json::json!([
+                {"functionCall": {"id": "c2", "name": "next", "args": {"path": "a.txt"}}},
+                {"functionResponse": {"name": "previous", "response": {"result": "done"}, "id": "c1"}},
+                {"text": "continuing"},
+                {"functionCall": {"name": "last", "args": {}}},
+            ]),
+            "model",
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["tool_call_id"], "c1");
+        assert_eq!(out[1]["role"], "assistant");
+        assert_eq!(out[1]["content"], "continuing");
+        let calls = out[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "c2");
+        assert_eq!(calls[1]["id"], "call_last");
+    }
+
+    #[test]
+    fn falsy_result_falls_back_to_whole_response() {
+        let out = convert_parts(
+            serde_json::json!([
+                {"functionResponse": {"name": "t", "response": {"result": null, "extra": 1}}},
+            ]),
+            "user",
+        );
+        assert_eq!(
+            out[0]["content"],
+            serde_json::json!({"result": null, "extra": 1}).to_string()
+        );
     }
 }

@@ -825,6 +825,12 @@ pub fn rotation_index(combo_name: &str) -> Option<usize> {
 /// calls until the TTL elapses. This is in-memory only (matches the
 /// existing `COMBO_ROTATION_STATE` semantics) and resets on restart.
 pub fn mark_combo_member_quarantined(combo_name: &str, model: &str, ttl: Duration) {
+    // A zero TTL is a no-op quarantine: request-scoped 4xx failures carry
+    // `cooldown: Duration::ZERO` (9router accountFallback.js:48-61) and must
+    // never park a healthy member.
+    if ttl.is_zero() {
+        return;
+    }
     let until = Instant::now() + ttl;
     let mut guard = COMBO_MEMBER_QUARANTINE.lock();
     guard.insert((combo_name.to_string(), model.to_string()), until);

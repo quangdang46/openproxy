@@ -963,12 +963,17 @@ pub fn prepare_claude_request(
     }
 
     // Check if thinking is enabled AND last message is from user
-    // (separate from the mutable borrow above)
-    let thinking_enabled = obj
+    // (separate from the mutable borrow above). 9router 633c82f5: DeepSeek
+    // models behind opencode-go's /messages transport carry
+    // `thinking.type "adaptive"` (claude-adaptive wire), which also counts
+    // as thinking-enabled for the tool_use pass-back below.
+    let thinking_type = obj
         .get("thinking")
         .and_then(|t| t.get("type"))
-        .and_then(Value::as_str)
-        == Some("enabled");
+        .and_then(Value::as_str);
+    let deepseek_served = provider == "deepseek"
+        || (provider == "opencode-go"
+            && crate::core::utils::tool_deduper::is_deepseek_model_pub(&model_id));
     let last_msg_is_user = obj
         .get("messages")
         .and_then(Value::as_array)
@@ -976,6 +981,9 @@ pub fn prepare_claude_request(
         .and_then(|m| m.get("role"))
         .and_then(Value::as_str)
         == Some("user");
+    let thinking_enabled = last_msg_is_user
+        && (thinking_type == Some("enabled")
+            || (deepseek_served && thinking_type == Some("adaptive")));
     let needs_thinking_tool_use = thinking_enabled && last_msg_is_user;
 
     // Pass 2 (reverse): cache_control on last assistant + thinking handling

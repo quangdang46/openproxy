@@ -6496,7 +6496,7 @@
       "id": "opencode-go",
       "alias": "opencode-go",
       "format": "openai",
-      "baseUrl": "https://opencode.ai/zen/go/v1/chat/completions",
+      "baseUrl": "https://opencode.ai/inference/go/openai/v1/chat/completions",
       "models": [
         {
           "id": "deepseek-flash",

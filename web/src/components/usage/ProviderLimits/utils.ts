@@ -601,8 +601,12 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
     
     normalizedQuotas.sort((a, b) => {
       // Use modelKey for antigravity, otherwise use name
-      const keyA = a.modelKey || a.name;
-      const keyB = b.modelKey || b.name;
+      let keyA = a.modelKey || a.name;
+      let keyB = b.modelKey || b.name;
+      // 9router 8a833631: Gemini 4 Argon quota keys sort next to the Argon
+      // tiered models instead of falling through to the 999 tail.
+      if (keyA === "gemini_argon" || keyA === "gemini_argon_session" || keyA === "gemini_argon_weekly") keyA = "gemini-4-argon-high";
+      if (keyB === "gemini_argon" || keyB === "gemini_argon_session" || keyB === "gemini_argon_weekly") keyB = "gemini-4-argon-high";
       const orderA = orderMap.get(keyA) ?? 999;
       const orderB = orderMap.get(keyB) ?? 999;
       return orderA - orderB;

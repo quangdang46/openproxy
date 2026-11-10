@@ -1524,7 +1524,7 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
 /// exactly (MONTHLY_CREDIT = 5; remainingPercentage may exceed 100).
 /// OpenCode Go usage endpoint (9router `opencode-go.js` registry
 /// `transport.usage.url`).
-const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
+const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/inference/go/v1/usage";
 
 /// Coerce a percent value (number or numeric string) to f64; `None` when
 /// neither parses finite. 9router `opencode-go.js parsePercent`.
@@ -3346,8 +3346,7 @@ fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
                     .unwrap_or("")
             )
             .to_lowercase();
-            let is_weekly =
-                window == "weekly" || bucket_text.contains("weekly");
+            let is_weekly = window == "weekly" || bucket_text.contains("weekly");
             let is_session = window == "5h"
                 || bucket_text.contains("five hour")
                 || bucket_text.contains("5h")
@@ -3476,8 +3475,7 @@ fn reconcile_weekly_quota(
         quotas: &serde_json::Map<String, Value>,
         member: impl Fn(&str) -> bool,
     ) -> (bool, Option<String>) {
-        let members: Vec<(&String, &Value)> =
-            quotas.iter().filter(|(k, _)| member(k)).collect();
+        let members: Vec<(&String, &Value)> = quotas.iter().filter(|(k, _)| member(k)).collect();
         if members.is_empty() {
             return (false, None);
         }
@@ -5752,10 +5750,22 @@ mod tests {
             ]
         });
         let out = parse_weekly_quota_summary(&data);
-        assert_eq!(out["gemini_argon_weekly"]["remainingPercentage"], json!(40.0));
-        assert_eq!(out["gemini_argon_weekly"]["displayName"], json!("Gemini 4 Argon (Weekly)"));
-        assert_eq!(out["gemini_argon_session"]["remainingPercentage"], json!(90.0));
-        assert_eq!(out["gemini_argon_session"]["displayName"], json!("Gemini 4 Argon (5h)"));
+        assert_eq!(
+            out["gemini_argon_weekly"]["remainingPercentage"],
+            json!(40.0)
+        );
+        assert_eq!(
+            out["gemini_argon_weekly"]["displayName"],
+            json!("Gemini 4 Argon (Weekly)")
+        );
+        assert_eq!(
+            out["gemini_argon_session"]["remainingPercentage"],
+            json!(90.0)
+        );
+        assert_eq!(
+            out["gemini_argon_session"]["displayName"],
+            json!("Gemini 4 Argon (5h)")
+        );
         assert_eq!(out["gemini_weekly"]["remainingPercentage"], json!(80.0));
         assert_eq!(out["gemini_session"]["remainingPercentage"], json!(70.0));
         // Argon buckets must not leak into the main Gemini keys.
@@ -5816,11 +5826,20 @@ mod tests {
         );
         reconcile_weekly_quota(&mut quotas, weekly);
         // Argon session clamped to exhausted with latest Argon resetAt.
-        assert_eq!(quotas["gemini_argon_session"]["remainingPercentage"], json!(0.0));
+        assert_eq!(
+            quotas["gemini_argon_session"]["remainingPercentage"],
+            json!(0.0)
+        );
         assert_eq!(quotas["gemini_argon_session"]["used"], json!(1000.0));
-        assert_eq!(quotas["gemini_argon_session"]["resetAt"], json!("2026-11-05T00:00:00Z"));
+        assert_eq!(
+            quotas["gemini_argon_session"]["resetAt"],
+            json!("2026-11-05T00:00:00Z")
+        );
         // Argon weekly also clamped (all Argon models exhausted).
-        assert_eq!(quotas["gemini_argon_weekly"]["remainingPercentage"], json!(0.0));
+        assert_eq!(
+            quotas["gemini_argon_weekly"]["remainingPercentage"],
+            json!(0.0)
+        );
         // Main Gemini rows untouched — Argon exhaustion must not clobber them.
         assert_eq!(quotas["gemini_session"]["remainingPercentage"], json!(80.0));
         assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(60.0));
@@ -5855,7 +5874,10 @@ mod tests {
         reconcile_weekly_quota(&mut quotas, weekly);
         assert_eq!(quotas["gemini_session"]["remainingPercentage"], json!(0.0));
         assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(0.0));
-        assert_eq!(quotas["gemini_argon_session"]["remainingPercentage"], json!(55.0));
+        assert_eq!(
+            quotas["gemini_argon_session"]["remainingPercentage"],
+            json!(55.0)
+        );
     }
     // 9router b9c92cb8 (groq.js): Go-style durations, header
     // presence semantics, and quota entry shape.

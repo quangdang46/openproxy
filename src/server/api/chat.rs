@@ -1628,8 +1628,21 @@ async fn execute_single_model(
     if let Some(tools_val) = body.get("tools").and_then(|t| t.as_array()) {
         let result = dedupe_tools(tools_val, client_tool, &dispatch_model);
         if !result.stripped.is_empty() {
+            // 9router a3039ab1: history `tool_reference` blocks naming a
+            // tool stripped by the MCP rules dangle and strict
+            // Claude-compatible upstreams (z.ai 400 code 1210) reject the
+            // request — clean them from the translated messages too.
+            let mcp_stripped = result.mcp_stripped.clone();
             if let Some(obj) = body.as_object_mut() {
                 obj.insert("tools".into(), Value::Array(result.tools));
+                if !mcp_stripped.is_empty() {
+                    if let Some(msgs) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+                        crate::core::utils::tool_deduper::clean_stripped_tool_references(
+                            msgs,
+                            &mcp_stripped,
+                        );
+                    }
+                }
             }
         }
     }
@@ -10468,10 +10481,20 @@ fn combo_smart_config(
     if let Some(crate::types::ComboStrategyEntry::Config(entry)) =
         snapshot.settings.combo_strategies.get(combo_name)
     {
-        if let Some(v) = entry.router_model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(v) = entry
+            .router_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             cfg.router_model = v.to_string();
         }
-        if let Some(v) = entry.smart_policy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(v) = entry
+            .smart_policy
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             cfg.smart_policy = v.to_string();
         }
         if let Some(v) = entry.session_sticky {
@@ -10544,10 +10567,11 @@ fn combo_session_id(
         .or_else(|| norm(body.get("session_id").and_then(Value::as_str)))
         .or_else(|| norm(body.get("conversation_id").and_then(Value::as_str)))
         .or_else(|| {
-            norm(body
-                .get("metadata")
-                .and_then(|m| m.get("user_id"))
-                .and_then(Value::as_str))
+            norm(
+                body.get("metadata")
+                    .and_then(|m| m.get("user_id"))
+                    .and_then(Value::as_str),
+            )
         })
 }
 
@@ -10578,9 +10602,9 @@ async fn smart_order_combo_models(
     // Strict Lock with a warm session skips the router call entirely
     // (combo.js:394-396 — "0ms, 0 extra tokens").
     let sticky = if !is_per_turn {
-        session_id.as_deref().and_then(|sid| {
-            smart::get_sticky_combo_model(combo_name, sid, models)
-        })
+        session_id
+            .as_deref()
+            .and_then(|sid| smart::get_sticky_combo_model(combo_name, sid, models))
     } else {
         None
     };
@@ -10602,18 +10626,20 @@ async fn smart_order_combo_models(
                     }
                 }
             });
-            crate::server::api::media::systemone_decision(
-                state,
-                &cfg.router_model,
-                &decision_body,
-            )
-            .await
-            .and_then(|json| smart::parse_systemone_route_answer(&json))
+            crate::server::api::media::systemone_decision(state, &cfg.router_model, &decision_body)
+                .await
+                .and_then(|json| smart::parse_systemone_route_answer(&json))
         }
     } else {
         None
     };
 
-    smart::apply_smart_ordering(models, combo_name, session_id.as_deref(), &cfg, choice.as_ref())
-        .models
+    smart::apply_smart_ordering(
+        models,
+        combo_name,
+        session_id.as_deref(),
+        &cfg,
+        choice.as_ref(),
+    )
+    .models
 }

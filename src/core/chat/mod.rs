@@ -400,8 +400,9 @@ fn is_muse_spark_model(model_id: &str) -> bool {
 }
 
 /// Responses-only models on opencode-go (9router registry
-/// `open-sse/providers/registry/opencode-go.js`): grok-4.6 + gpt-5.6-luna
-/// carry `targetFormat: openai-responses` with no Chat transport.
+/// `open-sse/providers/registry/opencode-go.js`, v0.5.116): grok-4.5/4.6/4.7,
+/// gpt-5.6-luna, gpt-6-luna and the muse-spark contributor ids carry
+/// `targetFormat: openai-responses` with no Chat transport.
 fn is_opencode_go_responses_only_model(model_id: &str) -> bool {
     let mut clean = model_id.trim();
     if let Some(open) = clean.rfind('(') {
@@ -411,7 +412,16 @@ fn is_opencode_go_responses_only_model(model_id: &str) -> bool {
     }
     let base = clean.rsplit('/').next().unwrap_or(clean);
     let lower = base.to_lowercase();
-    lower == "grok-4.6" || lower == "gpt-5.6-luna"
+    matches!(
+        lower.as_str(),
+        "grok-4.5"
+            | "grok-4.6"
+            | "grok-4.7"
+            | "gpt-5.6-luna"
+            | "gpt-6-luna"
+            | "muse-spark-1.2-contributor"
+            | "muse-spark-1.3-contributor"
+    ) || is_muse_spark_model(model_id)
 }
 
 /// Per-model endpoint support on opencode-go (9router registry opencode-go.js
@@ -429,51 +439,64 @@ fn opencode_go_supported_formats(model_id: &str) -> Option<&'static [Format]> {
     let lower = base.to_lowercase();
     // Strip a trailing "-free" subscription-tier suffix (catalog ids carry it).
     let core = lower.strip_suffix("-free").unwrap_or(&lower);
-    // Responses-only + Muse Spark: /zen/go/v1/responses only.
-    if core == "grok-4.6" || core == "gpt-5.6-luna" || is_muse_spark_model(model_id) {
+    // Responses-only + Muse Spark: /inference/go/openai/v1/responses only.
+    // v0.5.116 registry adds grok-4.5/4.7, gpt-6-luna and the muse-spark
+    // contributor ids (the latter two families also match below).
+    if matches!(
+        core,
+        "grok-4.5" | "grok-4.6" | "grok-4.7" | "gpt-5.6-luna" | "gpt-6-luna"
+    ) || is_muse_spark_model(model_id)
+    {
         return Some(&[Format::OpenAiResponses]);
+    }
+    // Claude-only: claude-haiku-5-5 is served by /messages exclusively
+    // ("/chat/completions answers ModelProtocolUnsupported").
+    if core == "claude-haiku-5-5" || core.starts_with("claude-") {
+        return Some(&[Format::Claude]);
     }
     // Full 3-leg models: openai + claude + openai-responses.
     if matches!(
         core,
-        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+        "deepseek-v4-pro"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-flash-vision-exp"
+            | "deepseek-v4.1-flash"
     ) {
         return Some(&[Format::OpenAi, Format::Claude, Format::OpenAiResponses]);
     }
-    // Dual-leg models: openai + claude.
+    // Dual-leg models: openai + claude (v0.5.116 adds space-bunny-free and
+    // qwen3.5-plus).
     if matches!(
         core,
         "minimax-m3"
             | "minimax-m2.7"
             | "minimax-m2.5"
+            | "space-bunny-free"
             | "qwen3.8-max"
             | "qwen3.8-flash"
             | "qwen3.7-max"
             | "qwen3.7-plus"
             | "qwen3.6-plus"
+            | "qwen3.5-plus"
     ) {
         return Some(&[Format::OpenAi, Format::Claude]);
     }
-    // Single-leg models: openai (/chat/completions) only.
-    if matches!(
-        core,
-        "deepseek-flash"
-            | "glm-5.3-flash"
-            | "glm-5.3"
-            | "glm-5.2"
-            | "glm-5.1"
-            | "kimi-k2.7-code"
-            | "kimi-k2.6"
-            | "kimi-k3"
-            | "longcat-2.0"
-            | "mimo-v2.5"
-            | "mimo-v2.5-pro"
-            | "hy4-preview"
-            | "hy3"
-    ) {
-        return Some(&[Format::OpenAi]);
+    // Unknown ids fall back to the upstream family regex
+    // (`opencodeFamilyFormats`, helpers.js): deepseek-v4-(pro|flash) keep
+    // the triple, minimax/qwen keep [openai, claude], grok/gpt/muse-spark
+    // were handled above, everything else is openai-only.
+    if core.starts_with("deepseek-v4-pro") || core.starts_with("deepseek-v4-flash") {
+        return Some(&[Format::OpenAi, Format::Claude, Format::OpenAiResponses]);
     }
-    None
+    if core.starts_with("minimax") || core.starts_with("qwen") {
+        return Some(&[Format::OpenAi, Format::Claude]);
+    }
+    if core.starts_with("grok") || core.starts_with("gpt") {
+        return Some(&[Format::OpenAiResponses]);
+    }
+    // Single-leg models: openai (/chat/completions) only — the upstream
+    // `[FORMATS.OPENAI]` default for undeclared ids.
+    Some(&[Format::OpenAi])
 }
 
 /// Per-model endpoint support on opencode-zen (9router registry
@@ -728,13 +751,17 @@ pub(crate) fn provider_transports(provider: &str) -> Vec<TransportMatch> {
         "opencode-go" | "ocg" => vec![
             TransportMatch {
                 format: Format::OpenAi,
-                base_url: "https://opencode.ai/zen/go/v1/chat/completions".into(),
+                base_url: "https://opencode.ai/inference/go/openai/v1/chat/completions".into(),
                 thinking_format: None,
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://opencode.ai/zen/go/v1/messages".into(),
-                thinking_format: None,
+                base_url: "https://opencode.ai/inference/go/anthropic/v1/messages".into(),
+                // 9router 633c82f5: the /messages leg uses adaptive thinking
+                // and output_config.effort for DeepSeek — its
+                // reasoning_effort extension requires a native Anthropic
+                // target (registry transports[1] thinkingFormat).
+                thinking_format: Some(ThinkingNative::ClaudeAdaptive),
             },
             // /responses rejects the Chat-shaped thinking fields
             // (reasoning_effort, thinking:{type}) — upstream declares
@@ -742,7 +769,7 @@ pub(crate) fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             // (9router registry opencode-go.js transports[2]).
             TransportMatch {
                 format: Format::OpenAiResponses,
-                base_url: "https://opencode.ai/zen/go/v1/responses".into(),
+                base_url: "https://opencode.ai/inference/go/openai/v1/responses".into(),
                 thinking_format: Some(ThinkingNative::OpenAiResponses),
             },
         ],
@@ -1257,14 +1284,26 @@ mod tests {
     fn opencode_go_three_leg_transports() {
         // 9router registry opencode-go.js `transports[]`.
         let t = resolve_transport("opencode-go", Format::OpenAi).expect("openai leg");
-        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/chat/completions");
+        assert_eq!(
+            t.base_url,
+            "https://opencode.ai/inference/go/openai/v1/chat/completions"
+        );
         let t = resolve_transport("opencode-go", Format::Claude).expect("claude leg");
-        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/messages");
+        assert_eq!(
+            t.base_url,
+            "https://opencode.ai/inference/go/anthropic/v1/messages"
+        );
         let t = resolve_transport("opencode-go", Format::OpenAiResponses).expect("responses leg");
-        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/responses");
+        assert_eq!(
+            t.base_url,
+            "https://opencode.ai/inference/go/openai/v1/responses"
+        );
         // Short alias ocg shares the table.
         let t = resolve_transport("ocg", Format::Claude).expect("ocg claude leg");
-        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/messages");
+        assert_eq!(
+            t.base_url,
+            "https://opencode.ai/inference/go/anthropic/v1/messages"
+        );
         // opencode/oc are single-endpoint — no transports.
         assert!(resolve_transport("opencode", Format::OpenAi).is_none());
         assert!(resolve_transport("oc", Format::Claude).is_none());
@@ -1344,7 +1383,7 @@ mod tests {
         assert_eq!(plan.target_format, Format::OpenAi);
         assert_eq!(
             plan.transport_base_url.as_deref(),
-            Some("https://opencode.ai/zen/go/v1/chat/completions")
+            Some("https://opencode.ai/inference/go/openai/v1/chat/completions")
         );
         assert!(!plan.needs_translation());
     }
@@ -1639,11 +1678,8 @@ mod target_format_precedence {
     #[test]
     fn antigravity_model_suffix_and_default_preset() {
         // "(level)" suffix on the model id resolves the tiered variant too.
-        let (_, upstream, _) = resolve_model_metadata_with_client(
-            "antigravity",
-            "gemini-3.8-flash(low)",
-            None,
-        );
+        let (_, upstream, _) =
+            resolve_model_metadata_with_client("antigravity", "gemini-3.8-flash(low)", None);
         assert_eq!(upstream, "gemini-3.8-flash-low(low)");
 
         // No tier requested → bare base entry keeps its catalog preset.
@@ -1665,7 +1701,12 @@ mod target_format_precedence {
             "reasoning_effort": "low",
             "messages": [{"role": "user", "content": "hi"}],
         });
-        let plan = RequestPlan::new(Some("/v1/chat/completions"), &body, "antigravity", "gemini-4-argon");
+        let plan = RequestPlan::new(
+            Some("/v1/chat/completions"),
+            &body,
+            "antigravity",
+            "gemini-4-argon",
+        );
         // upstream "gemini-4-argon-low(low)" → thinking suffix stripped for
         // dispatch, level kept for post-translate re-apply.
         assert_eq!(plan.dispatch_model(), "gemini-4-argon-low");

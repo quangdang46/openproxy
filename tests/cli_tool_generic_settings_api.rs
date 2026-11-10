@@ -221,8 +221,9 @@ async fn pi_settings_apply_show_revert_round_trip() {
     let merged: Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
     let m = &merged["providers"]["9router"]["models"][0];
-    // contextWindow over the 2M cap falls back to the previous stored value.
-    assert_eq!(m["contextWindow"], 1000000);
+    // contextWindow over the 2M cap falls back to the upstream default
+    // (cap() fallback is the default, not the previous stored value).
+    assert_eq!(m["contextWindow"], 200000);
     assert_eq!(m["maxTokens"], 16);
     // name===id treated as unset → keeps the hand-written display name.
     assert_eq!(m["name"], "GPT Five Point Five");

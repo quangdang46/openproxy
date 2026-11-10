@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { Card, Badge, Button, AddCustomEmbeddingModal, NoAuthProxyCard, ProviderInfoCard } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
-import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS, isCustomEmbeddingProvider } from "@/shared/constants/providers";
+import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS, OAUTH_PROVIDERS, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import ConnectionsCard from "@/components/providers/ConnectionsCard";
 import ModelsCard from "@/components/providers/ModelsCard";
 import { KIND_EXAMPLE_CONFIG } from "@/components/media-providers/exampleShared";
@@ -203,6 +203,16 @@ function MediaProviderDetailPage({ kind, id }: { kind: string; id: string }) {
 
       {!isCustom && (provider as any)?.noAuth ? (
         <NoAuthProxyCard providerId={id} />
+      ) : kind === "stt" && OAUTH_PROVIDERS[id] ? (
+        // 9router v0.5.109 (00dd3df): the OAuth shortcut only makes sense
+        // where the service shares its chat OAuth connections — today only
+        // STT (e.g. cx/transcribe). OAuth providers with API-key media lanes
+        // (antigravity, github, glm, kimi, xai, xiaomi-mimo) keep their
+        // Add Connection form on every other kind.
+        <Card>
+          <p className="text-sm text-text-muted mb-3">This service shares your existing OAuth connections.</p>
+          <a href={`/dashboard/providers/${id}`} className="text-primary hover:underline">Manage OAuth connections →</a>
+        </Card>
       ) : (
         <ConnectionsCard providerId={id} isOAuth={false} />
       )}

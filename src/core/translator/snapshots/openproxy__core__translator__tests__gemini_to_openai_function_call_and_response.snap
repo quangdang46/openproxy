@@ -1,5 +1,6 @@
 ---
 source: src/core/translator/tests.rs
+assertion_line: 622
 expression: result
 ---
 {
@@ -23,7 +24,7 @@ expression: result
     {
       "content": "4",
       "role": "tool",
-      "tool_call_id": "calculate"
+      "tool_call_id": "call_calculate"
     }
   ],
   "model": "test-model",

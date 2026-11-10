@@ -98,25 +98,119 @@ const RES_1K_2K: &[&str] = &["1k", "2k"];
 fn image_model_spec(id: &str) -> Option<ImageModelSpec> {
     use ImageModelSpec as S;
     let spec = match id {
-        "seedream-v4.5" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4"], resolutions: &[], qualities: &[] },
-        "seedream-v5" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
-        "seedream-v5-flash" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4","3:2","2:3","4:5","5:4","21:9"], resolutions: &["1k","1.5k","2k"], qualities: &[] },
-        "nano-banana-pro-ultra" => S { upstream: None, aspects: &["1:1","3:2","2:3","3:4","4:3","4:5","5:4","9:16","16:9","21:9"], resolutions: &["4k","8k"], qualities: &[] },
-        "nano-banana-pro" => S { upstream: None, aspects: &["1:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"], resolutions: &["1k","2k","4k"], qualities: &[] },
-        "nano-banana" => S { upstream: None, aspects: &["1:1","9:16","16:9","3:4","4:3","3:2","2:3","5:4","4:5","21:9"], resolutions: &[], qualities: &[] },
-        "nano-banana-2" => S { upstream: None, aspects: &["1:1","3:2","2:3","3:4","4:3","4:5","5:4","9:16","16:9","21:9"], resolutions: &["1k","2k","4k"], qualities: &[] },
-        "gpt-image" => S { upstream: None, aspects: &["1:1","2:3","3:2"], resolutions: &[], qualities: &["medium","high"] },
-        "gpt-image-2" => S { upstream: None, aspects: &["1:1","3:2","2:3","3:4","4:3","4:5","5:4","9:16","16:9","21:9"], resolutions: &[], qualities: &[] },
-        "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst" => S { upstream: None, aspects: &["1:1","3:2","2:3","3:4","4:3","4:5","5:4","9:16","16:9","21:9","2:1","1:2","3:1","1:3","9:21"], resolutions: &[], qualities: &[] },
-        "wan-2.6" => S { upstream: Some("wan-2.6"), aspects: &["1:1","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
+        "seedream-v4.5" => S {
+            upstream: None,
+            aspects: &["1:1", "16:9", "9:16", "4:3", "3:4"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "seedream-v5" => S {
+            upstream: None,
+            aspects: &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "seedream-v5-flash" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9",
+            ],
+            resolutions: &["1k", "1.5k", "2k"],
+            qualities: &[],
+        },
+        "nano-banana-pro-ultra" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+            ],
+            resolutions: &["4k", "8k"],
+            qualities: &[],
+        },
+        "nano-banana-pro" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+            ],
+            resolutions: &["1k", "2k", "4k"],
+            qualities: &[],
+        },
+        "nano-banana" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "5:4", "4:5", "21:9",
+            ],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "nano-banana-2" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+            ],
+            resolutions: &["1k", "2k", "4k"],
+            qualities: &[],
+        },
+        "gpt-image" => S {
+            upstream: None,
+            aspects: &["1:1", "2:3", "3:2"],
+            resolutions: &[],
+            qualities: &["medium", "high"],
+        },
+        "gpt-image-2" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
+            ],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "gpt-image-2.5-flare" | "gpt-image-2.5-sunburst" => S {
+            upstream: None,
+            aspects: &[
+                "1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "2:1",
+                "1:2", "3:1", "1:3", "9:21",
+            ],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "wan-2.6" => S {
+            upstream: Some("wan-2.6"),
+            aspects: &["1:1", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
         // Registry id is disambiguated from the video model of the same upstream name.
-        "wan-2.6-image" => S { upstream: Some("wan-2.6"), aspects: &["1:1","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
-        "wan-2.7-text-to-image" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
-        "wan-2.7-text-to-image-pro" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
-        "prefect-pony-xl" => S { upstream: None, aspects: &["1:1","16:9","9:16","4:3","3:4","3:2","2:3"], resolutions: &[], qualities: &[] },
-        "1.0" | "1.1" | "1.2" | "2.0" | "flux-2-max" | "SDXL" | "realism" | "realism-2" | "z-image-turbo" => {
-            S { upstream: None, aspects: ANY_ASPECTS, resolutions: &[], qualities: &[] }
-        }
+        "wan-2.6-image" => S {
+            upstream: Some("wan-2.6"),
+            aspects: &["1:1", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "wan-2.7-text-to-image" => S {
+            upstream: None,
+            aspects: &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "wan-2.7-text-to-image-pro" => S {
+            upstream: None,
+            aspects: &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "prefect-pony-xl" => S {
+            upstream: None,
+            aspects: &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+            resolutions: &[],
+            qualities: &[],
+        },
+        "1.0" | "1.1" | "1.2" | "2.0" | "flux-2-max" | "SDXL" | "realism" | "realism-2"
+        | "z-image-turbo" => S {
+            upstream: None,
+            aspects: ANY_ASPECTS,
+            resolutions: &[],
+            qualities: &[],
+        },
         _ => return None,
     };
     Some(spec)
@@ -137,13 +231,81 @@ fn video_model_spec(id: &str) -> Option<VideoModelSpec> {
     const SEC58: &[i64] = &[5, 8];
     const SEC4812: &[i64] = &[4, 8, 12];
     let spec = match id {
-        "default" | "turbo" | "wan-2.2-uncensored-v2" | "wan-2.2-uncensored" => VideoModelSpec { aspects: DEF, resolutions: RES, seconds: SEC58, t2v: true, i2v: true, audio: false },
-        "wan-2.6" => VideoModelSpec { aspects: DEF, resolutions: &[], seconds: SEC58, t2v: true, i2v: true, audio: false },
-        "wan-2.6-ultra" | "wan-2.7" | "wan-2.7-pro" | "wan-2.7-uncensored" | "wan-2.7-uncensored-v2" => VideoModelSpec { aspects: &[], resolutions: &[], seconds: &[], t2v: true, i2v: true, audio: false },
-        "wan-3.0" | "wan-3.0-uncensored" | "wan-3.0-uncensored-pro" => VideoModelSpec { aspects: &[], resolutions: &[], seconds: &[], t2v: true, i2v: true, audio: true },
-        "sora-2" | "sora-2-pro" => VideoModelSpec { aspects: &[], resolutions: &[], seconds: SEC4812, t2v: true, i2v: true, audio: false },
-        "grok-imagine-video" | "bytedance-seedance-2.0" | "seedance-2.0-fast" | "seedance-2.0-uncensored" | "seedance-2.0-fast-uncensored" | "seedance-2.0-mini-uncensored" | "seedance-2.0-mini-turbo" | "seedance-v1.5-pro-uncensored" | "seedance-2.5-uncensored" | "seedance-2.5" | "vidu-q3-uncensored" => VideoModelSpec { aspects: &[], resolutions: &[], seconds: &[], t2v: true, i2v: true, audio: id.contains("uncensored") || id == "seedance-2.5" || id == "seedance-2.5-uncensored" || id == "seedance-v1.5-pro-uncensored" },
-        "av-gen-v2" | "cosmos-predict" | "minimax-h3" | "happyhorse-1.0" | "wan/v2.2-a14b" => VideoModelSpec { aspects: &[], resolutions: &[], seconds: &[], t2v: true, i2v: true, audio: id == "av-gen-v2" },
+        "default" | "turbo" | "wan-2.2-uncensored-v2" | "wan-2.2-uncensored" => VideoModelSpec {
+            aspects: DEF,
+            resolutions: RES,
+            seconds: SEC58,
+            t2v: true,
+            i2v: true,
+            audio: false,
+        },
+        "wan-2.6" => VideoModelSpec {
+            aspects: DEF,
+            resolutions: &[],
+            seconds: SEC58,
+            t2v: true,
+            i2v: true,
+            audio: false,
+        },
+        "wan-2.6-ultra"
+        | "wan-2.7"
+        | "wan-2.7-pro"
+        | "wan-2.7-uncensored"
+        | "wan-2.7-uncensored-v2" => VideoModelSpec {
+            aspects: &[],
+            resolutions: &[],
+            seconds: &[],
+            t2v: true,
+            i2v: true,
+            audio: false,
+        },
+        "wan-3.0" | "wan-3.0-uncensored" | "wan-3.0-uncensored-pro" => VideoModelSpec {
+            aspects: &[],
+            resolutions: &[],
+            seconds: &[],
+            t2v: true,
+            i2v: true,
+            audio: true,
+        },
+        "sora-2" | "sora-2-pro" => VideoModelSpec {
+            aspects: &[],
+            resolutions: &[],
+            seconds: SEC4812,
+            t2v: true,
+            i2v: true,
+            audio: false,
+        },
+        "grok-imagine-video"
+        | "bytedance-seedance-2.0"
+        | "seedance-2.0-fast"
+        | "seedance-2.0-uncensored"
+        | "seedance-2.0-fast-uncensored"
+        | "seedance-2.0-mini-uncensored"
+        | "seedance-2.0-mini-turbo"
+        | "seedance-v1.5-pro-uncensored"
+        | "seedance-2.5-uncensored"
+        | "seedance-2.5"
+        | "vidu-q3-uncensored" => VideoModelSpec {
+            aspects: &[],
+            resolutions: &[],
+            seconds: &[],
+            t2v: true,
+            i2v: true,
+            audio: id.contains("uncensored")
+                || id == "seedance-2.5"
+                || id == "seedance-2.5-uncensored"
+                || id == "seedance-v1.5-pro-uncensored",
+        },
+        "av-gen-v2" | "cosmos-predict" | "minimax-h3" | "happyhorse-1.0" | "wan/v2.2-a14b" => {
+            VideoModelSpec {
+                aspects: &[],
+                resolutions: &[],
+                seconds: &[],
+                t2v: true,
+                i2v: true,
+                audio: id == "av-gen-v2",
+            }
+        }
         _ => return None,
     };
     Some(spec)
@@ -252,18 +414,35 @@ impl UcWebExecutor {
                 .map_err(|e| UcWebError::new(502, e.to_string()))?;
             if !res.status().is_success() {
                 let status = res.status().as_u16();
-                let detail: String = res.text().await.unwrap_or_default().chars().take(200).collect();
+                let detail: String = res
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect();
                 return Err(UcWebError::new(
                     status,
                     format!("UC image request failed (HTTP {status}) {detail}"),
                 ));
             }
-            let json: Value = res.json().await.map_err(|e| UcWebError::new(502, e.to_string()))?;
-            let result_url = json.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+            let json: Value = res
+                .json()
+                .await
+                .map_err(|e| UcWebError::new(502, e.to_string()))?;
+            let result_url = json
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             if result_url.is_empty() {
-                return Err(UcWebError::new(502, "UC image response carried no result url"));
+                return Err(UcWebError::new(
+                    502,
+                    "UC image response carried no result url",
+                ));
             }
-            self.poll_result_url(&client, &result_url, POLL_TIMEOUT_MS).await?;
+            self.poll_result_url(&client, &result_url, POLL_TIMEOUT_MS)
+                .await?;
             let asset = self.download_binary(&client, &result_url).await?;
             return Ok(UcMediaResult {
                 assets: vec![asset],
@@ -343,15 +522,30 @@ impl UcWebExecutor {
                 .map_err(|e| UcWebError::new(502, e.to_string()))?;
             if !signed_res.status().is_success() {
                 let status = signed_res.status().as_u16();
-                let detail: String = signed_res.text().await.unwrap_or_default().chars().take(200).collect();
+                let detail: String = signed_res
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect();
                 return Err(UcWebError::new(
                     status,
                     format!("UC signed-url request failed (HTTP {status}) {detail}"),
                 ));
             }
-            let signed: Value = signed_res.json().await.map_err(|e| UcWebError::new(502, e.to_string()))?;
-            let signed_url = signed.get("signed_url").and_then(Value::as_str).unwrap_or("");
-            let blob_name = signed.get("blob_name").and_then(Value::as_str).unwrap_or("");
+            let signed: Value = signed_res
+                .json()
+                .await
+                .map_err(|e| UcWebError::new(502, e.to_string()))?;
+            let signed_url = signed
+                .get("signed_url")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let blob_name = signed
+                .get("blob_name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if signed_url.is_empty() || blob_name.is_empty() {
                 return Err(UcWebError::new(
                     502,
@@ -384,16 +578,32 @@ impl UcWebExecutor {
             .map_err(|e| UcWebError::new(502, e.to_string()))?;
         if !gen_res.status().is_success() {
             let status = gen_res.status().as_u16();
-            let detail: String = gen_res.text().await.unwrap_or_default().chars().take(200).collect();
+            let detail: String = gen_res
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
             return Err(UcWebError::new(
                 status,
                 format!("UC video request failed (HTTP {status}) {detail}"),
             ));
         }
-        let gen_json: Value = gen_res.json().await.map_err(|e| UcWebError::new(502, e.to_string()))?;
-        let result_url = gen_json.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+        let gen_json: Value = gen_res
+            .json()
+            .await
+            .map_err(|e| UcWebError::new(502, e.to_string()))?;
+        let result_url = gen_json
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if result_url.is_empty() {
-            return Err(UcWebError::new(502, "UC video response carried no result url"));
+            return Err(UcWebError::new(
+                502,
+                "UC video response carried no result url",
+            ));
         }
         let timeout_ms = gen_json
             .get("timeout_seconds")
@@ -401,7 +611,8 @@ impl UcWebExecutor {
             .filter(|t| t.is_finite() && *t > 0.0)
             .map(|t| (t * 1000.0) as u64)
             .unwrap_or(POLL_TIMEOUT_MS);
-        self.poll_result_url(&client, &result_url, timeout_ms).await?;
+        self.poll_result_url(&client, &result_url, timeout_ms)
+            .await?;
         let asset = self.download_binary(&client, &result_url).await?;
         Ok(UcMediaResult {
             assets: vec![asset],
@@ -469,15 +680,28 @@ impl UcWebExecutor {
             .map_err(|e| UcWebError::new(502, e.to_string()))?;
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let detail: String = res.text().await.unwrap_or_default().chars().take(200).collect();
+            let detail: String = res
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
             return Err(UcWebError::new(
                 status,
                 format!("UC Clerk token mint failed (HTTP {status}) {detail}"),
             ));
         }
         let rotated_from_list = read_set_cookie_value(res.headers(), "__client");
-        let body: Value = res.json().await.map_err(|e| UcWebError::new(502, e.to_string()))?;
-        let jwt = body.get("jwt").and_then(Value::as_str).unwrap_or("").to_string();
+        let body: Value = res
+            .json()
+            .await
+            .map_err(|e| UcWebError::new(502, e.to_string()))?;
+        let jwt = body
+            .get("jwt")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if jwt.is_empty() {
             return Err(UcWebError::new(502, "UC Clerk token mint returned no jwt"));
         }
@@ -489,7 +713,11 @@ impl UcWebExecutor {
         } else {
             resolved.rotated_client
         };
-        Ok(UcClerkSession { jwt, uid, rotated_client })
+        Ok(UcClerkSession {
+            jwt,
+            uid,
+            rotated_client,
+        })
     }
 
     /// Resolve the Clerk session id. Legacy `__client` JWTs carry `sid`;
@@ -506,7 +734,10 @@ impl UcWebExecutor {
             .and_then(|c| c.get("sid").and_then(Value::as_str).map(str::to_string))
             .filter(|s| !s.is_empty())
         {
-            return Ok(ClerkSessionRef { sid, rotated_client: String::new() });
+            return Ok(ClerkSessionRef {
+                sid,
+                rotated_client: String::new(),
+            });
         }
         let client = self
             .pool
@@ -523,7 +754,10 @@ impl UcWebExecutor {
             .await
             .map_err(|e| UcWebError::new(502, e.to_string()))?;
         if !res.status().is_success() {
-            return Ok(ClerkSessionRef { sid: String::new(), rotated_client: String::new() });
+            return Ok(ClerkSessionRef {
+                sid: String::new(),
+                rotated_client: String::new(),
+            });
         }
         let rotated_client = read_set_cookie_value(res.headers(), "__client");
         let body: Value = res.json().await.unwrap_or(Value::Null);
@@ -545,7 +779,10 @@ impl UcWebExecutor {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        Ok(ClerkSessionRef { sid, rotated_client })
+        Ok(ClerkSessionRef {
+            sid,
+            rotated_client,
+        })
     }
 
     // ── Result polling / download ──────────────────────────────────────
@@ -576,7 +813,10 @@ impl UcWebExecutor {
                 tracing::warn!("UC-WEB result poll got HTTP {status} — continuing until timeout");
             }
         }
-        Err(UcWebError::new(502, "UC result did not become available in time"))
+        Err(UcWebError::new(
+            502,
+            "UC result did not become available in time",
+        ))
     }
 
     async fn download_binary(
@@ -624,7 +864,11 @@ impl UcWebExecutor {
             if let Some((_, b64)) = rest.split_once(";base64,") {
                 return base64::engine::general_purpose::STANDARD
                     .decode(b64)
-                    .map_err(|_| UcWebError::bad_request("UC image-to-video could not decode the input image"));
+                    .map_err(|_| {
+                        UcWebError::bad_request(
+                            "UC image-to-video could not decode the input image",
+                        )
+                    });
             }
         }
         if reference.starts_with("http://") || reference.starts_with("https://") {
@@ -650,7 +894,9 @@ impl UcWebExecutor {
         }
         base64::engine::general_purpose::STANDARD
             .decode(reference)
-            .map_err(|_| UcWebError::bad_request("UC image-to-video could not decode the input image"))
+            .map_err(|_| {
+                UcWebError::bad_request("UC image-to-video could not decode the input image")
+            })
     }
 }
 
@@ -680,15 +926,26 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
         if !allowed.is_empty() && !allowed.contains(&candidate) {
             return None;
         }
-        Some(AspectPick { aspect: candidate_leak(candidate), width: w, height: h })
+        Some(AspectPick {
+            aspect: candidate_leak(candidate),
+            width: w,
+            height: h,
+        })
     };
     // aspect strings are 'static literals from aspect_size's match arms.
     fn candidate_leak(s: &str) -> &'static str {
         // The candidates come from UC_ASPECT_SIZES keys — all 'static.
         match s {
-            "1:1" => "1:1", "16:9" => "16:9", "9:16" => "9:16", "4:3" => "4:3",
-            "3:4" => "3:4", "3:2" => "3:2", "2:3" => "2:3", "4:5" => "4:5",
-            "5:4" => "5:4", "21:9" => "21:9",
+            "1:1" => "1:1",
+            "16:9" => "16:9",
+            "9:16" => "9:16",
+            "4:3" => "4:3",
+            "3:4" => "3:4",
+            "3:2" => "3:2",
+            "2:3" => "2:3",
+            "4:5" => "4:5",
+            "5:4" => "5:4",
+            "21:9" => "21:9",
             _ => "1:1",
         }
     }
@@ -701,12 +958,15 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
         let h: f64 = dims.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         if w > 0.0 && h > 0.0 {
             let mut best: Option<(&'static str, f64)> = None;
-            for aspect in ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","4:5","5:4","21:9"] {
+            for aspect in [
+                "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9",
+            ] {
                 if !allowed.is_empty() && !allowed.contains(&aspect) {
                     continue;
                 }
                 if let Some((aw, ah)) = aspect_size(aspect) {
-                    let delta = ((aw.parse::<f64>().unwrap() / ah.parse::<f64>().unwrap()) - (w / h)).abs();
+                    let delta =
+                        ((aw.parse::<f64>().unwrap() / ah.parse::<f64>().unwrap()) - (w / h)).abs();
                     if best.map(|(_, d)| delta < d).unwrap_or(true) {
                         best = Some((aspect, delta));
                     }
@@ -714,15 +974,27 @@ fn aspect_for(size: Option<&str>, allowed: &[&str]) -> AspectPick {
             }
             if let Some((aspect, _)) = best {
                 let (width, height) = aspect_size(aspect).unwrap();
-                return AspectPick { aspect, width, height };
+                return AspectPick {
+                    aspect,
+                    width,
+                    height,
+                };
             }
         }
     }
-    let fallback = if allowed.is_empty() { "1:1" } else { allowed[0] };
+    let fallback = if allowed.is_empty() {
+        "1:1"
+    } else {
+        allowed[0]
+    };
     let (width, height) = aspect_size(fallback).unwrap_or(("1024", "1024"));
     // `fallback` borrows from `allowed` (non-'static); the pick's aspect is a
     // known literal so resolve it through the same 'static mapping used above.
-    AspectPick { aspect: candidate_leak(fallback), width, height }
+    AspectPick {
+        aspect: candidate_leak(fallback),
+        width,
+        height,
+    }
 }
 
 // ── Cookie / JWT helpers ────────────────────────────────────────────────
@@ -803,7 +1075,18 @@ fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => out.push(b as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

@@ -53,7 +53,7 @@ fn conn(provider: &str) -> ProviderConnection {
 #[test]
 fn targeted_providers_have_configs_and_urls() {
     let expectations: &[(&str, &str)] = &[
-        ("opencode-go", "https://opencode.ai/zen/go/v1"),
+        ("opencode-go", "https://opencode.ai/inference/go/openai/v1"),
         ("openai", "https://api.openai.com/v1/chat/completions"),
         (
             "nvidia",
@@ -210,12 +210,12 @@ fn zen_alias_opencode_go_message_routing() {
     assert_eq!(
         exec.build_url("minimax-m2.5", false, &conn("opencode-go"))
             .unwrap(),
-        "https://opencode.ai/zen/go/v1/messages"
+        "https://opencode.ai/inference/go/anthropic/v1/messages"
     );
     assert_eq!(
         exec.build_url("gpt-4o", false, &conn("opencode-go"))
             .unwrap(),
-        "https://opencode.ai/zen/go/v1/chat/completions"
+        "https://opencode.ai/inference/go/openai/v1/chat/completions"
     );
 }
 

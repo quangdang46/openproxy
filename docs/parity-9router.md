@@ -163,6 +163,28 @@ requests go out on reqwest/rustls with the full header/cookie fingerprint
 set kept in lockstep; Cloudflare challenges surface the upstream-style
 re-copy-cookie error.
 
+## Transport hardening (9router v0.5.116, `fix(transport): survive DPI-shaped networks`)
+
+Upstream commit `736be957` reworks the Node/undici transport for the claude provider:
+happy-eyeballs (`autoSelectFamilyAttemptTimeout: 250`), undici 8, and a single
+`X25519` ECDH curve via `NINEROUTER_TLS_ECDH_CURVE` because VN-ISP DPI RSTs
+Node's default ClientHello curve list. Evaluation of the Rust equivalent:
+
+- **TLS curve**: already covered. `rustls` (reqwest `rustls-tls`) offers
+  `X25519` first in its default `kx_groups`
+  (`X25519, secp256r1, secp384r1`), which is exactly the fingerprint upstream
+  pins. No `NINEROUTER_TLS_ECDH_CURVE` equivalent exists or is needed —
+  rustls exposes no per-request curve override through reqwest.
+- **Happy eyeballs**: not ported. `reqwest` → `hyper-util` `HttpConnector`
+  resolves all addresses via `tokio::net::lookup_host` and dials them in
+  resolver order (no RFC 8305 family racing / 250 ms fallback). The failure
+  mode upstream fixed (IPv4 path RST-ed while IPv6 works, or vice versa) is
+  mitigated here only by OS resolver ordering; a dual-stack racing connector
+  would be a bespoke hyper connector — deferred as JS-only.
+- **undici 8 stale-socket fix**: N/A — Rust uses hyper's connection pool,
+  which recycles idle connections independently of undici's keep-alive
+  semantics; the `proxyFetch` dead-socket retry loop has no analogue.
+
 ## Other residual parity nits
 
 | Item | Severity | Bead |

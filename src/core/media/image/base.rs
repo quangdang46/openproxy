@@ -130,6 +130,14 @@ pub trait ImageAdapter: Send + Sync {
     /// Build the request body (upstream-shaped JSON).
     async fn build_body(&self, request: &ImageRequest<'_>) -> Result<Value, String>;
 
+    /// 9router `canUseCredentials(creds)` (imageProviders/codex.js): adapters
+    /// that know an account cannot serve this modality (e.g. ChatGPT Free on
+    /// codex image generation) reject it here so the caller skips the account
+    /// WITHOUT locking it — it stays usable for other routes.
+    fn can_use_credentials(&self, _creds: &crate::types::ProviderConnection) -> bool {
+        true
+    }
+
     /// Optional: custom response parsing (async polling, SSE streaming, …).
     /// Default implementation reads the response as JSON.
     async fn parse_response(

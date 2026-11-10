@@ -2187,13 +2187,14 @@ mod tests {
                 }))
                 .collect::<Vec<_>>()
         });
-        // offset 11 → page offset 1 within the page, max 5.
+        // offset 11 → page=1 upstream, pageOffset = 11 % 10 = 1 → slice(1, 6)
+        // of the returned page (9router search/index.js:114-116).
         let mut r = req("hi", 5);
         r.offset = Some(11);
         let set = TINYFISH.normalize(&body, &r);
         assert_eq!(set.results.len(), 5);
-        assert_eq!(set.results[0].title, "T2");
-        assert_eq!(set.results[0].url, "https://x.com/2");
+        assert_eq!(set.results[0].title, "T1");
+        assert_eq!(set.results[0].url, "https://x.com/1");
         assert_eq!(set.total_results, Some(42));
     }
 }

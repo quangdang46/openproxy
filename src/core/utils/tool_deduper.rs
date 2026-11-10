@@ -87,6 +87,12 @@ fn tool_name(t: &Value) -> &str {
 /// ones (`openrouter/deepseek-chat`): strips a trailing `(level)` suffix,
 /// takes the last `/` segment, and requires a `deepseek-` prefix
 /// (case-insensitive).
+/// `pub(crate)` so `claude_format` can detect DeepSeek-served models for
+/// the opencode-go adaptive-thinking pass-back (9router 633c82f5).
+pub(crate) fn is_deepseek_model_pub(model_id: &str) -> bool {
+    is_deepseek_model(model_id)
+}
+
 fn is_deepseek_model(model_id: &str) -> bool {
     let mut clean = model_id.trim();
     // `model(level)` thinking suffix — upstream strips `/\([^()]+\)\s*$/`.
@@ -109,6 +115,10 @@ pub struct DedupeResult {
     pub tools: Vec<Value>,
     /// Names of any tools that were removed.
     pub stripped: Vec<String>,
+    /// Names removed by the MCP-equivalent rules only (not the DeepSeek
+    /// same-name pass). History `tool_reference` blocks naming these must be
+    /// cleaned — see [`clean_stripped_tool_references`].
+    pub mcp_stripped: Vec<String>,
 }
 
 /// Dedupe an OpenAI / Claude tools array.
@@ -123,6 +133,7 @@ pub fn dedupe_tools(tools: &[Value], client_tool: Option<ClientTool>, model: &st
         return DedupeResult {
             tools: tools.to_vec(),
             stripped: Vec::new(),
+            mcp_stripped: Vec::new(),
         };
     }
     let names: Vec<&str> = tools.iter().map(tool_name).collect();
@@ -166,6 +177,7 @@ pub fn dedupe_tools(tools: &[Value], client_tool: Option<ClientTool>, model: &st
         return DedupeResult {
             tools: tools.to_vec(),
             stripped: Vec::new(),
+            mcp_stripped: Vec::new(),
         };
     }
     let strip_set: HashSet<&str> = to_strip.iter().map(String::as_str).collect();
@@ -184,7 +196,79 @@ pub fn dedupe_tools(tools: &[Value], client_tool: Option<ClientTool>, model: &st
     DedupeResult {
         tools: kept,
         stripped,
+        mcp_stripped: to_strip,
     }
+}
+
+/// Drop `tool_reference` blocks inside `tool_result` contents that name a
+/// tool removed by MCP dedupe (9router v0.5.116 `a3039ab1`,
+/// `cleanStrippedToolReferences` in `open-sse/utils/toolDeduper.js`).
+///
+/// Claude Code's deferred tool loading leaves `tool_reference` blocks in
+/// history; when dedupe strips the named tool (e.g. WebSearch dropped
+/// because the Exa MCP is present), a surviving reference dangles and
+/// strict Claude-compatible upstreams (z.ai 400 code 1210) reject the whole
+/// request. References naming a stripped tool are removed; a result left
+/// with no content gets a text note — an empty content array is itself
+/// invalid.
+///
+/// `messages` is the translated messages array (Claude wire shape). Returns
+/// the number of reference blocks removed.
+pub fn clean_stripped_tool_references(messages: &mut [Value], stripped_names: &[String]) -> usize {
+    if messages.is_empty() || stripped_names.is_empty() {
+        return 0;
+    }
+    let stripped: HashSet<&str> = stripped_names.iter().map(String::as_str).collect();
+    let mut cleaned = 0usize;
+    for msg in messages.iter_mut() {
+        let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in content.iter_mut() {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(parts) = block.get_mut("content").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            // Collect the names of the references about to be dropped so the
+            // fallback note can name them (upstream joins each removed
+            // reference's tool_name).
+            let removed_names: Vec<String> = parts
+                .iter()
+                .filter(|p| {
+                    p.get("type").and_then(Value::as_str) == Some("tool_reference")
+                        && p.get("tool_name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| stripped.contains(n))
+                })
+                .filter_map(|p| {
+                    p.get("tool_name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            if removed_names.is_empty() {
+                continue;
+            }
+            cleaned += removed_names.len();
+            parts.retain(|p| {
+                !(p.get("type").and_then(Value::as_str) == Some("tool_reference")
+                    && p.get("tool_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| stripped.contains(n)))
+            });
+            if parts.is_empty() {
+                let note = removed_names
+                    .iter()
+                    .map(|n| format!("[Tool {n} is unavailable]"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                *parts = vec![serde_json::json!({"type": "text", "text": note})];
+            }
+        }
+    }
+    cleaned
 }
 
 #[cfg(test)]
@@ -289,6 +373,64 @@ mod tests {
         let res = dedupe_tools(&tools, Some(ClientTool::Claude), "claude-sonnet-4.6");
         assert_eq!(res.tools.len(), 1);
         assert_eq!(res.stripped, vec!["mcp__Claude_in_Chrome__navigate"]);
+    }
+
+    #[test]
+    fn tool_reference_naming_stripped_tool_is_dropped() {
+        // 9router a3039ab1: a tool_result whose content is only a
+        // tool_reference to a stripped tool gets a text note instead of an
+        // empty (invalid) content array.
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": [
+                    {"type": "tool_reference", "tool_name": "WebSearch"},
+                    {"type": "text", "text": "kept"}
+                ]
+            }]
+        })];
+        let stripped = vec!["WebSearch".to_string()];
+        assert_eq!(clean_stripped_tool_references(&mut messages, &stripped), 1);
+        let parts = messages[0]["content"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "kept");
+
+        // Sole reference → replaced by the unavailable note.
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": [{"type": "tool_reference", "tool_name": "WebFetch"}]
+            }]
+        })];
+        let stripped = vec!["WebFetch".to_string()];
+        assert_eq!(clean_stripped_tool_references(&mut messages, &stripped), 1);
+        let parts = messages[0]["content"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "[Tool WebFetch is unavailable]");
+    }
+
+    #[test]
+    fn tool_reference_to_surviving_tool_is_kept() {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": [{"type": "tool_reference", "tool_name": "mcp__exa__web_search_exa"}]
+            }]
+        })];
+        let stripped = vec!["WebSearch".to_string()];
+        assert_eq!(clean_stripped_tool_references(&mut messages, &stripped), 0);
+        assert_eq!(
+            messages[0]["content"][0]["content"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

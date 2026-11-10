@@ -7575,9 +7575,7 @@ async fn minimax_lease_connect(
         .unwrap_or_else(|| crate::oauth::minimax_lease::resolve_mcode_data_dir(None));
     // Validate availability up front so the user gets the broker's exact
     // failure reason instead of a dead connection.
-    if let Err(error) =
-        crate::oauth::minimax_lease::request_lease(&data_dir, 0, 10_000).await
-    {
+    if let Err(error) = crate::oauth::minimax_lease::request_lease(&data_dir, 0, 10_000).await {
         return (
             StatusCode::CONFLICT,
             Json(json!({ "error": error.message, "code": error.code })),

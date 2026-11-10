@@ -104,6 +104,20 @@ fn non_empty_string(value: Option<&Value>) -> bool {
     matches!(value, Some(Value::String(s)) if !s.is_empty())
 }
 
+/// JS `a || b` truthiness for the `choice.delta || choice.message` /
+/// `choice.message || choice.delta` picks (`inspectSSELine`,
+/// `isZeroContentResponse`): null/undefined, `false`, `0` and `""` fall
+/// through — but empty arrays/objects are TRUTHY in JS and must not.
+fn is_js_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(b) => !*b,
+        Value::Number(n) => n.as_f64() == Some(0.0),
+        Value::String(s) => s.is_empty(),
+        _ => false,
+    }
+}
+
 /// Claude stop_reason → hub (OpenAI) finish vocabulary — the `claude` arm of
 /// `toOpenAIFinish` (translator/concerns/finishReason.js). Only
 /// `refusal` maps to `content_filter`; every other reason maps to a
@@ -241,12 +255,12 @@ fn inspect_sse_line(line: &str) -> LineInfo {
     let mut info = LineInfo::default();
     if let Some(choices) = parsed.get("choices").and_then(Value::as_array) {
         for choice in choices {
-            // `choice.delta || choice.message` — JS `||` also falls through
-            // on an explicit JSON null, not just a missing key.
+            // `choice.delta || choice.message` — JS `||` falls through on
+            // every falsy value (null/false/0/""), not just a missing key.
             let delta = choice
                 .get("delta")
-                .filter(|v| !v.is_null())
-                .or_else(|| choice.get("message").filter(|v| !v.is_null()))
+                .filter(|v| !is_js_falsy(v))
+                .or_else(|| choice.get("message").filter(|v| !is_js_falsy(v)))
                 .cloned()
                 .unwrap_or(Value::Null);
             if delta_has_client_content(&delta) {
@@ -491,11 +505,12 @@ pub fn is_zero_content_response(data: &Value) -> bool {
             return true;
         };
 
-        // `choice.message || choice.delta` — JS `||` falls through on null.
+        // `choice.message || choice.delta` — JS `||` falls through on every
+        // falsy value, not just a missing key.
         let msg = choice
             .get("message")
-            .filter(|v| !v.is_null())
-            .or_else(|| choice.get("delta").filter(|v| !v.is_null()));
+            .filter(|v| !is_js_falsy(v))
+            .or_else(|| choice.get("delta").filter(|v| !is_js_falsy(v)));
         let content = msg.and_then(|m| m.get("content"));
         let has_content = match content {
             Some(Value::String(s)) => !s.trim().is_empty(),

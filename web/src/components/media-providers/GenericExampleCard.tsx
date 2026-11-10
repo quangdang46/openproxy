@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Card } from "@/shared/components";
-import { MEDIA_PROVIDER_KINDS, getProviderAlias, resolveProviderId } from "@/shared/constants/providers";
+import { AI_PROVIDERS, MEDIA_PROVIDER_KINDS, getProviderAlias, resolveProviderId } from "@/shared/constants/providers";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { Row, KIND_EXAMPLE_CONFIG, getModelKind } from "./exampleShared";
@@ -36,6 +36,16 @@ export function GenericExampleCard({ providerId, kind }: { providerId: string; k
   const kindConfig = MEDIA_PROVIDER_KINDS.find((k) => k.id === kind);
   const exConfig = KIND_EXAMPLE_CONFIG[kind];
   const safeExConfig = exConfig || {} as any;
+  // 9router v0.5.116 #2239: the web-fetch format selector must reflect the
+  // provider's fetchConfig.formats registry (e.g. Tavily has no "html"),
+  // falling back to a supported default when a previous selection is gone.
+  const formats = kind === "webFetch" ? (AI_PROVIDERS[providerId] as any)?.fetchConfig?.formats : null;
+  const hasFormats = Array.isArray(formats) && formats.length > 0;
+  const extraFields = ((safeExConfig.extraFields || []) as any[]).map((field: any) => (
+    field.key === "format" && hasFormats
+      ? { ...field, options: formats, default: formats.includes(field.default) ? field.default : formats[0] }
+      : field
+  ));
 
   const kindModels = getModelsByProviderId(providerId).filter((m: any) => getModelKind(m) === kind);
   const KIND_NEEDS_MODEL = new Set(["image", "video", "music", "imageToText"]);
@@ -50,7 +60,7 @@ export function GenericExampleCard({ providerId, kind }: { providerId: string; k
   const [refImage, setRefImage] = useState("");
   const [maskImage, setMaskImage] = useState("");
   const [extraValues, setExtraValues] = useState<Record<string, any>>(() =>
-    (safeExConfig.extraFields || []).reduce((acc: Record<string, any>, f: any) => { acc[f.key] = f.default ?? ""; return acc; }, {})
+    extraFields.reduce((acc: Record<string, any>, f: any) => { acc[f.key] = f.default ?? ""; return acc; }, {})
   );
   const [apiKey, setApiKey] = useState("");
   const [useTunnel, setUseTunnel] = useState(false);
@@ -100,7 +110,12 @@ export function GenericExampleCard({ providerId, kind }: { providerId: string; k
   const refImagePreviewSrc = toImagePreviewSrc(effectiveRefImage);
   const maskImagePreviewSrc = toImagePreviewSrc(effectiveMaskImage);
 
-  const extraBodyFromFields = Object.entries(extraValues).reduce<Record<string, any>>((acc, [k, v]) => {
+  // Clamp a stale format selection to a supported default before it reaches
+  // the request body (backend would 400 it anyway).
+  const effectiveExtraValues = hasFormats && !formats.includes(extraValues.format)
+    ? { ...extraValues, format: (extraFields.find((field: any) => field.key === "format") as any)?.default }
+    : extraValues;
+  const extraBodyFromFields = Object.entries(effectiveExtraValues).reduce<Record<string, any>>((acc, [k, v]) => {
     if (v === "" || v === null || v === undefined) return acc;
     if (typeof v === "number" && Number.isNaN(v)) return acc;
     acc[k] = v;
@@ -370,13 +385,13 @@ export function GenericExampleCard({ providerId, kind }: { providerId: string; k
           </Row>
         )}
 
-        {(exConfig.extraFields || [])
+        {extraFields
           .filter((f: any) => kindModels.length === 0 || (Array.isArray((selectedModelObj as any)?.params) && (selectedModelObj as any).params.includes(f.key)))
           .map((f: any) => (
           <Row key={f.key} label={f.label}>
             {f.type === "select" ? (
               <select
-                value={extraValues[f.key] ?? ""}
+                value={effectiveExtraValues[f.key] ?? ""}
                 onChange={(e) => setExtraValues((s) => ({ ...s, [f.key]: e.target.value }))}
                 className="w-full px-3 py-1.5 text-sm border border-hairline rounded-mini-md bg-canvas focus:outline-none focus:border-brand-coral"
               >

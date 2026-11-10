@@ -26,8 +26,24 @@ use super::{
 };
 use crate::types::{ProviderConnection, ProviderNode};
 
-/// JS codebuddy-intl.js:24 — injected leading system prompt.
+/// JS codebuddy-intl.js:24 — injected leading system prompt (fallback when
+/// the client sent no usable system/developer prompt).
 const INTL_SYSTEM_PROMPT: &str = "You are CodeBuddy Code.";
+
+/// Extract a system/developer message's text the way upstream
+/// codebuddy-intl.js does: string content verbatim, array content joined
+/// with "\n" on each part's `text`, anything else "".
+fn intl_system_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|c| c.get("text").and_then(Value::as_str).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
 
 pub struct CodeBuddyIntlExecutor {
     inner: DefaultExecutor,
@@ -149,7 +165,38 @@ impl CodeBuddyIntlExecutor {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut messages = vec![json!({"role": "system", "content": INTL_SYSTEM_PROMPT})];
+
+        // 9router v0.5.116 3ca04639: preserve client system/developer prompts
+        // instead of always injecting the default. Tencent's WAF flags
+        // third-party CLI agent identity strings (Claude Code, Cursor, …) as
+        // unauthorized tooling — neutralize ONLY matching prompts while user
+        // prompts survive.
+        let client_system_prompts: Vec<String> = source
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.get("role").and_then(Value::as_str),
+                    Some("system") | Some("developer")
+                )
+            })
+            .filter_map(|m| m.get("content"))
+            .map(intl_system_text)
+            .map(|text| {
+                if !text.is_empty() && super::codebuddy_cn::AGENT_PATTERN.is_match(&text) {
+                    super::codebuddy_cn::NEUTRAL_PROMPT.to_string()
+                } else {
+                    text
+                }
+            })
+            .filter(|t| !t.is_empty())
+            .collect();
+        let system_prompt_text = if client_system_prompts.is_empty() {
+            INTL_SYSTEM_PROMPT.to_string()
+        } else {
+            client_system_prompts.join("\n\n")
+        };
+
+        let mut messages = vec![json!({"role": "system", "content": system_prompt_text})];
         for message in source {
             let role = message.get("role").and_then(Value::as_str).unwrap_or("");
             if role == "system" || role == "developer" {
@@ -188,7 +235,7 @@ mod tests {
             "model": "glm-5",
             "stream": false,
             "messages": [
-                {"role": "system", "content": "you are claude code"},
+                {"role": "system", "content": "You are a professional translator."},
                 {"role": "developer", "content": "dev note"},
                 {"role": "user", "content": "plain string prompt"},
                 {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}
@@ -198,15 +245,75 @@ mod tests {
         assert_eq!(out["stream"], true);
 
         let messages = out["messages"].as_array().unwrap();
-        // Leading injected system; system/developer dropped.
+        // Leading system prompt now carries the CLIENT's prompts joined
+        // (9router v0.5.116 3ca04639); system/developer roles are dropped
+        // from the tail.
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "You are CodeBuddy Code.");
+        assert_eq!(
+            messages[0]["content"],
+            "You are a professional translator.\n\ndev note"
+        );
         // Bare-string user content becomes a typed text block (11101 fix).
         assert_eq!(messages[1]["content"][0]["type"], "text");
         assert_eq!(messages[1]["content"][0]["text"], "plain string prompt");
         // Assistant array content passes through untouched.
         assert_eq!(messages[2]["role"], "assistant");
+    }
+
+    // --- 9router v0.5.116 3ca04639: client system prompts + WAF sanitize ---
+
+    #[test]
+    fn intl_forwards_client_system_prompt() {
+        let body = json!({
+            "messages": [
+                {"role": "system", "content": "You are a professional translator."},
+                {"role": "user", "content": "Translate this text."}
+            ]
+        });
+        let out = CodeBuddyIntlExecutor::transform_request_intl(&body);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "You are a professional translator.");
+    }
+
+    #[test]
+    fn intl_falls_back_to_default_prompt_when_no_system() {
+        let body = json!({"messages": [{"role": "user", "content": "Hello"}]});
+        let out = CodeBuddyIntlExecutor::transform_request_intl(&body);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "You are CodeBuddy Code.");
+    }
+
+    #[test]
+    fn intl_neutralizes_cli_agent_identity_for_waf() {
+        let body = json!({
+            "messages": [
+                {"role": "system", "content": "You are Claude Code, Anthropic's official CLI for coding."},
+                {"role": "user", "content": "Fix this bug"}
+            ]
+        });
+        let out = CodeBuddyIntlExecutor::transform_request_intl(&body);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"],
+            "You are a helpful AI assistant that helps with software engineering tasks."
+        );
+    }
+
+    #[test]
+    fn intl_system_array_content_joins_text_parts() {
+        let body = json!({
+            "messages": [
+                {"role": "system", "content": [
+                    {"type": "text", "text": "part one"},
+                    {"type": "text", "text": "part two"}
+                ]},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let out = CodeBuddyIntlExecutor::transform_request_intl(&body);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "part one\npart two");
     }
 
     #[test]

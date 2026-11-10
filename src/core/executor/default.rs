@@ -230,7 +230,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "opencode-go",
-            ProviderConfig::openai("https://opencode.ai/zen/go/v1"),
+            ProviderConfig::openai("https://opencode.ai/inference/go/openai/v1"),
         ),
         // Zen answers 200 for unauthenticated POSTs, so auth is optional
         // (`PROVIDER_OPTIONAL_AUTH`) and model ids pass through verbatim.
@@ -1012,8 +1012,16 @@ fn minimax_quota_message(provider: &str, status: u16, body: &str) -> Option<Stri
     let msg = parsed
         .as_ref()
         .and_then(|v| v.pointer("/error/message").and_then(Value::as_str))
-        .or_else(|| parsed.as_ref().and_then(|v| v.get("message").and_then(Value::as_str)))
-        .or_else(|| parsed.as_ref().and_then(|v| v.get("msg").and_then(Value::as_str)))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("message").and_then(Value::as_str))
+        })
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("msg").and_then(Value::as_str))
+        })
         .or_else(|| {
             parsed
                 .as_ref()
@@ -2042,16 +2050,13 @@ impl DefaultExecutor {
         }
 
         if self.provider == "opencode-go" {
-            let path = if opencode_go_uses_claude_format(model) {
-                "messages"
-            } else {
-                "chat/completions"
-            };
-            return Ok(format!(
-                "{}/{}",
-                self.config.base_url.trim_end_matches('/'),
-                path
-            ));
+            // 9router v0.5.116 (7ef6df56): retired /zen/go/v1 → the openai
+            // and anthropic legs now live under different /inference/go
+            // prefixes, so the path alone cannot be appended to one base.
+            if opencode_go_uses_claude_format(model) {
+                return Ok("https://opencode.ai/inference/go/anthropic/v1/messages".to_string());
+            }
+            return Ok("https://opencode.ai/inference/go/openai/v1/chat/completions".to_string());
         }
 
         if self.config.base_url.contains("{accountId}")
@@ -2449,6 +2454,19 @@ impl DefaultExecutor {
         let attributed = self.apply_nous_attribution(body, model, stream, credentials);
         let mut body = self.apply_json_schema_fallback(&attributed);
 
+        // 9router v0.5.116 (963787f7, default.js transformRequest):
+        // OpenAI-compatible upstreams (NVIDIA NIM, DeepSeek) reject
+        // `stream_options` on non-streaming requests with 400 "Stream options
+        // can only be defined when stream=True".
+        if !stream
+            && body.get("stream_options").is_some()
+            && body.get("stream").and_then(Value::as_bool) != Some(true)
+        {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("stream_options");
+            }
+        }
+
         // Normalize developer→system role (many providers reject role:developer)
         normalize_developer_role(&mut body);
 
@@ -2704,10 +2722,9 @@ impl DefaultExecutor {
             match crate::oauth::minimax_lease::get_lease_token(&request.credentials).await {
                 Ok(lease) => {
                     request.credentials.access_token = Some(lease.access_token.clone());
-                    request.credentials.expires_at = chrono::DateTime::from_timestamp_millis(
-                        lease.expires_at_ms,
-                    )
-                    .map(|dt| dt.to_rfc3339());
+                    request.credentials.expires_at =
+                        chrono::DateTime::from_timestamp_millis(lease.expires_at_ms)
+                            .map(|dt| dt.to_rfc3339());
                 }
                 Err(error) => {
                     return Err(ExecutorError::AuthLease {
@@ -2760,6 +2777,11 @@ impl DefaultExecutor {
 
         for url in &urls {
             let use_hyper = self.use_hyper_transport(&request, url);
+            // 9router base.js `forceFreshSocketByUrl[urlIndex]`: once a
+            // transport failure or edge 502 burns a retry on this URL, every
+            // later attempt on it uses a fresh socket — the pooled connection
+            // the edge silently dropped must not be drawn again.
+            let mut force_fresh_socket = false;
 
             // The retry loop for this URL.
             // One budget for the whole url: network exceptions and retryable
@@ -2785,13 +2807,23 @@ impl DefaultExecutor {
                 // pushed through the 502 bucket and spends the same budget
                 // (base.js:174).
                 let upstream = match self
-                    .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                    .send_one(
+                        url,
+                        &headers,
+                        &transformed_body,
+                        &request,
+                        use_hyper,
+                        force_fresh_socket,
+                    )
                     .await
                 {
                     Ok(response) => response,
                     Err(err) => {
                         let (_, delay_ms) = retry_policy(http::StatusCode::BAD_GATEWAY);
                         if retry + 1 < max_attempts {
+                            // Network exception → force a fresh socket on retry
+                            // (base.js: `forceFreshSocketByUrl[urlIndex] = true`).
+                            force_fresh_socket = true;
                             tracing::warn!(
                                 target: "openproxy::executor",
                                 provider = %self.provider,
@@ -2880,7 +2912,14 @@ impl DefaultExecutor {
                             // would abandon a chain the main send would have
                             // rotated through.
                             let retry_resp = match self
-                                .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                                .send_one(
+                                    url,
+                                    &headers,
+                                    &transformed_body,
+                                    &request,
+                                    use_hyper,
+                                    force_fresh_socket,
+                                )
                                 .await
                             {
                                 Ok(response) => response,
@@ -2908,12 +2947,9 @@ impl DefaultExecutor {
                             // that became a 429 is a quota problem, and the
                             // caller picks cooldown and backoff from this.
                             status = retry_resp.status();
-                            if is_minimax_code
-                                && status == http::StatusCode::FORBIDDEN
-                            {
-                                quota_body = Some(
-                                    retry_resp.text().await.chars().take(4000).collect(),
-                                );
+                            if is_minimax_code && status == http::StatusCode::FORBIDDEN {
+                                quota_body =
+                                    Some(retry_resp.text().await.chars().take(4000).collect());
                             }
                         }
                     }
@@ -2925,9 +2961,7 @@ impl DefaultExecutor {
                         && is_minimax_code
                         && status == http::StatusCode::FORBIDDEN
                     {
-                        quota_body = Some(
-                            upstream.text().await.chars().take(4000).collect(),
-                        );
+                        quota_body = Some(upstream.text().await.chars().take(4000).collect());
                     }
                     let (err_status, err_detail) = match quota_body
                         .as_deref()
@@ -2986,8 +3020,11 @@ impl DefaultExecutor {
                 }
 
                 // 502 Bad Gateway: 3 retries x 3s, then surface the raw 502.
+                // A 502 from an edge is typically a poisoned keep-alive
+                // socket — retry fresh (base.js forceFreshSocketByUrl).
                 if status == http::StatusCode::BAD_GATEWAY {
                     if retry < retry_policy(status).0 {
+                        force_fresh_socket = true;
                         tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
@@ -3081,6 +3118,12 @@ impl DefaultExecutor {
     }
 
     /// Send a single request without retries, returning the raw upstream response.
+    /// `force_fresh` carries 9router base.js `forceFreshSocketByUrl`: after a
+    /// connect timeout, network error, or edge 502 the retry draws a
+    /// no-keep-alive client instead of possibly reusing the socket that just
+    /// died (v0.5.116 commit 963787f7). The hyper transport has no per-request
+    /// fresh mode — its pool idle TTL is already capped at
+    /// `FETCH_KEEPALIVE_TIMEOUT_MS`.
     async fn send_one(
         &self,
         url: &str,
@@ -3088,6 +3131,7 @@ impl DefaultExecutor {
         transformed_body: &Value,
         request: &ExecutionRequest,
         use_hyper: bool,
+        force_fresh: bool,
     ) -> Result<UpstreamResponse, ExecutorError> {
         if use_hyper {
             let client = self.pool.get_hyper_direct(&self.provider)?;
@@ -3113,7 +3157,12 @@ impl DefaultExecutor {
                 .build()
                 .map_err(ExecutorError::Request)?;
             self.pool
-                .send_with_tls_fallback(&self.provider, request.proxy.as_ref(), req)
+                .send_with_tls_fallback_opts(
+                    &self.provider,
+                    request.proxy.as_ref(),
+                    req,
+                    force_fresh,
+                )
                 .await
                 .map_err(ExecutorError::Request)
                 .map(UpstreamResponse::Reqwest)
@@ -3159,10 +3208,9 @@ impl DefaultExecutor {
                 Ok(lease) => {
                     let mut updated = credentials.clone();
                     updated.access_token = Some(lease.access_token.clone());
-                    updated.expires_at = chrono::DateTime::from_timestamp_millis(
-                        lease.expires_at_ms,
-                    )
-                    .map(|dt| dt.to_rfc3339());
+                    updated.expires_at =
+                        chrono::DateTime::from_timestamp_millis(lease.expires_at_ms)
+                            .map(|dt| dt.to_rfc3339());
                     return Some(updated);
                 }
                 Err(error) => {
@@ -4405,13 +4453,13 @@ mod tests {
         // Non-claude model → /chat/completions under the /go base.
         let url = executor.build_url("qwen3.6", false, &creds).unwrap();
         assert_eq!(
-            url, "https://opencode.ai/zen/go/v1/chat/completions",
+            url, "https://opencode.ai/inference/go/openai/v1/chat/completions",
             "opencode-go default URL must include the /go segment"
         );
         // Claude-format model → /messages under the /go base.
         let url = executor.build_url("minimax-m3", false, &creds).unwrap();
         assert_eq!(
-            url, "https://opencode.ai/zen/go/v1/messages",
+            url, "https://opencode.ai/inference/go/anthropic/v1/messages",
             "claude-format opencode-go URL must include /go"
         );
     }

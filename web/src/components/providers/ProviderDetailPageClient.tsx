@@ -28,11 +28,16 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
+import MinimaxLeaseButton from "./MinimaxLeaseButton";
 import AutoPingScheduleModal from "@/components/usage/AutoPingScheduleModal";
 import { getScheduleSlotLabels, type PingSchedule } from "@/shared/services/quotaPingSchedule";
 import { fetchSettingsStrict } from "@/shared/utils/api";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
+
+// 9router MCODE_LEASE_PROVIDERS — MiniMax Code providers that can borrow the
+// desktop app's sign-in over the local auth-lease pipe (authType mcode-lease).
+const MCODE_LEASE_PROVIDERS = new Set(["minimax-code", "minimax-code-global"]);
 
 const AUTO_PING_SETTINGS_KEYS: Record<string, string> = {
   claude: "claudeAutoPing",
@@ -1769,6 +1774,9 @@ export default function ProviderDetailPageClient() {
                         Cookie
                       </Button>
                     )}
+                    {!isCompatible && MCODE_LEASE_PROVIDERS.has(providerId) && (
+                      <MinimaxLeaseButton providerId={providerId} onConnected={fetchConnections} />
+                    )}
                     {!isCompatible && providerId === "codex" && (
                       <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
                         Bulk Add
@@ -1857,6 +1865,13 @@ export default function ProviderDetailPageClient() {
                         >
                           Cookie
                         </Button>
+                      )}
+                      {MCODE_LEASE_PROVIDERS.has(providerId) && (
+                        <MinimaxLeaseButton
+                          providerId={providerId}
+                          onConnected={fetchConnections}
+                          size="sm"
+                        />
                       )}
                       {providerId === "codex" && (
                         <Button

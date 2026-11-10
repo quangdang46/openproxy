@@ -23,13 +23,17 @@ const ALLOWED_TOOL_TYPES: &[&str] = &["function"];
 // Tool-level fields that Fireworks AI / OCg upstream rejects
 const TOOL_FORBIDDEN_FIELDS: &[&str] = &["strict"];
 
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+// 9router v0.5.116 (7ef6df56): OpenCode retired /zen/go/v1 for
+// personal/Teams keys (403 there); inference endpoints live under
+// /inference/go/{openai,anthropic}/v1.
+const OPENCODE_GO_OPENAI_BASE: &str = "https://opencode.ai/inference/go/openai/v1";
+const OPENCODE_GO_CLAUDE_BASE: &str = "https://opencode.ai/inference/go/anthropic/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
 const OPENCODE_GO_DEFAULT_PATH: &str = "/chat/completions";
 /// Responses-only models (Muse Spark, grok-4.6, gpt-5.6-luna, …) live on
-/// `/zen/go/v1/responses` even when a stale runtimeTransport leaks in
-/// (opencode-go.js:17,118-122).
-const OPENCODE_GO_RESPONSES_URL: &str = "https://opencode.ai/zen/go/v1/responses";
+/// `/inference/go/openai/v1/responses` even when a stale runtimeTransport
+/// leaks in (opencode-go.js registry transports[2]).
+const OPENCODE_GO_RESPONSES_URL: &str = "https://opencode.ai/inference/go/openai/v1/responses";
 
 /// The gate header the Zen gateway rejects a request without
 /// (`MissingSessionID`). 9router `open-sse/executors/opencode-go.js:12`.
@@ -283,12 +287,10 @@ impl OpenCodeGoExecutor {
         if Self::is_responses_model(model) {
             return OPENCODE_GO_RESPONSES_URL.to_string();
         }
-        let path = if Self::is_claude_format(model) {
-            OPENCODE_GO_CLAUDE_PATH
-        } else {
-            OPENCODE_GO_DEFAULT_PATH
-        };
-        format!("{}{}", OPENCODE_GO_BASE, path)
+        if Self::is_claude_format(model) {
+            return format!("{}{}", OPENCODE_GO_CLAUDE_BASE, OPENCODE_GO_CLAUDE_PATH);
+        }
+        format!("{}{}", OPENCODE_GO_OPENAI_BASE, OPENCODE_GO_DEFAULT_PATH)
     }
 
     fn build_headers(

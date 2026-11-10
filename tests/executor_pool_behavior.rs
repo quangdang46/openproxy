@@ -198,13 +198,13 @@ fn default_executor_builds_static_and_compatible_urls() {
         opencode_go
             .build_url("kimi-k2.6", false, &connection("opencode-go"))
             .expect("opencode-go url"),
-        "https://opencode.ai/zen/go/v1/chat/completions"
+        "https://opencode.ai/inference/go/openai/v1/chat/completions"
     );
     assert_eq!(
         opencode_go
             .build_url("minimax-m2.5", false, &connection("opencode-go"))
             .expect("opencode-go claude-format url"),
-        "https://opencode.ai/zen/go/v1/messages"
+        "https://opencode.ai/inference/go/anthropic/v1/messages"
     );
 
     let cloudflare =
@@ -271,7 +271,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
         ),
         (
             "opencode-go",
-            "https://opencode.ai/zen/go/v1/chat/completions",
+            "https://opencode.ai/inference/go/openai/v1/chat/completions",
         ),
         (
             "glm-cn",

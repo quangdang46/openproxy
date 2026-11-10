@@ -14,8 +14,8 @@
 //! `/backend-api/f/conversation/prepare` → `/f/conversation` SSE → poll
 //! `/backend-api/conversation/{id}` until `is_complete`.
 //!
-//! Deferred (see bead): image generation (`imageGenHttp.js`/`imageGen.js`)
-//! and the Playwright clean-room adapter (`adapter.js`, `browserSession.js`).
+//! Deferred (see bead openproxy-4d5h.8): the Playwright clean-room adapter
+//! (`adapter.js`, `browserSession.js`) — the Turnstile fallback.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

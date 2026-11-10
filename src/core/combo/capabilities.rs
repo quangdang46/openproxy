@@ -291,24 +291,28 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
         // resolve to this id): Devin CLI's registry declares a 200k context
         // window for these GPT variants.
         let devin_cli_gpt = serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 128000 });
-        table.insert("devin-cli", HashMap::from([
-            ("gpt-5.4-high", devin_cli_gpt.clone()),
-            ("gpt-5.4-medium", devin_cli_gpt.clone()),
-            ("gpt-5.4-low", devin_cli_gpt.clone()),
-            ("gpt-5.5-xhigh", devin_cli_gpt.clone()),
-            ("gpt-5.5-high", devin_cli_gpt.clone()),
-            ("gpt-5.5-medium", devin_cli_gpt.clone()),
-            ("gpt-5.5-low", devin_cli_gpt),
-        ]));
+        table.insert(
+            "devin-cli",
+            HashMap::from([
+                ("gpt-5.4-high", devin_cli_gpt.clone()),
+                ("gpt-5.4-medium", devin_cli_gpt.clone()),
+                ("gpt-5.4-low", devin_cli_gpt.clone()),
+                ("gpt-5.5-xhigh", devin_cli_gpt.clone()),
+                ("gpt-5.5-high", devin_cli_gpt.clone()),
+                ("gpt-5.5-medium", devin_cli_gpt.clone()),
+                ("gpt-5.5-low", devin_cli_gpt),
+            ]),
+        );
         // Upstream PROVIDER_CAPABILITIES["minimax-code"] — MCode credits
         // lane (Anthropic messages on mavis; claude-adaptive effort).
         // minimax-code-global serves the same catalog upstream.
-        let minimax_code_caps = |ctx: u64, vision: bool| {
-            serde_json::json!({ "vision": vision, "reasoning": true, "thinkingFormat": "claude-adaptive", "thinkingCanDisable": false, "contextWindow": ctx, "maxOutput": 128000 })
-        };
+        let minimax_code_caps = |ctx: u64, vision: bool| serde_json::json!({ "vision": vision, "reasoning": true, "thinkingFormat": "claude-adaptive", "thinkingCanDisable": false, "contextWindow": ctx, "maxOutput": 128000 });
         let minimax_code_table = || {
             HashMap::from([
-                ("MiniMax-M3.1-Flash-Preview", minimax_code_caps(512000, true)),
+                (
+                    "MiniMax-M3.1-Flash-Preview",
+                    minimax_code_caps(512000, true),
+                ),
                 ("MiniMax-M3", minimax_code_caps(512000, true)),
                 ("MiniMax-M2.7", minimax_code_caps(200000, false)),
                 ("MiniMax-M2.7-highspeed", minimax_code_caps(200000, false)),
@@ -331,9 +335,7 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
         // Upstream PROVIDER_CAPABILITIES["qoder"] — opaque model ids match
         // no name heuristic, so the table carries vision/reasoning/limits
         // verbatim from /algo/api/v2/model/list. qoder-cn shares it.
-        let qoder_caps = |vision: bool, reasoning: bool, ctx: u64, out: u64| {
-            serde_json::json!({ "vision": vision, "reasoning": reasoning, "contextWindow": ctx, "maxOutput": out })
-        };
+        let qoder_caps = |vision: bool, reasoning: bool, ctx: u64, out: u64| serde_json::json!({ "vision": vision, "reasoning": reasoning, "contextWindow": ctx, "maxOutput": out });
         let qoder_table = || {
             HashMap::from([
                 // Tier aliases resolve to a variable target upstream; keep

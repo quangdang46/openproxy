@@ -1460,8 +1460,7 @@ fn apply_projected_headroom_messages(
         }
         let role_ok = actual.get("role").and_then(Value::as_str)
             == expected.get("role").and_then(Value::as_str);
-        let tc_ok = non_null(actual.get("tool_call_id"))
-            == non_null(expected.get("tool_call_id"));
+        let tc_ok = non_null(actual.get("tool_call_id")) == non_null(expected.get("tool_call_id"));
         if !role_ok || !tc_ok {
             if let Some(d) = diagnostics.as_deref_mut() {
                 d.set_reason(format!(

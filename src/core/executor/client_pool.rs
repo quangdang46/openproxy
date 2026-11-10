@@ -180,9 +180,12 @@ impl ClientPool {
         if fresh {
             key = format!("{key}{FRESH_SOCKET_KEY_SUFFIX}");
         }
-        let result = self.reqwest_clients.entry(key.clone()).or_try_insert_with(|| {
-            build_reqwest_client(proxy, timeout, insecure, no_redirect, fresh)
-        });
+        let result = self
+            .reqwest_clients
+            .entry(key.clone())
+            .or_try_insert_with(|| {
+                build_reqwest_client(proxy, timeout, insecure, no_redirect, fresh)
+            });
         match result {
             Ok(entry) => {
                 self.touch(key);
@@ -252,15 +255,40 @@ impl ClientPool {
         proxy: Option<&ProxyTarget>,
         request: reqwest::Request,
     ) -> Result<reqwest::Response, reqwest::Error> {
+        self.send_with_tls_fallback_opts(provider_key, proxy, request, false)
+            .await
+    }
+
+    /// [`Self::send_with_tls_fallback`] with the executor/base.js
+    /// `forceFreshSocket` escalation (9router v0.5.116, commit 963787f7):
+    /// after a connect timeout, network error, or edge 502, the retry must
+    /// not draw another possibly-poisoned pooled socket — the primary client
+    /// is [`Self::get_fresh`], whose ~zero idle TTL guarantees a new
+    /// TCP/TLS connection.
+    pub async fn send_with_tls_fallback_opts(
+        &self,
+        provider_key: &str,
+        proxy: Option<&ProxyTarget>,
+        request: reqwest::Request,
+        force_fresh: bool,
+    ) -> Result<reqwest::Response, reqwest::Error> {
         let Some(retry_request) = request.try_clone() else {
-            let client = self.get(provider_key, proxy)?;
+            let client = if force_fresh {
+                self.get_fresh(provider_key, proxy)?
+            } else {
+                self.get(provider_key, proxy)?
+            };
             return client.execute(request).await;
         };
         // The stale-socket replay needs a second replayable copy; a request
         // that clones once but not twice still gets the TLS fallback.
         let fresh_request = request.try_clone();
 
-        let secure_client = self.get(provider_key, proxy)?;
+        let secure_client = if force_fresh {
+            self.get_fresh(provider_key, proxy)?
+        } else {
+            self.get(provider_key, proxy)?
+        };
         let result = send_once_with_insecure_retry(
             strict_ssl_enabled(),
             || secure_client.execute(request),
@@ -490,9 +518,7 @@ pub fn fresh_socket_replay_allowed(proxy: Option<&ProxyTarget>) -> bool {
 /// The proxy half of the gate, split out so it can be unit-tested without
 /// mutating the process-wide `FETCH_FRESH_RETRY` env var.
 fn fresh_socket_replay_direct_only(proxy: Option<&ProxyTarget>) -> bool {
-    proxy
-        .map(|p| p.url.trim().is_empty())
-        .unwrap_or(true)
+    proxy.map(|p| p.url.trim().is_empty()).unwrap_or(true)
 }
 
 /// Port of `isStaleSocketError` (proxyFetch.js, v0.5.116 commit 963787f7):

@@ -6473,7 +6473,7 @@
       "alias": "opencode-go",
       "format": "openai",
       "authType": "apikey",
-      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "baseUrl": "https://opencode.ai/inference/go/openai/v1",
       "models": [
         {
           "id": "glm-5.2",

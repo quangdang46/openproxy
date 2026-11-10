@@ -160,8 +160,7 @@ async fn persist_connection_api_key(state: &AppState, connection_id: &str, api_k
                 .position(|c| c.id == conn_id)
             {
                 app.provider_connections[idx].api_key = Some(key);
-                app.provider_connections[idx].updated_at =
-                    Some(chrono::Utc::now().to_rfc3339());
+                app.provider_connections[idx].updated_at = Some(chrono::Utc::now().to_rfc3339());
             }
         })
         .await;
@@ -518,7 +517,10 @@ pub(crate) async fn systemone_decision(
 
     let mut connections = select_media_connections(&snapshot, &provider);
     if connections.is_empty() {
-        if matches!(provider.as_str(), "opencode" | "opencode-zen" | "ollama-local") {
+        if matches!(
+            provider.as_str(),
+            "opencode" | "opencode-zen" | "ollama-local"
+        ) {
             connections.push(
                 snapshot
                     .provider_connections
@@ -540,12 +542,16 @@ pub(crate) async fn systemone_decision(
     for connection in &connections {
         let provider_specific_data = &connection.provider_specific_data;
         let url = crate::core::media::systemone::build_systemone_url(
-            provider_specific_data.get("baseUrl").and_then(Value::as_str),
+            provider_specific_data
+                .get("baseUrl")
+                .and_then(Value::as_str),
             &cfg,
         );
         let Ok(url) = crate::core::media::systemone::expand_systemone_url(
             &url,
-            provider_specific_data.get("accountId").and_then(Value::as_str),
+            provider_specific_data
+                .get("accountId")
+                .and_then(Value::as_str),
             &resolved.model,
         ) else {
             return None;
@@ -596,7 +602,11 @@ pub(crate) async fn systemone_decision(
             std::time::Duration::from_millis(
                 crate::core::combo::smart::DEFAULT_SYSTEMONE_TIMEOUT_MS,
             ),
-            client.post(&url).headers(headers).json(&request_body).send(),
+            client
+                .post(&url)
+                .headers(headers)
+                .json(&request_body)
+                .send(),
         )
         .await
         {
@@ -1568,6 +1578,34 @@ async fn execute_media_provider(
         );
     }
 
+    // 9router imageGeneration.js NO_AUTH_PROVIDERS — `credentials: null`
+    // for providers that need no credential at all: the local UIs
+    // (sdwebui/comfyui — upstream reads the registry imageConfig.baseUrl,
+    // our adapters hardcode the same localhost endpoints) and the free
+    // web tier (veoaifree-web's executor ignores credentials entirely).
+    // Checked before credential selection, exactly like upstream, so a
+    // stored connection can never shadow the no-auth path.
+    if route_kind == "images/generations" && is_no_auth_image_provider(provider) {
+        let creds = crate::types::ProviderConnection {
+            id: "noauth".to_string(),
+            provider: provider.clone(),
+            auth_type: "none".to_string(),
+            name: Some("Public".to_string()),
+            is_active: Some(true),
+            access_token: Some("public".to_string()),
+            ..Default::default()
+        };
+        return execute_media_provider_on_connection(
+            state,
+            request_body,
+            provider,
+            model,
+            route_kind,
+            &creds,
+        )
+        .await;
+    }
+
     let connections = select_media_connections(&snapshot, provider);
     if connections.is_empty() {
         // 9router tts.js:99-106 — `ollama-local` synthesizes with
@@ -1606,8 +1644,29 @@ async fn execute_media_provider(
         );
     }
 
+    // 9router imageGeneration.js:139-146 — the image adapter can reject an
+    // account that cannot serve image generation (ChatGPT Free on codex:
+    // the image_generation tool is stripped server-side and upstream 400s,
+    // which is not fallback-eligible). Skipped accounts are excluded for this
+    // request only — NOT locked — so they stay usable for chat.
+    let image_adapter = (route_kind == "images/generations")
+        .then(|| crate::core::media::image::get_image_adapter(provider))
+        .flatten();
+    let mut entitlement_skip = false;
+
     let mut last_auth_failure = None;
     for connection in &connections {
+        if let Some(adapter) = image_adapter {
+            if !adapter.can_use_credentials(connection) {
+                tracing::info!(
+                    "IMAGE skip connection {} provider={}: plan not entitled to image generation",
+                    connection.id,
+                    provider
+                );
+                entitlement_skip = true;
+                continue;
+            }
+        }
         let response = execute_media_provider_on_connection(
             state,
             request_body,
@@ -1631,7 +1690,18 @@ async fn execute_media_provider(
         last_auth_failure = Some(response);
     }
 
-    last_auth_failure.expect("the connection list was checked non-empty above")
+    if let Some(response) = last_auth_failure {
+        return response;
+    }
+    if entitlement_skip {
+        // Every candidate was plan-gated: upstream returns 403 with this
+        // message (imageGeneration.js:143-144, 132).
+        return media_error_response(
+            StatusCode::FORBIDDEN,
+            "No account entitled to image generation (ChatGPT Free plans are not supported)",
+        );
+    }
+    unreachable!("the connection list was checked non-empty above")
 }
 
 async fn execute_media_provider_on_connection(
@@ -2064,6 +2134,17 @@ fn is_embedding_endpoint(snapshot: &AppDb, provider: &str) -> bool {
         })
 }
 
+/// 9router `imageGeneration.js` NO_AUTH_PROVIDERS — providers that need no
+/// credential at all (`credentials: null` upstream).
+fn is_no_auth_image_provider(provider: &str) -> bool {
+    matches!(provider, "sdwebui" | "comfyui" | "veoaifree-web")
+}
+
+/// 9router `videoGeneration.js` NO_AUTH_VIDEO_PROVIDERS.
+fn is_no_auth_video_provider(provider: &str) -> bool {
+    provider == "veoaifree-web"
+}
+
 fn connection_has_credentials(connection: &crate::types::ProviderConnection) -> bool {
     connection
         .api_key
@@ -2409,9 +2490,15 @@ async fn try_provider_adapter(
         "images/generations" => {
             // Executor-driven providers first (9router `imageProviders/*`
             // with `useExecutor: true` → `executor.generateMedia`).
-            if let Some(result) =
-                try_executor_driven_image(state, connection, provider, model, request_body, proxy.as_ref())
-                    .await
+            if let Some(result) = try_executor_driven_image(
+                state,
+                connection,
+                provider,
+                model,
+                request_body,
+                proxy.as_ref(),
+            )
+            .await
             {
                 return Some(result);
             }
@@ -2508,16 +2595,16 @@ async fn try_executor_driven_image(
                 .await
                 .map(|v| {
                     v.into_iter()
-                        .map(|a| {
-                            json!({ "b64_json": a.b64, "mime_type": a.mime })
-                        })
+                        .map(|a| json!({ "b64_json": a.b64, "mime_type": a.mime }))
                         .collect::<Vec<_>>()
                 })
                 .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
         }
         "uc-web" => {
             let executor = crate::core::executor::UcWebExecutor::new(state.client_pool.clone());
-            let duration = request_body.get("seconds").and_then(Value::as_f64)
+            let duration = request_body
+                .get("seconds")
+                .and_then(Value::as_f64)
                 .or_else(|| request_body.get("duration").and_then(Value::as_f64));
             let resolution = request_body.get("resolution").and_then(Value::as_str);
             let images: Vec<String> = request_body
@@ -2559,9 +2646,7 @@ async fn try_executor_driven_image(
                     Ok(result
                         .assets
                         .into_iter()
-                        .map(|a| {
-                            json!({ "b64_json": a.b64, "mime_type": a.mime })
-                        })
+                        .map(|a| json!({ "b64_json": a.b64, "mime_type": a.mime }))
                         .collect())
                 }
                 Err(e) => Err((e.status, e.to_string())),
@@ -2784,23 +2869,34 @@ async fn executor_driven_video(
 
     // Each executor returns (asset, explicit_status, rotated_api_key).
     let outcome: Result<
-        (crate::core::executor::UcMediaAsset, Option<u16>, Option<String>),
+        (
+            crate::core::executor::UcMediaAsset,
+            Option<u16>,
+            Option<String>,
+        ),
         (u16, String),
     > = match provider {
         "grok-web" => {
-            let executor =
-                crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
+            let executor = crate::core::executor::GrokWebExecutor::new(state.client_pool.clone());
             executor
-                .generate_media(prompt.trim(), "video", size, duration, 1, connection, proxy.as_ref())
+                .generate_media(
+                    prompt.trim(),
+                    "video",
+                    size,
+                    duration,
+                    1,
+                    connection,
+                    proxy.as_ref(),
+                )
                 .await
                 .map(|mut v| {
-                    let asset = v
-                        .drain(..)
-                        .next()
-                        .unwrap_or(crate::core::executor::GrokMediaAsset {
-                            b64: String::new(),
-                            mime: String::new(),
-                        });
+                    let asset =
+                        v.drain(..)
+                            .next()
+                            .unwrap_or(crate::core::executor::GrokMediaAsset {
+                                b64: String::new(),
+                                mime: String::new(),
+                            });
                     (
                         crate::core::executor::UcMediaAsset {
                             b64: asset.b64,
@@ -2814,8 +2910,7 @@ async fn executor_driven_video(
                 .map_err(|e| (executor_media_status(&e.to_string()), e.to_string()))
         }
         "uc-web" => {
-            let executor =
-                crate::core::executor::UcWebExecutor::new(state.client_pool.clone());
+            let executor = crate::core::executor::UcWebExecutor::new(state.client_pool.clone());
             executor
                 .generate_media(
                     prompt.trim(),
@@ -2858,13 +2953,14 @@ async fn executor_driven_video(
                 )
                 .await
                 .map(|mut v| {
-                    let asset = v.drain(..).next().unwrap_or(
-                        crate::core::executor::UcMediaAsset {
+                    let asset = v
+                        .drain(..)
+                        .next()
+                        .unwrap_or(crate::core::executor::UcMediaAsset {
                             b64: String::new(),
                             mime: String::new(),
                             url: None,
-                        },
-                    );
+                        });
                     (asset, None, None)
                 })
                 .map_err(|e| (e.status, e.to_string()))
@@ -3126,6 +3222,29 @@ async fn video_create_handler(
 
     let connections = video_candidate_connections(&state, &provider, &headers, model.as_deref());
     if connections.is_empty() {
+        // 9router videoGeneration.js NO_AUTH_VIDEO_PROVIDERS — `credentials:
+        // null` for the free web tier. veoaifree-web's executor ignores
+        // credentials entirely, so a synthesized public connection is enough.
+        if is_no_auth_video_provider(&canonical_provider)
+            && matches!(action, "generations" | "edits")
+        {
+            let creds = crate::types::ProviderConnection {
+                id: "noauth".to_string(),
+                provider: canonical_provider.clone(),
+                auth_type: "none".to_string(),
+                name: Some("Public".to_string()),
+                is_active: Some(true),
+                access_token: Some("public".to_string()),
+                ..Default::default()
+            };
+            return match executor_driven_video(&state, &creds, &body).await {
+                Ok(mut resp) => {
+                    with_connection_header(&mut resp, &creds.id);
+                    resp
+                }
+                Err(resp) => resp,
+            };
+        }
         return video_unavailable_or_missing(&state, &provider, None, None);
     }
 
@@ -3139,8 +3258,10 @@ async fn video_create_handler(
         // executorDriven` flag routes generations/edits through
         // `executor.generateMedia({kind:"video"})`, which returns the mp4
         // synchronously as base64 — no async job, no polling.
-        if matches!(canonical_provider.as_str(), "grok-web" | "uc-web" | "veoaifree-web")
-            && matches!(action, "generations" | "edits")
+        if matches!(
+            canonical_provider.as_str(),
+            "grok-web" | "uc-web" | "veoaifree-web"
+        ) && matches!(action, "generations" | "edits")
         {
             match executor_driven_video(&state, connection, &body).await {
                 Ok(mut resp) => {
@@ -5075,7 +5196,7 @@ mod tests {
 
 #[cfg(test)]
 mod combo_media_tests {
-    use super::combo_expands;
+    use super::{combo_expands, is_no_auth_image_provider, is_no_auth_video_provider};
 
     /// THE REGRESSION. `audio/speech` and `images/generations` fell through to
     /// the shared `ModelRouteKind::Combo` rejection, so a combo over TTS or
@@ -5107,6 +5228,25 @@ mod combo_media_tests {
         ] {
             assert!(!combo_expands(route), "{route} must not expand combos");
         }
+    }
+
+    /// 9router `imageGeneration.js` NO_AUTH_PROVIDERS /
+    /// `videoGeneration.js` NO_AUTH_VIDEO_PROVIDERS — the exact sets that
+    /// bypass credential resolution (`credentials: null`).
+    #[test]
+    fn no_auth_media_provider_sets_match_upstream() {
+        for provider in ["sdwebui", "comfyui", "veoaifree-web"] {
+            assert!(is_no_auth_image_provider(provider), "{provider}");
+        }
+        assert!(!is_no_auth_image_provider("grok-web"));
+        assert!(!is_no_auth_image_provider("uc-web"));
+        assert!(!is_no_auth_image_provider("openai"));
+
+        assert!(is_no_auth_video_provider("veoaifree-web"));
+        assert!(!is_no_auth_video_provider("sdwebui"));
+        assert!(!is_no_auth_video_provider("comfyui"));
+        assert!(!is_no_auth_video_provider("grok-web"));
+        assert!(!is_no_auth_video_provider("uc-web"));
     }
 }
 

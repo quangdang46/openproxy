@@ -46,8 +46,11 @@ const CODEX_TOOL_IMAGE_MODELS: &[&str] = &[
 pub struct CodexAdapter;
 pub static ADAPTER: CodexAdapter = CodexAdapter;
 
-fn decode_account_id(id_token: &str) -> Option<String> {
-    let parts: Vec<&str> = id_token.split('.').collect();
+/// Decode a JWT's payload segment without verifying the signature — the same
+/// thing upstream `decodeOpenAIAuthClaims` does (claims are informational, the
+/// bearer token itself is the credential). Returns the parsed payload object.
+fn decode_jwt_payload(token: &str) -> Option<Value> {
+    let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
@@ -57,11 +60,44 @@ fn decode_account_id(id_token: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(padded)
         .ok()?;
-    let payload: Value = serde_json::from_slice(&bytes).ok()?;
-    payload
-        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// `decodeOpenAIAuthClaims` — the `https://api.openai.com/auth` claim object
+/// carried by ChatGPT OAuth access/id tokens.
+fn decode_openai_auth_claims(token: &str) -> Option<Value> {
+    decode_jwt_payload(token)?
+        .get("https://api.openai.com/auth")
+        .cloned()
+}
+
+fn decode_account_id(id_token: &str) -> Option<String> {
+    decode_openai_auth_claims(id_token)?
+        .get("chatgpt_account_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// `resolveChatgptPlanType` (imageProviders/codex.js): token claims first —
+/// the stored `chatgptPlanType` is only written at OAuth/import time and goes
+/// stale on plan changes — then `providerSpecificData.chatgptPlanType`.
+fn resolve_chatgpt_plan_type(creds: &crate::types::ProviderConnection) -> Option<String> {
+    let from_claims = |token: Option<&String>| {
+        token
+            .map(|t| t.as_str())
+            .and_then(|t| decode_openai_auth_claims(t))
+            .and_then(|auth| auth.get("chatgpt_plan_type").cloned())
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+    from_claims(creds.access_token.as_ref())
+        .or_else(|| from_claims(creds.id_token.as_ref()))
+        .or_else(|| {
+            creds
+                .provider_specific_data
+                .get("chatgptPlanType")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 fn strip_image_suffix(model: &str) -> &str {
@@ -125,9 +161,7 @@ fn should_use_native_generation(model: &str, body: &Value) -> bool {
     if codex_tool_image_model(model).is_none() || has_image_refs(body) {
         return false;
     }
-    if body.get("n").and_then(Value::as_u64) != Some(1)
-        && body.get("n").is_some()
-    {
+    if body.get("n").and_then(Value::as_u64) != Some(1) && body.get("n").is_some() {
         return false;
     }
     if body
@@ -198,11 +232,49 @@ fn build_content(prompt: &str, refs: &[String], detail: &str) -> Value {
     Value::Array(content)
 }
 
-/// Drain a Codex SSE stream and return the final base64 image (if any).
-async fn parse_codex_stream(response: reqwest::Response) -> Result<Option<String>, String> {
+/// Outcome of draining a Codex Responses SSE stream.
+#[derive(Debug)]
+struct CodexStreamOutcome {
+    image_b64: Option<String>,
+    /// Actionable upstream failure extracted from the stream (response.failed,
+    /// a failed image_generation_call item, or a text-only completion).
+    upstream_error: Option<String>,
+}
+
+/// `extractStreamError` (imageProviders/codex.js) — pull an error message out
+/// of whatever shape the failing SSE payload took.
+fn extract_stream_error(data: &Value) -> Option<String> {
+    if let Some(s) = data.as_str() {
+        return Some(s.to_string());
+    }
+    for pointer in [
+        "/error/message",
+        "/response/error/message",
+        "/item/error/message",
+        "/response/status_details/error/message",
+    ] {
+        if let Some(msg) = data.pointer(pointer).and_then(Value::as_str) {
+            return Some(msg.to_string());
+        }
+    }
+    if let Some(s) = data.get("error").and_then(Value::as_str) {
+        return Some(s.to_string());
+    }
+    data.get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Drain a Codex SSE stream and return the final base64 image plus any
+/// upstream error the stream reported. `Err` is reserved for hard stream
+/// failures (`error` / `response.failed` events, transport errors) — the same
+/// events upstream `parseStream` throws on.
+async fn parse_codex_stream(response: reqwest::Response) -> Result<CodexStreamOutcome, String> {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::<u8>::new();
     let mut image_b64: Option<String> = None;
+    let mut upstream_error: Option<String> = None;
+    let mut assistant_text = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("codex stream: {e}"))?;
@@ -224,13 +296,93 @@ async fn parse_codex_stream(response: reqwest::Response) -> Result<Option<String
             let Some(event) = event_name else {
                 continue;
             };
-            if event == "response.output_item.done" && !data.is_empty() {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
-                    if let Some(item) = parsed.get("item") {
-                        if item.get("type").and_then(|v| v.as_str())
-                            == Some("image_generation_call")
+            if data.is_empty() {
+                continue;
+            }
+            let parsed_data: Option<Value> = serde_json::from_str(&data).ok();
+
+            // Upstream throws on these events; the message (and any
+            // code/type/param upstream attached) becomes the request error.
+            if event == "error" || event == "response.failed" {
+                let error = parsed_data.as_ref().and_then(|d| {
+                    d.get("error")
+                        .cloned()
+                        .or_else(|| d.get("response").and_then(|r| r.get("error")).cloned())
+                        .or_else(|| Some(d.clone()))
+                });
+                let message = error
+                    .as_ref()
+                    .and_then(|e| e.get("message").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Codex upstream failed ({event})"));
+                return Err(message);
+            }
+
+            if event == "response.output_text.delta" {
+                if let Some(delta) = parsed_data
+                    .as_ref()
+                    .and_then(|d| d.get("delta"))
+                    .and_then(Value::as_str)
+                {
+                    assistant_text.push_str(delta);
+                }
+            }
+
+            if event == "response.output_item.done" {
+                if let Some(item) = parsed_data.as_ref().and_then(|d| d.get("item")) {
+                    match item.get("type").and_then(Value::as_str) {
+                        Some("image_generation_call") => {
+                            if let Some(result) = item.get("result").and_then(Value::as_str) {
+                                image_b64 = Some(result.to_string());
+                            } else if upstream_error.is_none() {
+                                upstream_error = extract_stream_error(item);
+                            }
+                        }
+                        Some("message") => {
+                            // A completed assistant message is the model
+                            // answering in text instead of calling the tool —
+                            // keep its text so the caller can report it.
+                            let text = item
+                                .get("content")
+                                .and_then(Value::as_array)
+                                .map(|parts| {
+                                    parts
+                                        .iter()
+                                        .filter_map(|part| {
+                                            if part.is_string() {
+                                                part.as_str()
+                                            } else {
+                                                part.get("text")
+                                                    .or_else(|| part.get("output_text"))
+                                                    .and_then(Value::as_str)
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .filter(|t| !t.is_empty());
+                            if let Some(text) = text {
+                                assistant_text = text;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // response.completed / response.done carry the final output items
+            // (and usage upstream meters — the Rust pipeline has no image
+            // usage hook, so only the image payload is recovered here).
+            if (event == "response.completed" || event == "response.done") && image_b64.is_none() {
+                if let Some(items) = parsed_data
+                    .as_ref()
+                    .and_then(|d| d.pointer("/response/output").or_else(|| d.get("output")))
+                    .and_then(Value::as_array)
+                {
+                    for item in items {
+                        if item.get("type").and_then(Value::as_str) == Some("image_generation_call")
                         {
-                            if let Some(result) = item.get("result").and_then(|v| v.as_str()) {
+                            if let Some(result) = item.get("result").and_then(Value::as_str) {
                                 image_b64 = Some(result.to_string());
                             }
                         }
@@ -240,8 +392,23 @@ async fn parse_codex_stream(response: reqwest::Response) -> Result<Option<String
         }
     }
 
-    Ok(image_b64)
+    if image_b64.is_none() && upstream_error.is_none() && !assistant_text.is_empty() {
+        let trimmed: String = assistant_text.trim().chars().take(300).collect();
+        upstream_error = Some(format!(
+            "Codex returned text instead of an image: \"{trimmed}\""
+        ));
+    }
+
+    Ok(CodexStreamOutcome {
+        image_b64,
+        upstream_error,
+    })
 }
+
+/// Generic fallback when the stream ends with no image and no actionable
+/// upstream error (upstream `parseResponse` non-stream branch).
+const CODEX_NO_IMAGE_ERROR: &str =
+    "Codex completed without an image. No upstream image result was provided.";
 
 fn find_blank_line(buf: &[u8]) -> Option<usize> {
     let mut i = 0;
@@ -260,14 +427,14 @@ fn find_blank_line(buf: &[u8]) -> Option<usize> {
 async fn build_sse_response(
     response: reqwest::Response,
 ) -> Result<axum::response::Response, String> {
-    let b64 = tokio::time::timeout(Duration::from_secs(30), parse_codex_stream(response))
+    let outcome = tokio::time::timeout(Duration::from_secs(30), parse_codex_stream(response))
         .await
         .map_err(|_| "codex stream parsing timed out after 30s".to_string())??;
-    let body = match b64 {
+    let body = match outcome.image_b64 {
         Some(b) => json!({"created": now_secs(), "data": [{"b64_json": b}]}),
         None => json!({
             "error": {
-                "message": "Codex did not return an image. Account may not be entitled (Plus/Pro required)."
+                "message": outcome.upstream_error.unwrap_or_else(|| CODEX_NO_IMAGE_ERROR.to_string())
             }
         }),
     };
@@ -290,11 +457,7 @@ impl ImageAdapter for CodexAdapter {
         Ok(CODEX_RESPONSES_URL.to_string())
     }
 
-    fn build_headers(
-        &self,
-        request: &ImageRequest<'_>,
-        body: &Value,
-    ) -> Result<HeaderMap, String> {
+    fn build_headers(&self, request: &ImageRequest<'_>, body: &Value) -> Result<HeaderMap, String> {
         let access_token = request.credentials.access_token.as_deref().unwrap_or("");
         let account_id = request
             .credentials
@@ -454,16 +617,15 @@ impl ImageAdapter for CodexAdapter {
             let resp = build_sse_response(response).await?;
             return Ok(ImageResponse::Sse(resp));
         }
-        let b64 = parse_codex_stream(response).await?;
-        match b64 {
+        let outcome = parse_codex_stream(response).await?;
+        match outcome.image_b64 {
             Some(b) => Ok(ImageResponse::Json(json!({
                 "created": now_secs(),
                 "data": [{"b64_json": b}],
             }))),
-            None => Err(
-                "Codex did not return an image. Account may not be entitled (Plus/Pro required)."
-                    .to_string(),
-            ),
+            None => Err(outcome
+                .upstream_error
+                .unwrap_or_else(|| CODEX_NO_IMAGE_ERROR.to_string())),
         }
     }
 
@@ -471,6 +633,14 @@ impl ImageAdapter for CodexAdapter {
         let bytes = b"";
         let _placeholder = base64::engine::general_purpose::STANDARD.encode(bytes);
         body.clone()
+    }
+
+    /// 9router `canUseCredentials`: ChatGPT Free accounts get the
+    /// `image_generation` tool stripped server-side (upstream 400 "Tool choice
+    /// 'image_generation' must be specified with 'tools' parameter"). Unknown
+    /// plan is allowed so accounts without plan claims keep working.
+    fn can_use_credentials(&self, creds: &crate::types::ProviderConnection) -> bool {
+        resolve_chatgpt_plan_type(creds).as_deref() != Some("free")
     }
 }
 
@@ -611,7 +781,13 @@ mod tests {
         let with_refs = json!({"prompt": "edit", "images": ["aGVsbG8="]});
         assert!(!should_use_native_generation("gpt-image-2", &with_refs));
         // Output controls native would drop force Responses.
-        for key in ["size", "output_format", "background", "quality", "output_compression"] {
+        for key in [
+            "size",
+            "output_format",
+            "background",
+            "quality",
+            "output_compression",
+        ] {
             let mut b = plain.clone();
             b[key] = json!("explicit");
             assert!(
@@ -670,5 +846,155 @@ mod tests {
         assert_eq!(out["model"], "gpt-6-sol");
         assert_eq!(out["tools"][0]["model"], "gpt-image-2.6-flare");
         assert_eq!(out["tools"][0]["action"], "edit");
+    }
+
+    // --- openproxy-v5116-sync-mozz.18: plan gate + upstream error surfacing ---
+
+    /// Unsigned JWT good enough for `decode_jwt_payload` (claims only).
+    fn fake_jwt(payload: &Value) -> String {
+        use base64::Engine as _;
+        let enc = |v: &Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
+        };
+        format!(
+            "{}.{}.sig",
+            enc(&json!({"alg": "none", "typ": "JWT"})),
+            enc(payload)
+        )
+    }
+
+    fn creds_with_plan(
+        access: Option<&str>,
+        id: Option<&str>,
+        psd: Option<&str>,
+    ) -> crate::types::ProviderConnection {
+        let mut c = crate::types::ProviderConnection::default();
+        c.access_token = access.map(str::to_string);
+        c.id_token = id.map(str::to_string);
+        if let Some(plan) = psd {
+            c.provider_specific_data
+                .insert("chatgptPlanType".to_string(), json!(plan));
+        }
+        c
+    }
+
+    #[test]
+    fn can_use_credentials_rejects_chatgpt_free() {
+        // Free plan in the access-token claims → rejected.
+        let free = fake_jwt(&json!({
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "free"}
+        }));
+        assert!(!ADAPTER.can_use_credentials(&creds_with_plan(Some(&free), None, None)));
+
+        // Paid plan → allowed.
+        let plus = fake_jwt(&json!({
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}
+        }));
+        assert!(ADAPTER.can_use_credentials(&creds_with_plan(Some(&plus), None, None)));
+
+        // Claims win over the (possibly stale) stored plan type.
+        assert!(ADAPTER.can_use_credentials(&creds_with_plan(Some(&plus), None, Some("free"))));
+
+        // Access token without the claim falls through to the id token.
+        let no_claim = fake_jwt(&json!({"sub": "u1"}));
+        let free_id = fake_jwt(&json!({
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "free"}
+        }));
+        assert!(!ADAPTER.can_use_credentials(&creds_with_plan(
+            Some(&no_claim),
+            Some(&free_id),
+            None
+        )));
+
+        // No claims at all → stored providerSpecificData decides.
+        assert!(!ADAPTER.can_use_credentials(&creds_with_plan(
+            Some(&no_claim),
+            None,
+            Some("free")
+        )));
+        assert!(ADAPTER.can_use_credentials(&creds_with_plan(Some(&no_claim), None, Some("pro"))));
+
+        // Unknown plan is allowed (upstream `!== "free"`).
+        assert!(ADAPTER.can_use_credentials(&creds_with_plan(None, None, None)));
+        assert!(ADAPTER.can_use_credentials(&crate::types::ProviderConnection::default()));
+    }
+
+    async fn sse_response(server_body: &str) -> reqwest::Response {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(server_body.to_string()),
+            )
+            .mount(&server)
+            .await;
+        reqwest::Client::new()
+            .get(format!("{}/stream", server.uri()))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_response_failed_error() {
+        let body = concat!(
+            "event: response.image_generation_call.generating\n",
+            "data: {\"item\":{\"type\":\"image_generation_call\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.failed\n",
+            "data: {\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"Complexity 'medium' is not supported for this image model.\"}}}\n\n",
+        );
+        let outcome = parse_codex_stream(sse_response(body).await).await;
+        let err = outcome.expect_err("response.failed must surface as Err");
+        assert!(
+            err.contains("Complexity 'medium' is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_failed_image_call_item_error() {
+        let body = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"image_generation_call\",\"error\":{\"message\":\"image tool quota exhausted\"}}}\n\n",
+        );
+        let outcome = parse_codex_stream(sse_response(body).await).await.unwrap();
+        assert!(outcome.image_b64.is_none());
+        assert_eq!(
+            outcome.upstream_error.as_deref(),
+            Some("image tool quota exhausted")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_reports_text_only_completion() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"I cannot generate images\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"I cannot generate images\"}]}}\n\n",
+        );
+        let outcome = parse_codex_stream(sse_response(body).await).await.unwrap();
+        assert!(outcome.image_b64.is_none());
+        let err = outcome.upstream_error.expect("text-only must error");
+        assert!(
+            err.starts_with("Codex returned text instead of an image:"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("I cannot generate images"));
+    }
+
+    #[tokio::test]
+    async fn stream_still_extracts_image_result() {
+        let body = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"item\":{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\"}}\n\n",
+        );
+        let outcome = parse_codex_stream(sse_response(body).await).await.unwrap();
+        assert_eq!(outcome.image_b64.as_deref(), Some("aGVsbG8="));
+        assert!(outcome.upstream_error.is_none());
     }
 }

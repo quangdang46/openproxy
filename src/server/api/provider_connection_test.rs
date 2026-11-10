@@ -868,15 +868,13 @@ async fn test_api_key_connection(
         "deepseek-web" | "ds-web" => {
             test_deepseek_web_connection(state, connection, effective_proxy).await
         }
-        "uc-web" | "uc" => {
-            test_uc_web_connection(state, connection, effective_proxy).await
-        }
+        "uc-web" | "uc" => test_uc_web_connection(state, connection, effective_proxy).await,
         "opencode-go" => {
             openai_chat_status_test(
                 state,
                 connection,
                 effective_proxy,
-                "https://opencode.ai/zen/go/v1/chat/completions",
+                "https://opencode.ai/inference/go/openai/v1/chat/completions",
                 "deepseek-v4-flash",
                 "Invalid API key",
             )
@@ -1365,8 +1363,7 @@ async fn test_uc_web_connection(
     if sid.is_none() {
         let list_req = PreparedRequest {
             method: Method::GET,
-            url: "https://clerk.uncensored.com/v1/client?_clerk_js_version=5.127.1"
-                .to_string(),
+            url: "https://clerk.uncensored.com/v1/client?_clerk_js_version=5.127.1".to_string(),
             headers: vec![
                 ("Cookie".to_string(), cookie_header.clone()),
                 ("Accept".to_string(), "application/json".to_string()),
@@ -1394,9 +1391,7 @@ async fn test_uc_web_connection(
                         let sessions = payload.get("sessions").and_then(Value::as_array);
                         sid = sessions.and_then(|list| {
                             list.iter()
-                                .find(|s| {
-                                    s.get("status").and_then(Value::as_str) == Some("active")
-                                })
+                                .find(|s| s.get("status").and_then(Value::as_str) == Some("active"))
                                 .or_else(|| list.first())
                                 .and_then(|s| s.get("id"))
                                 .and_then(Value::as_str)

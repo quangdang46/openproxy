@@ -116,6 +116,22 @@ test("matchesSearch: regex negative assertion tests full text only", () => {
   assert.equal(matchesSearch(m, "/(?!xyz)abc/"), true);
 });
 
+test("matchesSearch: reused regex resets lastIndex between targets (v0.5.109 #5853a88)", () => {
+  for (const flags of ["g", "y", "gy"]) {
+    const query = parseSearchQuery(`/(?<!sonnet)claude/${flags}`);
+    assert.equal(matchesSearch("claude-opus", query), true);
+    assert.equal(matchesSearch("claude-sonnet", query), true);
+    assert.equal(matchesSearch("claude-haiku", query), true);
+  }
+});
+
+test("matchesSearch: preserves case-sensitive and sticky matching semantics", () => {
+  const query = parseSearchQuery("/claude/y");
+  assert.equal(matchesSearch("Claude-opus", query), false);
+  assert.equal(matchesSearch("anthropic/claude-opus", query), false);
+  assert.equal(matchesSearch("claude-opus", query), true);
+});
+
 test("matchesSearch: string[] target", () => {
   assert.equal(matchesSearch(["alpha", "beta"], "beta"), true);
   assert.equal(matchesSearch(["alpha", "beta"], "gamma"), false);
@@ -144,3 +160,19 @@ test("filterModelsByQuery: filters array, preserves empty-query identity", () =>
   assert.deepEqual(filterModelsByQuery([], "x"), []);
   assert.deepEqual(filterModelsByQuery(null, "x"), []);
 });
+
+for (const [rawQuery, names] of [
+  ["/(?<!sonnet)claude/g", ["claude-opus", "claude-sonnet", "claude-haiku", "claude-4.5"]],
+  ["/^(?!.*haiku).*claude/g", ["claude-opus", "claude-sonnet", "claude-4.5"]],
+] as const) {
+  test(`filterModelsByQuery: keeps global assertion search ${rawQuery} independent of item order and previous filters`, () => {
+    const models = ["claude-opus", "claude-sonnet", "claude-haiku", "claude-4.5"]
+      .map((name) => ({ name, id: `anthropic/${name}` }));
+    const expected = models.filter((m) => (names as readonly string[]).includes(m.name));
+    const query = parseSearchQuery(rawQuery);
+
+    assert.deepEqual(filterModelsByQuery(models, query), expected);
+    assert.deepEqual(filterModelsByQuery(models, query), expected);
+    assert.deepEqual(filterModelsByQuery([...models].reverse(), query), [...expected].reverse());
+  });
+}
