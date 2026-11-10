@@ -179,8 +179,10 @@ fn normalize_win32_lexical(input: &str) -> String {
         }
     }
     let mut out = prefix;
-    for (i, seg) in parts.iter().enumerate() {
-        if i > 0 {
+    for seg in &parts {
+        // Separate from the prefix too: a drive prefix ("C:") does not end
+        // in a separator, while a UNC prefix ("\\") already does.
+        if !out.is_empty() && !out.ends_with('\\') {
             out.push('\\');
         }
         out.push_str(seg);
@@ -705,21 +707,23 @@ mod tests {
         let a = encode_frame(&json!({"n": 1})).unwrap();
         let b = encode_frame(&json!({"n": 2})).unwrap();
         let mut decoder = FrameDecoder::default();
-        // Feed byte-by-byte: nothing decodes until a full frame arrives.
-        for i in 0..a.len() {
+        // Feed byte-by-byte: nothing decodes until a full frame arrives —
+        // the decoder emits as soon as the last byte lands, so every push
+        // except the final one must yield zero frames.
+        for i in 0..a.len() - 1 {
             let frames = decoder.push(&a[i..i + 1]).unwrap();
             assert!(frames.is_empty());
         }
-        // Now the buffered frame should have been emitted on the last byte —
-        // re-check by pushing an empty chunk is not possible; instead push
-        // the second frame and expect both? The decoder emits as soon as a
-        // complete frame is buffered, so the last push returned it. Verify
-        // with a combined buffer instead.
-        let mut decoder = FrameDecoder::default();
-        let mut all = a.clone();
-        all.extend_from_slice(&b);
-        let frames = decoder.push(&all).unwrap();
-        assert_eq!(frames.len(), 2);
+        let frames = decoder.push(&a[a.len() - 1..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["n"], 1);
+        // A second frame split across two pushes decodes on completion.
+        let half = b.len() / 2;
+        let frames = decoder.push(&b[..half]).unwrap();
+        assert!(frames.is_empty());
+        let frames = decoder.push(&b[half..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["n"], 2);
     }
 
     #[test]

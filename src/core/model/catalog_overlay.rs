@@ -1020,14 +1020,23 @@ mod tests {
         drop(f);
         let baseline3 = collect_hand_baseline();
         let (models2, providers2) = build_delta(&catalog, &baseline3);
+        // HashMap iteration order is randomized per map — compare sorted key
+        // sets, not raw `keys()` order (upstream relies on JS insertion order,
+        // which has no Rust equivalent here).
+        let mut models_keys1: Vec<_> = models1.keys().collect();
+        models_keys1.sort();
+        let mut models_keys2: Vec<_> = models2.keys().collect();
+        models_keys2.sort();
         assert_eq!(
-            models1.keys().collect::<Vec<_>>(),
-            models2.keys().collect::<Vec<_>>(),
+            models_keys1, models_keys2,
             "modality delta shrank on second run"
         );
+        let mut providers_keys1: Vec<_> = providers1.keys().collect();
+        providers_keys1.sort();
+        let mut providers_keys2: Vec<_> = providers2.keys().collect();
+        providers_keys2.sort();
         assert_eq!(
-            providers1.keys().collect::<Vec<_>>(),
-            providers2.keys().collect::<Vec<_>>(),
+            providers_keys1, providers_keys2,
             "limits delta shrank on second run"
         );
         let _ = std::fs::remove_dir_all(&dir);

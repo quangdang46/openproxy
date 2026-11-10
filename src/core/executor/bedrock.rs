@@ -206,12 +206,14 @@ pub struct ResolvedAwsCredentials {
 /// `resolveRegion` — psd.region → AWS_REGION → AWS_DEFAULT_REGION → default.
 /// The value lands in the hostname, so it is validated, never trusted.
 pub fn resolve_region(credentials: &ProviderConnection) -> Result<String, BedrockExecutorError> {
+    // An explicitly-set region is taken verbatim (after trim): "" or
+    // whitespace-only is a config error, not "unset" — silently falling back
+    // to the env/default would hide the typo and route to the wrong partition.
     let psd_region = credentials
         .provider_specific_data
         .get("region")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+        .map(str::trim);
     let env_region = ["AWS_REGION", "AWS_DEFAULT_REGION"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
@@ -762,6 +764,11 @@ impl BedrockExecutor {
         if let Value::Object(map) = &mut rest {
             map.remove("model");
             map.remove("stream");
+            // `anthropic_version` is meaningless off the Anthropic wire and
+            // Bedrock schema validation can reject unknown fields, so a
+            // stray client-supplied value is dropped for BOTH wires; the
+            // Claude pin below re-adds the correct one.
+            map.remove("anthropic_version");
         }
         if matches!(self.wire_format, BedrockWireFormat::Claude) {
             if let Value::Object(map) = &mut rest {
